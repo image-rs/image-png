@@ -36,6 +36,7 @@ mod deflate;
 mod filter;
 mod traits;
 mod common;
+mod inflate;
 mod utils;
 
 pub use common::*;

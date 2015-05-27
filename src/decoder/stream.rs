@@ -8,6 +8,7 @@ use std::cmp::min;
 use std::convert::{From, AsRef};
 
 use deflate::{Inflater, Flush};
+//use inflate::{Inflater, Flush};
 
 use crc::Crc32;
 use traits::ReadBytesExt;
@@ -52,6 +53,7 @@ pub enum Decoded<'a> {
     /// The buffer is guaranteed not to span over
     /// line boundaries.
     ImageData(&'a [u8]),
+    PartialChunk(ChunkType, &'a [u8]),
     ImageEnd,
 }
 
@@ -268,7 +270,7 @@ impl StreamingDecoder {
             PartialChunk(type_str) => {
                 match type_str {
                     IDAT => {
-                        goto!(0, DecodeData(type_str, 0))
+                        goto!(0, DecodeData(type_str, 0), emit Decoded::PartialChunk(type_str, &self.current_chunk.2))
                     },
                     // Skip other chunks
                     _ => {

@@ -7,8 +7,9 @@ use std::io::{self, Read, Write};
 use std::cmp::min;
 use std::convert::{From, AsRef};
 
-use deflate::{Inflater, Flush};
-//use inflate::{Inflater, Flush};
+//use deflate::{Inflater, Flush};
+use inflate::{Inflater, Flush};
+//use inflate_zlib::{Inflater, Flush};
 
 use crc::Crc32;
 use traits::ReadBytesExt;
@@ -17,8 +18,8 @@ use chunk::{self, ChunkType, IHDR, IDAT, IEND};
 use utils;
 
 /// TODO check if these size are reasonable
-pub const CHUNCK_BUFFER_SIZE: usize = 10*1024;
-pub const IMAGE_BUFFER_SIZE: usize = 30*1024;
+pub const CHUNCK_BUFFER_SIZE: usize = 32*1024;
+pub const IMAGE_BUFFER_SIZE: usize = 32*1024;
 
 #[derive(Debug)]
 enum U32Value {
@@ -98,6 +99,19 @@ impl fmt::Display for DecodingError {
 impl From<io::Error> for DecodingError {
     fn from(err: io::Error) -> DecodingError {
         DecodingError::IoError(err)
+    }
+}
+
+impl From<DecodingError> for io::Error {
+    fn from(err: DecodingError) -> io::Error {
+        use std::error::Error;
+        match err {
+            DecodingError::IoError(err) => err,
+            err => io::Error::new(
+                io::ErrorKind::Other,
+                err.description()
+            )
+        }
     }
 }
 
@@ -340,7 +354,7 @@ impl StreamingDecoder {
                 self.row_remaining -= data.len();
                 if eof && n != chunk_len {
                     Err(DecodingError::CorruptFlateStream)
-                } else if n == chunk_len && (data.len() == 0 || remaining != 0) {
+                } else if n == chunk_len && data.len() == 0 && c == 0 {
                     goto!(
                         0,
                         ReadChunk(type_str, true),

@@ -434,7 +434,8 @@ impl<R: Read> Reader<R> {
             ));
             match val {
                 Some(Decoded::ImageData(data)) => {
-                    self.current.extend(data.iter().map(|&v| v));
+                    //self.current.extend(data.iter().map(|&v| v));
+                    self.current.push_all(data);
                     if self.current.len() == rowlen {
                         if let Some(filter) = FilterType::from_u8(self.current[0]) {
                             unfilter(filter, bpp, &self.prev[1..rowlen], &mut self.current[1..rowlen]);
@@ -499,5 +500,33 @@ fn decode_next<'a, R: Read>(
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    extern crate test;
+    
+    use std::fs::File;
+    use std::io::Read;
+    
+    use super::Decoder;
+    use HasParameters;
+    
+    #[bench]
+    fn bench_big(b: &mut test::Bencher) {
+        let mut data = Vec::new();
+        File::open("/Users/nwinter/Desktop/Ducati_side_shadow.png").unwrap().read_to_end(&mut data).unwrap();
+        let mut decoder = Decoder::new(&*data);
+        decoder.set(::TRANSFORM_IDENTITY);
+        let (info, mut decoder) = decoder.read_info().unwrap();
+        let mut image = vec![0; info.buffer_size()];
+        b.iter(|| {
+            let mut decoder = Decoder::new(&*data);
+            decoder.set(::TRANSFORM_IDENTITY);
+            let (_, mut decoder) = decoder.read_info().unwrap();
+            test::black_box(decoder.next_frame(&mut image));
+        });
+        b.bytes = info.buffer_size() as u64
     }
 }

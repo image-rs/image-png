@@ -1,4 +1,6 @@
-// Copyright 2014 The Servo Project Developers. See the COPYRIGHT
+#![feature(box_patterns)]
+#![feature(core)]
+// Copyright 2014-2015 The Servo Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution.
 //
 // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
@@ -6,116 +8,119 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-#![feature(box_patterns)]
-#![feature(core)]
 use std::iter::range_inclusive;
 use std::cmp;
 use std::slice;
-
+ 
 static BIT_REV_U8: [u8; 256] = [
     0b0000_0000, 0b1000_0000, 0b0100_0000, 0b1100_0000,
     0b0010_0000, 0b1010_0000, 0b0110_0000, 0b1110_0000,
     0b0001_0000, 0b1001_0000, 0b0101_0000, 0b1101_0000,
     0b0011_0000, 0b1011_0000, 0b0111_0000, 0b1111_0000,
-
+ 
     0b0000_1000, 0b1000_1000, 0b0100_1000, 0b1100_1000,
     0b0010_1000, 0b1010_1000, 0b0110_1000, 0b1110_1000,
     0b0001_1000, 0b1001_1000, 0b0101_1000, 0b1101_1000,
     0b0011_1000, 0b1011_1000, 0b0111_1000, 0b1111_1000,
-
+ 
     0b0000_0100, 0b1000_0100, 0b0100_0100, 0b1100_0100,
     0b0010_0100, 0b1010_0100, 0b0110_0100, 0b1110_0100,
     0b0001_0100, 0b1001_0100, 0b0101_0100, 0b1101_0100,
     0b0011_0100, 0b1011_0100, 0b0111_0100, 0b1111_0100,
-
+ 
     0b0000_1100, 0b1000_1100, 0b0100_1100, 0b1100_1100,
     0b0010_1100, 0b1010_1100, 0b0110_1100, 0b1110_1100,
     0b0001_1100, 0b1001_1100, 0b0101_1100, 0b1101_1100,
     0b0011_1100, 0b1011_1100, 0b0111_1100, 0b1111_1100,
-
-
+ 
+ 
     0b0000_0010, 0b1000_0010, 0b0100_0010, 0b1100_0010,
     0b0010_0010, 0b1010_0010, 0b0110_0010, 0b1110_0010,
     0b0001_0010, 0b1001_0010, 0b0101_0010, 0b1101_0010,
     0b0011_0010, 0b1011_0010, 0b0111_0010, 0b1111_0010,
-
+ 
     0b0000_1010, 0b1000_1010, 0b0100_1010, 0b1100_1010,
     0b0010_1010, 0b1010_1010, 0b0110_1010, 0b1110_1010,
     0b0001_1010, 0b1001_1010, 0b0101_1010, 0b1101_1010,
     0b0011_1010, 0b1011_1010, 0b0111_1010, 0b1111_1010,
-
+ 
     0b0000_0110, 0b1000_0110, 0b0100_0110, 0b1100_0110,
     0b0010_0110, 0b1010_0110, 0b0110_0110, 0b1110_0110,
     0b0001_0110, 0b1001_0110, 0b0101_0110, 0b1101_0110,
     0b0011_0110, 0b1011_0110, 0b0111_0110, 0b1111_0110,
-
+ 
     0b0000_1110, 0b1000_1110, 0b0100_1110, 0b1100_1110,
     0b0010_1110, 0b1010_1110, 0b0110_1110, 0b1110_1110,
     0b0001_1110, 0b1001_1110, 0b0101_1110, 0b1101_1110,
     0b0011_1110, 0b1011_1110, 0b0111_1110, 0b1111_1110,
-
-
+ 
+ 
     0b0000_0001, 0b1000_0001, 0b0100_0001, 0b1100_0001,
     0b0010_0001, 0b1010_0001, 0b0110_0001, 0b1110_0001,
     0b0001_0001, 0b1001_0001, 0b0101_0001, 0b1101_0001,
     0b0011_0001, 0b1011_0001, 0b0111_0001, 0b1111_0001,
-
+ 
     0b0000_1001, 0b1000_1001, 0b0100_1001, 0b1100_1001,
     0b0010_1001, 0b1010_1001, 0b0110_1001, 0b1110_1001,
     0b0001_1001, 0b1001_1001, 0b0101_1001, 0b1101_1001,
     0b0011_1001, 0b1011_1001, 0b0111_1001, 0b1111_1001,
-
+ 
     0b0000_0101, 0b1000_0101, 0b0100_0101, 0b1100_0101,
     0b0010_0101, 0b1010_0101, 0b0110_0101, 0b1110_0101,
     0b0001_0101, 0b1001_0101, 0b0101_0101, 0b1101_0101,
     0b0011_0101, 0b1011_0101, 0b0111_0101, 0b1111_0101,
-
+ 
     0b0000_1101, 0b1000_1101, 0b0100_1101, 0b1100_1101,
     0b0010_1101, 0b1010_1101, 0b0110_1101, 0b1110_1101,
     0b0001_1101, 0b1001_1101, 0b0101_1101, 0b1101_1101,
     0b0011_1101, 0b1011_1101, 0b0111_1101, 0b1111_1101,
-
-
+ 
+ 
     0b0000_0011, 0b1000_0011, 0b0100_0011, 0b1100_0011,
     0b0010_0011, 0b1010_0011, 0b0110_0011, 0b1110_0011,
     0b0001_0011, 0b1001_0011, 0b0101_0011, 0b1101_0011,
     0b0011_0011, 0b1011_0011, 0b0111_0011, 0b1111_0011,
-
+ 
     0b0000_1011, 0b1000_1011, 0b0100_1011, 0b1100_1011,
     0b0010_1011, 0b1010_1011, 0b0110_1011, 0b1110_1011,
     0b0001_1011, 0b1001_1011, 0b0101_1011, 0b1101_1011,
     0b0011_1011, 0b1011_1011, 0b0111_1011, 0b1111_1011,
-
+ 
     0b0000_0111, 0b1000_0111, 0b0100_0111, 0b1100_0111,
     0b0010_0111, 0b1010_0111, 0b0110_0111, 0b1110_0111,
     0b0001_0111, 0b1001_0111, 0b0101_0111, 0b1101_0111,
     0b0011_0111, 0b1011_0111, 0b0111_0111, 0b1111_0111,
-
+ 
     0b0000_1111, 0b1000_1111, 0b0100_1111, 0b1100_1111,
     0b0010_1111, 0b1010_1111, 0b0110_1111, 0b1110_1111,
     0b0001_1111, 0b1001_1111, 0b0101_1111, 0b1101_1111,
     0b0011_1111, 0b1011_1111, 0b0111_1111, 0b1111_1111
 ];
-
+ 
 #[derive(Clone, Copy)]
 struct BitState {
     n: u8,
     v: u32
 }
-
+ 
 struct BitStream<'a> {
     bytes: slice::Iter<'a, u8>,
     used: usize,
     state: BitState
 }
-
+ 
 // Use this instead of triggering a failure (that may unwind).
 fn abort() -> ! {
     unsafe {
         ::std::intrinsics::abort()
     }
 }
-
+ 
+#[cfg(debug)]
+macro_rules! debug { ($($x:tt)*) => (println!($($x)*)) }
+#[cfg(not(debug))]
+macro_rules! debug { ($($x:tt)*) => (()) }
+ 
 impl<'a> BitStream<'a> {
     fn new(bytes: &'a [u8], state: BitState) -> BitStream<'a> {
         BitStream {
@@ -124,7 +129,7 @@ impl<'a> BitStream<'a> {
             state: state
         }
     }
-
+ 
     fn use_byte(&mut self) -> bool {
         match self.bytes.next() {
             Some(&b) => {
@@ -136,7 +141,7 @@ impl<'a> BitStream<'a> {
             None => false
         }
     }
-
+ 
     fn need(&mut self, n: u8) -> bool {
         if self.state.n < n {
             if !self.use_byte() {
@@ -154,7 +159,7 @@ impl<'a> BitStream<'a> {
         }
         true
     }
-
+ 
     fn take16(&mut self, n: u8) -> Option<u16> {
         if self.need(n) {
             self.state.n -= n;
@@ -165,13 +170,13 @@ impl<'a> BitStream<'a> {
             None
         }
     }
-
+ 
     fn take(&mut self, n: u8) -> Option<u8> {
         assert!(n <= 8);
         self.take16(n).map(|v: u16| v as u8)
     }
 }
-
+ 
 macro_rules! with_codes (($clens:expr, $max_bits:expr => $code_ty:ty, $cb:expr) => ({
     // Count the number of codes for each bit length.
     let mut bl_count = [0 as $code_ty; ($max_bits+1)];
@@ -180,13 +185,13 @@ macro_rules! with_codes (($clens:expr, $max_bits:expr => $code_ty:ty, $cb:expr) 
             bl_count[bits as usize] += 1;
         }
     }
-
+ 
     // Compute the first code value for each bit length.
     let mut next_code = [0 as $code_ty; ($max_bits+1)];
     for bits in range_inclusive(1, $max_bits) {
         next_code[bits as usize] = (next_code[bits as usize - 1] + bl_count[bits as usize - 1]) << 1;
     }
-
+ 
     for (i, &bits) in $clens.iter().enumerate() {
         if bits != 0 {
             let code = next_code[bits as usize];
@@ -195,7 +200,7 @@ macro_rules! with_codes (($clens:expr, $max_bits:expr => $code_ty:ty, $cb:expr) 
         }
     }
 }));
-
+ 
 struct CodeLengthReader {
     patterns: Box<[u8; 128]>,
     clens: Box<[u8; 19]>,
@@ -203,7 +208,7 @@ struct CodeLengthReader {
     num_lit: u16,
     num_dist: u8
 }
-
+ 
 impl CodeLengthReader {
     fn new(clens: Box<[u8; 19]>, num_lit: u16, num_dist: u8) -> CodeLengthReader {
         // Fill in the 7-bit patterns that match each code.
@@ -214,7 +219,7 @@ impl CodeLengthReader {
                 patterns[(base | (rest << bits)) as usize] = i;
             }
         });
-
+ 
         CodeLengthReader {
             patterns: patterns,
             clens: clens,
@@ -223,12 +228,12 @@ impl CodeLengthReader {
             num_dist: num_dist
         }
     }
-
+ 
     fn read(&mut self, stream: &mut BitStream) -> bool {
         let total_len = self.num_lit as usize + self.num_dist as usize;
         while self.result.len() < total_len {
             if !stream.need(7) {
-                break;
+                return false;
             }
             let save = stream.state;
             macro_rules! take (($n:expr) => (match stream.take($n) {
@@ -259,7 +264,7 @@ impl CodeLengthReader {
         }
         true
     }
-
+ 
     fn to_lit_and_dist(self) -> (DynHuffman16, DynHuffman16) {
         let num_lit = self.num_lit as usize;
         let lit = DynHuffman16::new(&self.result[..num_lit]);
@@ -267,17 +272,17 @@ impl CodeLengthReader {
         (lit, dist)
     }
 }
-
+ 
 struct Trie8bit<T> {
     data: [T; 16],
     children: [Option<Box<[T; 16]>>; 16]
 }
-
+ 
 struct DynHuffman16 {
     patterns: Box<[u16; 256]>,
     rest: Vec<Trie8bit<u16>>
 }
-
+ 
 impl DynHuffman16 {
     fn new(clens: &[u8]) -> DynHuffman16 {
         // Fill in the 8-bit patterns that match each code.
@@ -289,7 +294,7 @@ impl DynHuffman16 {
             if bits <= 8 {
                 let base = BIT_REV_U8[(code << (8 - bits)) as usize];
                 for rest in 0u8 .. 1 << (8 - bits) {
-                    patterns[(base | (rest << bits)) as usize] = entry;
+                    patterns[(base | (rest << (bits & 7))) as usize] = entry;
                 }
             } else {
                 let low = BIT_REV_U8[(code >> (bits - 8)) as usize];
@@ -328,17 +333,22 @@ impl DynHuffman16 {
                 }
             }
         });
+        debug!("=== DYN HUFFMAN ===");
+        for _i in 0..256 {
+            debug!("{:08b} {:04x}", i, patterns[BIT_REV_U8[_i] as usize]);
+        }
+        debug!("===================");
         DynHuffman16 {
             patterns: patterns,
             rest: rest
         }
     }
-
+ 
     fn read(&self, stream: &mut BitStream) -> Option<(BitState, u16)> {
         let has8 = stream.need(8);
         let entry = self.patterns[(stream.state.v & 0xff) as usize];
         let bits = (entry >> 12) as u8;
-
+ 
         if !has8 {
             if bits <= stream.state.n {
                 let save = stream.state;
@@ -373,16 +383,17 @@ impl DynHuffman16 {
         }
     }
 }
-
+ 
 enum State {
     ZlibMethodAndFlags, // CMF
     ZlibFlags(/* CMF */ u8), // FLG,
     Bits(BitsNext, BitState),
     LenDist((BitsNext, BitState), /* len */ u16, /* dist */ u16),
+    Uncompressed(/* len */ u16),
     CheckCRC
 }
 use self::State::*;
-
+ 
 enum BitsNext {
     BlockHeader,
     BlockUncompressed,
@@ -395,14 +406,14 @@ enum BitsNext {
     BlockDyn(/* lit/len */ DynHuffman16, /* dist */ DynHuffman16)
 }
 use self::BitsNext::*;
-
+ 
 pub struct InflateStream {
     buffer: Vec<u8>,
     pos: u16,
     state: Option<State>,
     final_block: bool,
 }
-
+ 
 impl InflateStream {
     #[allow(dead_code)]
     pub fn new() -> InflateStream {
@@ -410,11 +421,11 @@ impl InflateStream {
         let buffer = Vec::with_capacity(32 * 1024);
         InflateStream::with_state_and_buffer(state, buffer)
     }
-
+ 
     pub fn from_zlib() -> InflateStream {
         InflateStream::with_state_and_buffer(ZlibMethodAndFlags, Vec::new())
     }
-
+ 
     fn with_state_and_buffer(state: State, buffer: Vec<u8>) -> InflateStream {
         InflateStream {
             buffer: buffer,
@@ -423,15 +434,15 @@ impl InflateStream {
             final_block: false
         }
     }
-
+ 
     fn run_len_dist(&mut self, len: u16, dist: u16) -> Option<u16> {
-        //debug!("DEFLATE -{}; {} (cap={} len={})", dist, len,
-        //       self.buffer.capacity(), self.buffer.len());
+        debug!("RLE -{}; {} (cap={} len={})", dist, len,
+               self.buffer.capacity(), self.buffer.len());
         let buffer_size = self.buffer.capacity() as u16;
         let len = if self.pos < dist {
             // Handle copying from ahead, until we hit the end reading.
             let pos_end = self.pos + len;
-            let (pos_end, left) = if pos_end <= dist {
+            let (pos_end, left) = if pos_end < dist {
                 (pos_end, 0)
             } else {
                 (dist, pos_end - dist)
@@ -443,7 +454,7 @@ impl InflateStream {
                 let buffer = self.buffer.as_mut_ptr();
                 let dst_end = buffer.offset(pos_end as isize);
                 let mut dst = buffer.offset(self.pos as isize);
-                let mut src = buffer.offset((self.pos + forward) as isize);
+                let mut src = dst.offset(forward as isize);
                 while dst < dst_end {
                     *dst = *src;
                     dst = dst.offset(1);
@@ -465,9 +476,9 @@ impl InflateStream {
         unsafe {
             // HACK(eddyb) avoid bound checks, LLVM can't optimize these.
             let buffer = self.buffer.as_mut_ptr();
-            let mut dst = buffer.offset(self.pos as isize);
-            let mut src = buffer.offset((self.pos - dist) as isize);
             let dst_end = buffer.offset(pos_end as isize);
+            let mut dst = buffer.offset(self.pos as isize);
+            let mut src = dst.offset(-(dist as isize));
             while dst < dst_end {
                 *dst = *src;
                 dst = dst.offset(1);
@@ -482,16 +493,16 @@ impl InflateStream {
         self.pos = pos_end;
         left
     }
-
+ 
     fn next_state(&mut self, data: &[u8]) -> Result<usize, String> {
         macro_rules! ok_bytes (($n:expr, $state:expr) => ({
             self.state = Some($state);
             Ok($n)
         }));
-        //let debug_byte = |i, b| debug!("[{:4}] {:02x}", i, b);
+        let debug_byte = |_i, _b| debug!("[{:04x}] {:02x}", _i, _b);
         macro_rules! push_or (($b:expr, $ret:expr) => (if self.pos < self.buffer.capacity() as u16 {
             let b = $b;
-            //debug_byte(self.pos, b);
+            debug_byte(self.pos, b);
             if (self.pos as usize) < self.buffer.len() {
                 self.buffer[self.pos as usize] = b;
             } else {
@@ -518,33 +529,34 @@ impl InflateStream {
             ZlibMethodAndFlags => {
                 let b = data[0];
                 let (method, info) = (b & 0xF, b >> 4);
-                // debug!("ZLIB CM=0x{:x} CINFO=0x{:x}", method, info);
+                debug!("ZLIB CM=0x{:x} CINFO=0x{:x}", method, info);
                 match method {
                     8 => {/* DEFLATE */}
                     _ => return Err(format!("unknown ZLIB method CM=0x{:x}", method))
                 }
-
+ 
                 if info > 7 {
                     return Err(format!("invalid ZLIB info CINFO=0x{:x}", info));
                 }
-
+ 
+                //self.buffer = Vec::with_capacity(1 << (8 + info));
                 self.buffer = Vec::with_capacity(1 << (8 + info));
-
+ 
                 ok_bytes!(1, ZlibFlags(b))
             }
             ZlibFlags(cmf) => {
                 let b = data[0];
                 let (_check, dict, _level) = (b & 0x1F, (b & 0x20) != 0, b >> 6);
-                // debug!("ZLIB FCHECK=0x{:x} FDICT={} FLEVEL=0x{:x}", check, dict, _level);
-
+                debug!("ZLIB FCHECK=0x{:x} FDICT={} FLEVEL=0x{:x}", _check, dict, _level);
+ 
                 if (((cmf as u16) << 8) | b as u16) % 31 != 0 {
                     return Err(format!("invalid ZLIB checksum CMF=0x{:x} FLG=0x{:x}", cmf, b));
                 }
-
+ 
                 if dict {
                     return Err("unimplemented ZLIB FDICT=1".into());
                 }
-
+ 
                 ok_bytes!(1, Bits(BlockHeader, BitState { n: 0, v: 0 }))
             }
             Bits(next, state) => {
@@ -583,13 +595,13 @@ impl InflateStream {
                     BlockHeader => {
                         let h = take!(3);
                         let (final_, block_type) = ((h & 1) != 0, (h >> 1) & 0b11);
-
+ 
                         if self.final_block {
                             return Err("DEFLATE data after the final block".into());
                         }
-
+ 
                         self.final_block = final_;
-
+ 
                         match block_type {
                             0 => {
                                 // Skip to the next byte for an uncompressed block.
@@ -597,7 +609,7 @@ impl InflateStream {
                                 ok!(BlockUncompressed)
                             }
                             1 => {
-                                /*let lit = DynHuffman16::new([
+                                /*let lit = DynHuffman16::new(&[
                                     8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, // 0-15
                                     8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, // 16-31
                                     8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, // 32-47
@@ -618,13 +630,14 @@ impl InflateStream {
                                     7, 7, 7, 7, 7, 7, 7, 7, // 272-279
                                     8, 8, 8, 8, 8, 8, 8, 8, // 280-287
                                 ]);
-                                let dist = DynHuffman16::new([
+                                let dist = DynHuffman16::new(&[
                                     5, 5, 5, 5, 5, 5, 5, 5,
                                     5, 5, 5, 5, 5, 5, 5, 5,
                                     5, 5, 5, 5, 5, 5, 5, 5,
                                     5, 5, 5, 5, 5, 5, 5, 5
                                 ]);
-                                ok!(BlockDyn(lit, dist))*/
+                                ok!(BlockDyn(lit, dist))
+                                */
                                 ok!(BlockFixed)
                             }
                             2 => ok!(BlockDynHlit),
@@ -634,7 +647,10 @@ impl InflateStream {
                     }
                     BlockUncompressed => {
                         let len = take16!(16);
-                        panic!("uncompressed len={}", len)
+                        let nlen = take16!(16);
+                        assert_eq!(stream.state.n, 0);
+                        assert_eq!(!len, nlen);
+                        ok_state!(Uncompressed(len))
                     }
                     BlockFixed => {
                         macro_rules! len_dist2 (($len:expr, $code_const:expr, $code_rev:expr, $bits:expr) => ({
@@ -651,6 +667,7 @@ impl InflateStream {
                                 $bits * 4 + 4
                             } - 1) << $bits) + take!($bits) as u16;
                             let code = take!(5);
+                            debug!("  {:05b}", BIT_REV_U8[(code << 3) as usize]);
                             match code {
                                 0b00000 | 0b10000 => len_dist2!(len, 0, code, 0),
                                 0b01000 | 0b11000 => len_dist2!(len, 2, code, 0),
@@ -678,6 +695,7 @@ impl InflateStream {
                                 //let save = stream.state;
                                 // FIXME(eddyb) use a 7-bit rev LUT or match the huffman code directly.
                                 let code = BIT_REV_U8[(stream.take(7).unwrap() << 1) as usize];
+                                debug!("{:09b}", code as u16 + 256);
                                 match code {
                                     0 => return if self.final_block {
                                         ok_state!(CheckCRC)
@@ -694,15 +712,14 @@ impl InflateStream {
                                 //if do_return { return ok!(Bits(next, save)) }
                                 continue;
                             }
-
+ 
                             need!(8);
                             // 00110000 through 10111111
                             if (stream.state.v & 0b11) != 0b11 {
                                 let save = stream.state;
-                                //let taken = take(8);
-                                //debug!("8bit {:08t} {:08t}", taken, BIT_REV_U8[taken]);
                                 // FIXME(eddyb) use a specialized rev LUT with addend.
                                 let code = BIT_REV_U8[(stream.take(8).unwrap()) as usize] - 0b0011_0000;
+                                debug!("{:09b}", code);
                                 push_or!(code, {stream.state = save; ok!(next)});
                                 continue;
                             }
@@ -710,7 +727,8 @@ impl InflateStream {
                             if (stream.state.v & 0b11100) == 0b00000 {
                                 //let save = stream.state;
                                 // FIXME(eddyb) use a 3-bit rev LUT or match the huffman code directly.
-                                let code = 24 + (BIT_REV_U8[(stream.take(8).unwrap() << 1) as usize] & 0b111);
+                                let code = 24 + (BIT_REV_U8[stream.take(8).unwrap() as usize] - 0b11000000);
+                                debug!("{:09b}", code as u16 + 256);
                                 match code {
                                     24 => len!(24, 4),
                                     25...28 => len!(code, 5),
@@ -720,13 +738,13 @@ impl InflateStream {
                                 //if do_return { return ok!(Bits(next, save)) }
                                 continue;
                             }
-
+ 
                             need!(9);
                             // 110010000 through 111111111
                             let save = stream.state;
                             // FIXME(eddyb) use a specialized rev LUT with addend.
-                            let code = 144 + BIT_REV_U8[(stream.take16(9).unwrap() >> 1) as usize] - 0b1001_0000;
-                            //debug!("DEFLATE 9bit 0x{:02x}", code);
+                            let code = BIT_REV_U8[(stream.take16(9).unwrap() >> 1) as usize];
+                            debug!("{:09b}", code);
                             push_or!(code, {stream.state = save; ok!(next)});
                         }
                     }
@@ -771,6 +789,7 @@ impl InflateStream {
                                 Some(data) => data,
                                 None => break
                             };
+                            debug!("  {:05b}", code);
                             match code {
                                 0...3 => len_dist!(len, code, 0 => BlockDyn(lit_len, dist)),
                                 4...5 => len_dist!(len, code, 1 => BlockDyn(lit_len, dist)),
@@ -795,6 +814,7 @@ impl InflateStream {
                                 None => break
                             };
                             let code = code16 as u8;
+                            debug!("{:09b}", code16);
                             match code16 {
                                 0...255 => {
                                     push_or!(code, {
@@ -830,14 +850,24 @@ impl InflateStream {
                 run_len_dist!(len, dist => (0, next, state));
                 ok_bytes!(0, Bits(next, state))
             }
+            Uncompressed(mut len) => {
+                for (i, &b) in data.iter().enumerate() {
+                    if len == 0 {
+                        return ok_bytes!(i, Bits(BlockHeader, BitState { n: 0, v: 0 }));
+                    }
+                    push_or!(b, ok_bytes!(i, Uncompressed(len)));
+                    len -= 1;
+                }
+                ok_bytes!(data.len(), Uncompressed(len))
+            }
             CheckCRC => {
                 let _b = data[0];
-                //debug!("CRC check not implemented")
+                debug!("CRC {:02x}", _b);
                 ok_bytes!(1, CheckCRC)
             }
         }
     }
-
+ 
     pub fn update<'a>(&'a mut self, mut data: &[u8]) -> Result<(usize, &'a [u8]), String> {
         let original_size = data.len();
         let original_pos = self.pos as usize;

@@ -23,8 +23,5 @@ glob = "*"
 rust-tcl = "*"
 rust-tcl-sys = "*"
 
-[dependencies.compress]
-git = "https://github.com/alexcrichton/rust-compress.git"
-
 [dependencies.inflate]
 path = "./inflate"

@@ -1,4 +1,3 @@
-#![feature(collections)]
 //! # PNG encoder and decoder
 //! This crate contains a PNG decoder. It supports reading of single lines or whole frames.
 //! ## The decoder
@@ -21,6 +20,13 @@
 //!     reader.next_frame(&mut buf).unwrap();
 //! ## Encoder
 //! Not available yet
+#![feature(test)]
+#![feature(convert)]
+#![feature(box_patterns)]
+#![feature(core)]
+#![feature(collections)]
+
+
 
 #[macro_use] extern crate bitflags;
 
@@ -37,6 +43,7 @@ mod filter;
 mod traits;
 mod common;
 mod inflate;
+mod inflate_zlib;
 mod utils;
 
 pub use common::*;

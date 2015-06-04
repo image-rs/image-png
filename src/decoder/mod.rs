@@ -428,43 +428,45 @@ impl<R: Read> Reader<R> {
             (self.rowlen, None)
         };
         loop {
-            let val = try!(decode_next(
-                &mut self.r, &mut self.d, &mut self.pos,
-                &mut self.end, &mut self.buf
-            ));
-            match val {
-                Some(Decoded::ImageData(data)) => {
-                    //self.current.extend(data.iter().map(|&v| v));
-                    self.current.push_all(data);
-                    if self.current.len() == rowlen {
-                        if let Some(filter) = FilterType::from_u8(self.current[0]) {
-                            unfilter(filter, bpp, &self.prev[1..rowlen], &mut self.current[1..rowlen]);
-                            mem::swap(&mut self.prev, &mut self.current);
-                            self.current.clear();
-                            return Ok(
-                                Some((
-                                    &self.prev[1..rowlen],
-                                    passdata
-                                ))
-                            )
-                        } else {
+            if self.current.len() >= rowlen {
+                if let Some(filter) = FilterType::from_u8(self.current[0]) {
+                    unfilter(filter, bpp, &self.prev[1..rowlen], &mut self.current[1..rowlen]);
+                    utils::copy_memory(&self.current[..rowlen], &mut self.prev[..rowlen]);
+                    // TODO optimize
+                    self.current = self.current[rowlen..].into();
+                    return Ok(
+                        Some((
+                            &self.prev[1..rowlen],
+                            passdata
+                        ))
+                    )
+                } else {
+                    return Err(DecodingError::Format(
+                        format!("invalid filter method ({})", self.current[0]).into()
+                    ))
+                }
+            } else {
+                let val = try!(decode_next(
+                    &mut self.r, &mut self.d, &mut self.pos,
+                    &mut self.end, &mut self.buf
+                ));
+                match val {
+                    Some(Decoded::ImageData(data)) => {
+                        //self.current.extend(data.iter().map(|&v| v));
+                        self.current.push_all(data);
+                    },
+                    None => {
+                        if self.current.len() > 0 {
                             return Err(DecodingError::Format(
-                                format!("invalid filter method ({})", self.current[0]).into()
+                              "file truncated".into()
                             ))
+                        } else {
+                            self.eof = true;
+                            return Ok(None)
                         }
                     }
-                },
-                None => {
-                    if self.current.len() > 0 {
-                        return Err(DecodingError::Format(
-                          "file truncated".into()
-                        ))
-                    } else {
-                        self.eof = true;
-                        return Ok(None)
-                    }
+                    _ => ()
                 }
-                _ => ()
             }
         }
     }

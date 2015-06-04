@@ -7,9 +7,8 @@ use std::io::{self, Read, Write};
 use std::cmp::min;
 use std::convert::{From, AsRef};
 
-//use deflate::{Inflater, Flush};
-use inflate::{Inflater, Flush};
-//use inflate_zlib::{Inflater, Flush};
+extern crate inflate;
+use self::inflate::InflateStream;
 
 use crc::Crc32;
 use traits::ReadBytesExt;
@@ -102,6 +101,12 @@ impl From<io::Error> for DecodingError {
     }
 }
 
+impl From<String> for DecodingError {
+    fn from(err: String) -> DecodingError {
+        DecodingError::Other(err.into())
+    }
+}
+
 impl From<DecodingError> for io::Error {
     fn from(err: DecodingError) -> io::Error {
         use std::error::Error;
@@ -119,7 +124,7 @@ impl From<DecodingError> for io::Error {
 pub struct StreamingDecoder {
     state: Option<State>,
     current_chunk: (Crc32, u32, Vec<u8>),
-    inflater: Inflater,
+    inflater: InflateStream,
     image_data: Vec<u8>,
     row_remaining: usize,
     adam7: Option<utils::Adam7Iterator>,
@@ -134,7 +139,7 @@ impl StreamingDecoder {
         StreamingDecoder {
             state: Some(State::Signature(0, [0; 7])),
             current_chunk: (Crc32::new(), 0, Vec::with_capacity(CHUNCK_BUFFER_SIZE)),
-            inflater: Inflater::new(),
+            inflater: InflateStream::from_zlib(),
             image_data: vec![0; IMAGE_BUFFER_SIZE],
             row_remaining: 0,
             adam7: None,
@@ -147,7 +152,7 @@ impl StreamingDecoder {
         self.state = Some(State::Signature(0, [0; 7]));
         self.current_chunk.0 = Crc32::new();
         self.current_chunk.2.clear();
-        self.inflater = Inflater::new();
+        self.inflater = InflateStream::from_zlib();
         self.row_remaining = 0;
         self.info = None;
     }
@@ -218,7 +223,7 @@ impl StreamingDecoder {
         
         // Driver should ensure that state is never None
         let state = self.state.take().unwrap();
-        //println!("{:?}", state);
+        //println!("state: {:?}", state);
 
         match state {
             Signature(i, mut signature) => if i < 7 {
@@ -284,7 +289,11 @@ impl StreamingDecoder {
             PartialChunk(type_str) => {
                 match type_str {
                     IDAT => {
-                        goto!(0, DecodeData(type_str, 0), emit Decoded::PartialChunk(type_str, &self.current_chunk.2))
+                        goto!(
+                            0,
+                            DecodeData(type_str, 0),
+                            emit Decoded::PartialChunk(type_str, &self.current_chunk.2)
+                        )
                     },
                     // Skip other chunks
                     _ => {
@@ -326,35 +335,17 @@ impl StreamingDecoder {
                 }
             }
             DecodeData(type_str, mut n) => {
+                static mut no: usize = 0;
+                if n == 0 {unsafe {no = 0}}
                 let chunk_len = self.current_chunk.2.len();
                 let remaining = self.current_chunk.1;
-                if self.row_remaining == 0 {
-                    self.row_remaining = if let Some(ref mut adam7) = self.adam7 {
-                        match adam7.next() {
-                            Some((_, _, width)) => {
-                                self.info.as_ref().unwrap().raw_row_length_from_width(width)
-                            },
-                            None => -1 as isize as usize // TODO: return at this point
-                        }
-                    } else if let Some(ref info) = self.info {
-                        info.raw_row_length()
-                    } else {
-                        return Err(DecodingError::Format(
-                            "IHDR chunk missing".into()
-                        ))
-                    }
-                }
-                let m = min(self.image_data.len(), self.row_remaining);
-                let (eof, c, data) = try!(self.inflater.inflate(
-                    &self.current_chunk.2[n..],
-                    &mut self.image_data[..m],
-                    Flush::None
-                ));
+                let (c, data) = try!(self.inflater.update(&self.current_chunk.2[n..]));
+                println!("{:?}", (n, c, data.len()));
                 n += c;
-                self.row_remaining -= data.len();
-                if eof && n != chunk_len {
-                    Err(DecodingError::CorruptFlateStream)
-                } else if n == chunk_len && data.len() == 0 && c == 0 {
+                if n == chunk_len && data.len() == 0 && c == 0 {
+                    unsafe {no += 1};
+                }
+                if n == chunk_len && data.len() == 0 && c == 0 && unsafe {no} > 2 {
                     goto!(
                         0,
                         ReadChunk(type_str, true),

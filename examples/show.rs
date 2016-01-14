@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::path;
 use std::error::Error;
 
-use glium::{DisplayBuild, Surface, Rect, BlitTarget};
+use glium::{DisplayBuild, Surface, Frame, Rect, BlitTarget};
 use glium::texture::{RawImage2d, ClientFormat};
 use glium::glutin::{self, Event, VirtualKeyCode};
 
@@ -73,7 +73,7 @@ fn main_loop(files: Vec<path::PathBuf>) -> io::Result<()> {
     let mut opengl_texture = glium::Texture2d::new(&display, image).unwrap();
     
     'main: loop {
-        fill_v_flipped(&opengl_texture.as_surface(), &display.draw(), glium::uniforms::MagnifySamplerFilter::Linear);
+        fill_v_flipped(&opengl_texture.as_surface(), display.draw(), glium::uniforms::MagnifySamplerFilter::Linear);
         // polling and handling the events received by the window
         for event in display.poll_events() {
             match event {
@@ -99,13 +99,14 @@ fn main_loop(files: Vec<path::PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-fn fill_v_flipped<S1, S2>(src: &S1, target: &S2, filter: glium::uniforms::MagnifySamplerFilter)
-where S1: Surface, S2: Surface {
+fn fill_v_flipped<S1>(src: &S1, target: Frame, filter: glium::uniforms::MagnifySamplerFilter)
+where S1: Surface{
     let src_dim = src.get_dimensions();
     let src_rect = Rect { left: 0, bottom: 0, width: src_dim.0 as u32, height: src_dim.1 as u32 };
     let target_dim = target.get_dimensions();
     let target_rect = BlitTarget { left: 0, bottom: target_dim.1, width: target_dim.0 as i32, height: -(target_dim.1 as i32) };
-    src.blit_color(&src_rect, target, &target_rect, filter);
+    src.blit_color(&src_rect, &target, &target_rect, filter);
+    target.finish().unwrap()
 }
 
 fn resize_window(display: &glium::backend::glutin_backend::GlutinFacade, image: &RawImage2d<'static, u8>) {

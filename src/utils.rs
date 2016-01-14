@@ -208,13 +208,6 @@ pub fn copy_memory(src: &[u8], dst: &mut [u8]) {
 ///
 /// # Examples
 ///
-/// ```
-/// # #![feature(vec_push_all)]
-/// # #![feature(collections)]
-/// let mut vec = vec![1];
-/// vec.push_all(&[2, 3, 4]);
-/// assert_eq!(vec, [1, 2, 3, 4]);
-/// ```
 // NOTE: this is copied from the stdlib (`std::collections::vec::Vec::push_all`).
 #[inline]
 pub fn push_all<T: Clone>(this: &mut Vec<T>, other: &[T]) {

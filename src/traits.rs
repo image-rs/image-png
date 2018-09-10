@@ -40,4 +40,5 @@ read_bytes_ext!(u8);
 read_bytes_ext!(u16);
 read_bytes_ext!(u32);
 
+write_bytes_ext!(u16);
 write_bytes_ext!(u32);

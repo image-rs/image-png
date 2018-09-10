@@ -9,9 +9,10 @@ use std::mem;
 use std::result;
 
 use crc32fast::Hasher as Crc32;
+use deflate::write::ZlibEncoder;
 
 use crate::chunk;
-use crate::common::{BitDepth, ColorType, Compression, Info};
+use crate::common::{AnimationControl, BitDepth, ColorType, Compression, FrameControl, Info};
 use crate::filter::{filter, FilterType};
 use crate::traits::WriteBytesExt;
 
@@ -67,6 +68,25 @@ impl<W: Write> Encoder<W> {
         Encoder { w, info }
     }
 
+    pub fn new_animated(w: W, width: u32, height: u32, frames: u32) -> Result<Encoder<W>> {
+        if frames > 0 {
+            let mut encoder = Encoder::new(w, width, height);
+
+            let animation_ctl = AnimationControl { num_frames: frames, num_plays: 0 };
+            let mut frame_ctl = FrameControl::default();
+            frame_ctl.width = width;
+            frame_ctl.height = height;
+
+            encoder.info.animation_control = Some(animation_ctl);
+            encoder.info.frame_control = Some(frame_ctl);
+
+            Ok(encoder)
+        } else {
+            Err(EncodingError::Format("invalid number of frames for an animated PNG".into()))
+        }
+
+    }
+
     pub fn write_header(self) -> Result<Writer<W>> {
         Writer::new(self.w, self.info).init()
     }
@@ -110,13 +130,14 @@ impl<W: Write> Encoder<W> {
 pub struct Writer<W: Write> {
     w: W,
     info: Info,
+    separate_default_image: bool,
 }
 
 const DEFAULT_BUFFER_LENGTH: usize = 4 * 1024;
 
 impl<W: Write> Writer<W> {
     fn new(w: W, info: Info) -> Writer<W> {
-        Writer { w, info }
+        Writer { w: w, info: info, separate_default_image: false }
     }
 
     fn init(mut self) -> Result<Self> {
@@ -176,6 +197,14 @@ impl<W: Write> Writer<W> {
     /// Writes the image data.
     pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
         const MAX_CHUNK_LEN: u32 = (1u32 << 31) - 1;
+        let zlib_encoded = self.deflate_image_data(data)?;
+        for chunk in zlib_encoded.chunks(MAX_CHUNK_LEN as usize) {
+            self.write_chunk(chunk::IDAT, &chunk)?;
+        }
+        Ok(())
+    }
+
+    fn deflate_image_data(&self, data: &[u8]) -> Result<Vec<u8>> {
         let bpp = self.info.bytes_per_pixel();
         let in_len = self.info.raw_row_length() - 1;
         let prev = vec![0; in_len];
@@ -186,7 +215,7 @@ impl<W: Write> Writer<W> {
             let message = format!("wrong data size, expected {} got {}", data_size, data.len());
             return Err(EncodingError::Format(message.into()));
         }
-        let mut zlib = deflate::write::ZlibEncoder::new(Vec::new(), self.info.compression.clone());
+        let mut zlib = ZlibEncoder::new(Vec::new(), self.info.compression.clone());
         let filter_method = self.info.filter;
         for line in data.chunks(in_len) {
             current.copy_from_slice(&line);
@@ -195,11 +224,8 @@ impl<W: Write> Writer<W> {
             zlib.write_all(&current)?;
             prev = line;
         }
-        let zlib_encoded = zlib.finish()?;
-        for chunk in zlib_encoded.chunks(MAX_CHUNK_LEN as usize) {
-            self.write_chunk(chunk::IDAT, &chunk)?;
-        }
-        Ok(())
+        let data = zlib.finish()?;
+        Ok(data)
     }
 
     /// Create an stream writer.
@@ -239,6 +265,108 @@ impl<W: Write> Writer<W> {
     /// [`into_stream_writer`]: #fn.into_stream_writer
     pub fn into_stream_writer_with_size(self, size: usize) -> StreamWriter<'static, W> {
         StreamWriter::new(ChunkOutput::Owned(self), size)
+    }
+
+    pub fn write_separate_default_image(&mut self, data: &[u8]) -> Result<()> {
+        match self.info {
+            Info { animation_control: Some(_), frame_control: Some(frame_control), ..} => {
+                if frame_control.sequence_number != 0 {
+                    Err(EncodingError::Format("separate default image provided after frame sequence has begun".into()))
+                } else if self.separate_default_image {
+                    Err(EncodingError::Format("default image already written".into()))
+                } else {
+                    self.separate_default_image = true;
+                    self.write_image_data(data)
+                }
+            }
+            _ => {
+                Err(EncodingError::Format("default image provided for a non-animated PNG".into()))
+            }
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn write_fcTL(&mut self) -> Result<()> {
+        let frame_ctl = self.info.frame_control.ok_or(EncodingError::Format("cannot write fcTL for a non-animated PNG".into()))?;
+        let mut data = [0u8; 26];
+
+        (&mut data[..]).write_be(frame_ctl.sequence_number)?;
+        (&mut data[4..]).write_be(frame_ctl.width)?;
+        (&mut data[8..]).write_be(frame_ctl.height)?;
+        (&mut data[12..]).write_be(frame_ctl.x_offset)?;
+        (&mut data[16..]).write_be(frame_ctl.y_offset)?;
+        (&mut data[20..]).write_be(frame_ctl.delay_num)?;
+        (&mut data[22..]).write_be(frame_ctl.delay_den)?;
+        data[24] = frame_ctl.dispose_op as u8;
+        data[25] = frame_ctl.blend_op as u8;
+
+        self.write_chunk(chunk::fcTL, &data)
+    }
+
+    #[allow(non_snake_case)]
+    fn write_fdAT(&mut self, data: &[u8]) -> Result<()> {
+        println!("Writing fdAT:{:?}", self.info.frame_control.unwrap().sequence_number+1);
+
+        let sequence_number = self.info.frame_control.ok_or_else(|| EncodingError::Format("cannot write fdAT for a non-animated PNG".into()))?.sequence_number+1u32;
+
+        let mut data = self.deflate_image_data(data)?;
+        data.splice(0..0, sequence_number.to_be_bytes().iter().cloned());
+
+        self.write_chunk(chunk::fdAT, &data)
+    }
+
+    pub fn write_frame(&mut self, data: &[u8]) -> Result<()> {
+        println!("{:?}", self.info.frame_control.unwrap().sequence_number);
+
+        match self.info {
+            Info { animation_control: Some(AnimationControl { num_frames: 0, ..}) , frame_control: Some(_), ..} => {
+                Err(EncodingError::Format("exceeded number of frames specified".into()))
+            },
+            Info { animation_control: Some(anim_ctl), frame_control: Some(frame_control), ..} => {
+                match frame_control.sequence_number {
+                    0 => {
+                        let ret = if self.separate_default_image { // If we've already written the default image we can write frames the normal way
+                            // fcTL + fdAT
+
+                            self.write_fcTL().and(self.write_fdAT(data))
+                        } else { // If not we'll have to set the first frame to be both:
+                            // fcTL + first frame (IDAT)
+
+                            self.write_fcTL().and(self.write_image_data(data))
+                        };
+
+                        let mut fc = self.info.frame_control.unwrap();
+                        fc.inc_seq_num(1);
+                        self.info.frame_control = Some(fc);
+                        ret
+                    },
+                    x if x == 2 * anim_ctl.num_frames - 1 => {
+                        println!("We're done, boss");
+
+                        // This is the last frame:
+                        // Do the usual and also set AnimationControl to no remaining frames:
+                        let ret = self.write_fcTL().and(self.write_fdAT(data));
+                        let mut fc = self.info.frame_control.unwrap();
+                        fc.set_seq_num(0);
+                        self.info.frame_control = Some(fc);
+                        ret
+                    },
+                    _ => {
+                        // Usual case:
+                        // fcTL + fdAT
+                        println!("Buisness as usual");
+                        let ret = self.write_fcTL().and(self.write_fdAT(data));
+                        let mut fc = self.info.frame_control.unwrap();
+                        fc.inc_seq_num(2);
+                        self.info.frame_control = Some(fc);
+                        ret
+                    }
+                }
+            },
+            _ => {
+                Err(EncodingError::Format("frame provided for a non-animated PNG".into()))
+            }
+        }
     }
 }
 

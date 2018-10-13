@@ -10,14 +10,14 @@ exclude = [
 ]
 
 [dependencies]
-inflate = "0.4.2"
-deflate = { version = "0.7.2", optional = true }
-num-iter = "0.1.32"
+inflate = "0.4.3"
+deflate = { version = "0.7.19", optional = true }
+num-iter = "0.1.37"
 bitflags = "1.0"
 
 [dev-dependencies]
-getopts = "0.2.14"
-term = "0.4"
+getopts = "0.2.18"
+term = "0.5"
 glob = "0.2.11"
 
 [dev-dependencies.glium]

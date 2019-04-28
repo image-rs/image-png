@@ -153,6 +153,17 @@ impl<W: Write> Writer<W> {
         }
         self.write_chunk(chunk::IDAT, &zlib.finish()?)
     }
+    
+    pub fn write_to_dpi(&mut self, x: u32, y: u32, unit: bool) -> Result<()>  {
+        let _x = x.to_be_bytes();
+        let _y = y.to_be_bytes();
+        self.write_chunk(chunk::pHYs, &[_x[0], _x[1], _x[2], _x[3], _y[0], _y[1], _y[2], _y[3], unit as u8])
+    }
+
+    pub fn write_image_data_with_dpi(&mut self, x: u32, y: u32, unit: bool, data: &[u8]) -> Result<()> {
+        self.write_to_dpi(x, y, unit)?
+        self.write_image_data(data)
+    }
 
     /// Create an stream writer.
     ///

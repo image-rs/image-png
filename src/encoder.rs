@@ -161,7 +161,7 @@ impl<W: Write> Writer<W> {
     }
 
     pub fn write_image_data_with_dpi(&mut self, x: u32, y: u32, unit: bool, data: &[u8]) -> Result<()> {
-        self.write_to_dpi(x, y, unit)?
+        self.write_to_dpi(x, y, unit)?;
         self.write_image_data(data)
     }
 

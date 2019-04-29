@@ -9,7 +9,7 @@ use std::result;
 
 use crate::chunk;
 use crate::crc::Crc32;
-use crate::common::{Info, ColorType, BitDepth, Compression， PixelDimensions};
+use crate::common::{Info, ColorType, BitDepth, Compression, PixelDimensions};
 use crate::filter::{FilterType, filter};
 use crate::traits::{WriteBytesExt, HasParameters, Parameter};
 

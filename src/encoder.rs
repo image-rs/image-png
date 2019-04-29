@@ -9,7 +9,7 @@ use std::result;
 
 use crate::chunk;
 use crate::crc::Crc32;
-use crate::common::{Info, ColorType, BitDepth, Compression};
+use crate::common::{Info, ColorType, BitDepth, Compression， PixelDimensions};
 use crate::filter::{FilterType, filter};
 use crate::traits::{WriteBytesExt, HasParameters, Parameter};
 
@@ -60,6 +60,10 @@ impl<W: Write> Encoder<W> {
         info.width = width;
         info.height = height;
         Encoder { w: w, info: info }
+    }
+    
+    pub fn set_pixel_dimensions(&mut self, pixel_dims: PixelDimensions) {
+        self.info.pixel_dims = Some(pixel_dims);
     }
 
     pub fn write_header(self) -> Result<Writer<W>> {

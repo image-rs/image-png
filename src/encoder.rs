@@ -117,6 +117,11 @@ impl<W: Write> Writer<W> {
         data[9] = self.info.color_type as u8;
         data[12] = if self.info.interlaced { 1 } else { 0 };
         self.write_chunk(chunk::IHDR, &data)?;
+        if let Some(pixel_dims) = self.info.pixel_dims {
+            let _xppu = pixel_dims.xppu.to_be_bytes();
+            let _yppu = pixel_dims.yppu.to_be_bytes();
+            self.write_chunk(chunk::pHYs, &[_xppu[0], _xppu[1], _xppu[2], _xppu[3], _yppu[0], _yppu[1], _yppu[2], _yppu[3], pixel_dims.unit as u8])?;
+        }
         Ok(self)
     }
 

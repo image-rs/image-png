@@ -84,7 +84,7 @@ impl<R: Read> Decoder<R> {
     
     pub fn new_with_limits(r: R, l: Limits) -> Decoder<R> {
         Decoder {
-            r: r,
+            r,
             transform: crate::Transformations::EXPAND | crate::Transformations::SCALE_16 | crate::Transformations::STRIP_16,
             limits: l,
         }
@@ -125,7 +125,7 @@ impl<R: Read> Decoder<R> {
                 line_size: r.output_line_size(info.width),
             }
         };
-        let (width, height, pixels) = (info.width as u64, info.height as u64, self.limits.pixels);
+        let (width, height, pixels) = (u64::from(info.width), u64::from(info.height), self.limits.pixels);
         if width.checked_mul(height).map(|p| p > pixels).unwrap_or(true) {
             // DecodingError::Other is used for backwards compatibility.
             // In the next major version, add a variant for this.
@@ -267,7 +267,7 @@ impl<R: Read> Reader<R> {
              while let Some((row, adam7)) = self.next_interlaced_row()? {
                  let (pass, line, _) = adam7.unwrap();
                  let bytes = color_type.samples() as u8;
-                 utils::expand_pass(buf, width * bytes as u32, row, pass, line, bytes);
+                 utils::expand_pass(buf, width * u32::from(bytes), row, pass, line, bytes);
              }
         } else {
             let mut len = 0;
@@ -293,7 +293,7 @@ impl<R: Read> Reader<R> {
             // swap buffer to circumvent borrow issues
             let mut buffer = mem::replace(&mut self.processed, Vec::new());
             let (got_next, adam7) = if let Some((row, adam7)) = self.next_raw_interlaced_row()? {
-                (&mut buffer[..]).write(row)?;
+                (&mut buffer[..]).write_all(row)?;
                 (true, adam7)
             } else {
                 (false, None)
@@ -408,12 +408,12 @@ impl<R: Read> Reader<R> {
         let trns = info.trns.is_some();
         // TODO 16 bit
         let bits = match info.color_type {
-            Indexed if trns && t.contains(crate::Transformations::EXPAND) => 4 * 8,
-            Indexed if t.contains(crate::Transformations::EXPAND) => 3 * 8,
-            RGB if trns && t.contains(crate::Transformations::EXPAND) => 4 * 8,
-            Grayscale if trns && t.contains(crate::Transformations::EXPAND) => 2 * 8,
-            Grayscale if t.contains(crate::Transformations::EXPAND) => 1 * 8,
-            GrayscaleAlpha if t.contains(crate::Transformations::EXPAND) => 2 * 8,
+            Indexed if trns && t.contains(crate::Transformations::EXPAND)   => 8 * 4,
+            Indexed if t.contains(crate::Transformations::EXPAND)           => 8 * 3,
+            RGB if trns && t.contains(crate::Transformations::EXPAND)       => 8 * 4,
+            Grayscale if trns && t.contains(crate::Transformations::EXPAND) => 8 * 2,
+            Grayscale if t.contains(crate::Transformations::EXPAND)         => 8,
+            GrayscaleAlpha if t.contains(crate::Transformations::EXPAND)    => 8 * 2,
             // divide by 2 as it will get mutiplied by two later
             _ if info.bit_depth as u8 == 16 => info.bits_per_pixel() / 2,
             _ => info.bits_per_pixel()
@@ -477,7 +477,7 @@ impl<R: Read> Reader<R> {
                 match val {
                     Some(Decoded::ImageData) => {}
                     None => {
-                        if self.current.len() > 0 {
+                        if !self.current.is_empty() {
                             return Err(DecodingError::Format(
                               "file truncated".into()
                             ))

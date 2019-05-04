@@ -105,8 +105,8 @@ impl Adam7Iterator {
             lines: 0,
             line_width: 0,
             current_pass: 1,
-            width: width,
-            height: height
+            width,
+            height
         };
         this.init_pass();
         this
@@ -114,8 +114,8 @@ impl Adam7Iterator {
 
     /// Calculates the bounds of the current pass
     fn init_pass(&mut self) {
-        let w = self.width as f64;
-        let h = self.height as f64;
+        let w = f64::from(self.width);
+        let h = f64::from(self.height);
         let (line_width, lines) = match self.current_pass {
             1 => (w/8.0, h/8.0),
             2 => ((w-4.0)/8.0, h/8.0),

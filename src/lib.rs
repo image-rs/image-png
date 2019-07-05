@@ -44,6 +44,7 @@
 
 #[macro_use] extern crate bitflags;
 
+extern crate image_core;
 extern crate num_iter;
 
 pub mod chunk;
@@ -57,7 +58,7 @@ mod common;
 mod utils;
 
 pub use common::*;
-pub use decoder::{Decoder, Reader, OutputInfo, StreamingDecoder, Decoded, DecodingError, Limits};
+pub use decoder::{PngReader, PngDecoder, StreamingDecoder, Decoded};
 #[cfg(feature = "png-encoding")]
 pub use encoder::{Encoder, Writer, EncodingError};
 

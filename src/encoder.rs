@@ -9,7 +9,7 @@ use std::result;
 
 use chunk;
 use crc::Crc32;
-use common::{Info, ColorType, BitDepth};
+use common::{Info, PngColorType, BitDepth};
 use filter::{FilterType, filter};
 use traits::{WriteBytesExt, HasParameters, Parameter};
 
@@ -33,7 +33,7 @@ impl error::Error for EncodingError {
 
 impl fmt::Display for EncodingError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        write!(fmt, "{}", (self as &error::Error).description())
+        write!(fmt, "{}", (self as &dyn error::Error).description())
     }
 }
 
@@ -44,7 +44,7 @@ impl From<io::Error> for EncodingError {
 }
 impl From<EncodingError> for io::Error {
     fn from(err: EncodingError) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, (&err as &error::Error).description())
+        io::Error::new(io::ErrorKind::Other, (&err as &dyn error::Error).description())
     }
 }
 
@@ -69,7 +69,7 @@ impl<W: Write> Encoder<W> {
 
 impl<W: Write> HasParameters for Encoder<W> {}
 
-impl<W: Write> Parameter<Encoder<W>> for ColorType {
+impl<W: Write> Parameter<Encoder<W>> for PngColorType {
     fn set_param(self, this: &mut Encoder<W>) {
         this.info.color_type = self
     }
@@ -209,7 +209,7 @@ mod tests {
         let writer = Cursor::new(output);
         let mut encoder = Encoder::new(writer, width as u32, height as u32);
         encoder.set(BitDepth::Eight);
-        encoder.set(ColorType::RGB);
+        encoder.set(PngColorType::RGB);
         let mut png_writer = encoder.write_header()?;
 
         let correct_image_size = width * height * 3;

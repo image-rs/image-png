@@ -1,141 +1,17 @@
 mod stream;
 
-pub use self::stream::{StreamingDecoder, Decoded, DecodingError};
+pub use self::stream::{StreamingDecoder, Decoded};
 use self::stream::{CHUNCK_BUFFER_SIZE, get_info};
 
 use std::mem;
-use std::borrow;
-use std::io::{Read, Write, BufReader, BufRead};
+use std::io::{self, Read, Write, BufReader, BufRead};
 
-use traits::{HasParameters, Parameter};
-use common::{ColorType, BitDepth, Info, Transformations};
+use image_core::{ColorType, ImageDecoder, ImageError, ImageResult};
+
+use common::{PngColorType, BitDepth, Info, Transformations};
 use filter::{unfilter, FilterType};
 use chunk::IDAT;
 use utils;
-
-/*
-pub enum InterlaceHandling {
-    /// Outputs the raw rows
-    RawRows,
-    /// Fill missing the pixels from the existing ones
-    Rectangle,
-    /// Only fill the needed pixels
-    Sparkle
-}
-
-impl Parameter<Reader> for InterlaceHandling {
-    fn set_param(self, this: &mut Reader) {
-        this.color_output = self
-    }
-}*/
-
-
-impl<R: Read> Parameter<Decoder<R>> for Transformations {
-    fn set_param(self, this: &mut Decoder<R>) {
-        this.transform = self
-    }
-}
-
-
-/// Output info
-pub struct OutputInfo {
-    pub width: u32,
-    pub height: u32,
-    pub color_type: ColorType,
-    pub bit_depth: BitDepth,
-    pub line_size: usize,
-}
-
-impl OutputInfo {
-    /// Returns the size needed to hold a decoded frame
-    pub fn buffer_size(&self) -> usize {
-        self.line_size * self.height as usize
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Limits {
-    /// max number of pixels: `width * height` (default: 67M = 2<sup>26</sup>)
-    pub pixels: u64,
-}
-
-impl Default for Limits {
-    fn default() -> Limits {
-        Limits {
-            pixels: 1 << 26,
-        }
-    }
-}
-
-/// PNG Decoder
-pub struct Decoder<R: Read> {
-    /// Reader
-    r: R,
-    /// Output transformations
-    transform: Transformations,
-    /// Images that are considered too big
-    limits: Limits,
-}
-
-impl<R: Read> Decoder<R> {
-    pub fn new(r: R) -> Decoder<R> {
-        Decoder::new_with_limits(r, Limits::default())
-    }
-    
-    pub fn new_with_limits(r: R, l: Limits) -> Decoder<R> {
-        Decoder {
-            r: r,
-            transform: ::Transformations::EXPAND | ::Transformations::SCALE_16 | ::Transformations::STRIP_16,
-            limits: l,
-        }
-    }
-
-    /// Images that are considered too big
-    ///
-    /// ```
-    /// use std::fs::File;
-    /// use png::{Decoder, Limits};
-    /// // This image is 32x32 pixels, so it's more than four pixels in size.
-    /// let mut limits = Limits::default();
-    /// limits.pixels = 4;
-    /// let mut decoder = Decoder::new_with_limits(File::open("tests/pngsuite/basi0g01.png").unwrap(), limits);
-    /// assert!(decoder.read_info().is_err());
-    /// // This image is 32x32 pixels, so it's exactly 1024 pixels in size.
-    /// let mut limits = Limits::default();
-    /// limits.pixels = 1024;
-    /// let mut decoder = Decoder::new_with_limits(File::open("tests/pngsuite/basi0g01.png").unwrap(), limits);
-    /// assert!(decoder.read_info().is_ok());
-    /// ```
-    pub fn set_limits(&mut self, limits: Limits) {
-        self.limits = limits;
-    }
-
-    /// Reads all meta data until the first IDAT chunk
-    pub fn read_info(self) -> Result<(OutputInfo, Reader<R>), DecodingError> {
-        let mut r = Reader::new(self.r, StreamingDecoder::new(), self.transform);
-        try!(r.init());
-        let (ct, bits) = r.output_color_type();
-        let info = {
-            let info = r.info();
-            OutputInfo {
-                width: info.width,
-                height: info.height,
-                color_type: ct,
-                bit_depth: bits,
-                line_size: r.output_line_size(info.width),
-            }
-        };
-        let (width, height, pixels) = (info.width as u64, info.height as u64, self.limits.pixels);
-        if width.checked_mul(height).map(|p| p > pixels).unwrap_or(true) {
-            // DecodingError::Other is used for backwards compatibility.
-            // In the next major version, add a variant for this.
-            return Err(DecodingError::Other(borrow::Cow::Borrowed("pixels limit exceeded")));
-        }
-        Ok((info, r))
-    }
-}
-
-impl<R: Read> HasParameters for Decoder<R> {}
 
 struct ReadDecoder<R: Read> {
     reader: BufReader<R>,
@@ -146,14 +22,12 @@ struct ReadDecoder<R: Read> {
 impl<R: Read> ReadDecoder<R> {
     /// Returns the next decoded chunk. If the chunk is an ImageData chunk, its contents are written
     /// into image_data.
-    fn decode_next(&mut self, image_data: &mut Vec<u8>) -> Result<Option<Decoded>, DecodingError> {
+    fn decode_next(&mut self, image_data: &mut Vec<u8>) -> Result<Option<Decoded>, ImageError> {
         while !self.at_eof {
             let (consumed, result) = {
                 let buf = try!(self.reader.fill_buf());
                 if buf.is_empty() {
-                    return Err(DecodingError::Format(
-                        "unexpected EOF".into()
-                    ))
+                    return Err(ImageError::NotEnoughData);
                 }
                 try!(self.decoder.update(buf, image_data))
             };
@@ -175,7 +49,7 @@ impl<R: Read> ReadDecoder<R> {
 /// PNG reader (mostly high-level interface)
 ///
 /// Provides a high level that iterates over lines or whole images.
-pub struct Reader<R: Read> {
+struct Reader<R: Read> {
     decoder: ReadDecoder<R>,
     bpp: usize,
     rowlen: usize,
@@ -216,7 +90,7 @@ impl<R: Read> Reader<R> {
     }
 
     /// Reads all meta data until the first IDAT chunk
-    fn init(&mut self) -> Result<(), DecodingError> {
+    fn init(&mut self) -> Result<(), ImageError> {
         use Decoded::*;
         if self.decoder.info().is_some() {
             Ok(())
@@ -224,18 +98,14 @@ impl<R: Read> Reader<R> {
             loop {
                 match try!(self.decoder.decode_next(&mut Vec::new())) {
                     Some(ChunkBegin(_, IDAT)) => break,
-                    None => return Err(DecodingError::Format(
-                        "IDAT chunk missing".into()
-                    )),
+                    None => return Err(ImageError::InvalidData("IDAT chunk missing".into())),
                     _ => (),
                 }
             }
             {
                 let info = match self.decoder.info() {
                     Some(info) => info,
-                    None => return Err(DecodingError::Format(
-                      "IHDR chunk missing".into()
-                    ))
+                    None => return Err(ImageError::InvalidData("IHDR chunk missing".into())),
                 };
                 self.bpp = info.bytes_per_pixel();
                 self.rowlen = info.raw_row_length();
@@ -249,19 +119,17 @@ impl<R: Read> Reader<R> {
         }
     }
 
-    pub fn info(&self) -> &Info {
+    fn info(&self) -> &Info {
         get_info!(self)
     }
 
     /// Decodes the next frame into `buf`
-    pub fn next_frame(&mut self, buf: &mut [u8]) -> Result<(), DecodingError> {
+    fn next_frame(&mut self, buf: &mut [u8]) -> Result<(), ImageError> {
         // TODO 16 bit
         let (color_type, _) = self.output_color_type();
         let width = get_info!(self).width;
         if buf.len() < self.output_buffer_size() {
-            return Err(DecodingError::Other(
-                "supplied buffer is too small to hold the image".into()
-            ))
+            return Err(ImageError::InsufficientMemory);
         }
         if get_info!(self).interlaced {
              while let Some((row, adam7)) = try!(self.next_interlaced_row()) {
@@ -279,13 +147,13 @@ impl<R: Read> Reader<R> {
     }
 
     /// Returns the next processed row of the image
-    pub fn next_row(&mut self) -> Result<Option<&[u8]>, DecodingError> {
+    fn next_row(&mut self) -> Result<Option<&[u8]>, ImageError> {
         self.next_interlaced_row().map(|v| v.map(|v| v.0))
     }
 
     /// Returns the next processed row of the image
-    pub fn next_interlaced_row(&mut self) -> Result<Option<(&[u8], Option<(u8, u32, u32)>)>, DecodingError> {
-        use common::ColorType::*;
+    fn next_interlaced_row(&mut self) -> Result<Option<(&[u8], Option<(u8, u32, u32)>)>, ImageError> {
+        use PngColorType::*;
         let transform = self.transform;
         if transform == ::Transformations::IDENTITY {
             self.next_raw_interlaced_row()
@@ -350,8 +218,8 @@ impl<R: Read> Reader<R> {
 
     /// Returns the color type and the number of bits per sample
     /// of the data returned by `Reader::next_row` and Reader::frames`.
-    pub fn output_color_type(&mut self) -> (ColorType, BitDepth) {
-        use common::ColorType::*;
+    fn output_color_type(&mut self) -> (PngColorType, BitDepth) {
+        use PngColorType::*;
         let t = self.transform;
         let info = get_info!(self);
         if t == ::Transformations::IDENTITY {
@@ -382,14 +250,14 @@ impl<R: Read> Reader<R> {
 
     /// Returns the number of bytes required to hold a deinterlaced image frame
     /// that is decoded using the given input transformations.
-    pub fn output_buffer_size(&self) -> usize {
+    fn output_buffer_size(&self) -> usize {
         let (width, height) = get_info!(self).size();
         let size = self.output_line_size(width);
         size * height as usize
     }
 
     /// Returns the number of bytes required to hold a deinterlaced row.
-    pub fn output_line_size(&self, width: u32) -> usize {
+    fn output_line_size(&self, width: u32) -> usize {
         let size = self.line_size(width);
         if get_info!(self).bit_depth as u8 == 16 && self.transform.intersects(
             ::Transformations::SCALE_16 | ::Transformations::STRIP_16
@@ -402,7 +270,7 @@ impl<R: Read> Reader<R> {
 
     /// Returns the number of bytes required to decode a deinterlaced row.
     fn line_size(&self, width: u32) -> usize {
-        use common::ColorType::*;
+        use PngColorType::*;
         let t = self.transform;
         let info = get_info!(self);
         let trns = info.trns.is_some();
@@ -431,7 +299,7 @@ impl<R: Read> Reader<R> {
     }
 
     /// Returns the next raw row of the image
-    fn next_raw_interlaced_row(&mut self) -> Result<Option<(&[u8], Option<(u8, u32, u32)>)>, DecodingError> {
+    fn next_raw_interlaced_row(&mut self) -> Result<Option<(&[u8], Option<(u8, u32, u32)>)>, ImageError> {
         let _ = get_info!(self);
         let bpp = self.bpp;
         let (rowlen, passdata) = if let Some(ref mut adam7) = self.adam7 {
@@ -455,9 +323,7 @@ impl<R: Read> Reader<R> {
             if self.current.len() >= rowlen {
                 if let Some(filter) = FilterType::from_u8(self.current[0]) {
                     if let Err(message) = unfilter(filter, bpp, &self.prev[1..rowlen], &mut self.current[1..rowlen]) {
-                        return Err(DecodingError::Format(
-                            borrow::Cow::Borrowed(message)
-                        ))
+                        return Err(ImageError::InvalidData(message.to_owned()));
                     }
                     self.prev[..rowlen].copy_from_slice(&self.current[..rowlen]);
                     self.current.drain(0..rowlen);
@@ -468,9 +334,9 @@ impl<R: Read> Reader<R> {
                         ))
                     )
                 } else {
-                    return Err(DecodingError::Format(
+                    return Err(ImageError::InvalidData(
                         format!("invalid filter method ({})", self.current[0]).into()
-                    ))
+                    ));
                 }
             } else {
                 let val = try!(self.decoder.decode_next(&mut self.current));
@@ -478,9 +344,7 @@ impl<R: Read> Reader<R> {
                     Some(Decoded::ImageData) => {}
                     None => {
                         if self.current.len() > 0 {
-                            return Err(DecodingError::Format(
-                              "file truncated".into()
-                            ))
+                            return Err(ImageError::NotEnoughData);
                         } else {
                             return Ok(None)
                         }
@@ -492,10 +356,10 @@ impl<R: Read> Reader<R> {
     }
 }
 
-fn expand_paletted(buffer: &mut [u8], info: &Info) -> Result<(), DecodingError> {
+fn expand_paletted(buffer: &mut [u8], info: &Info) -> Result<(), ImageError> {
     if let Some(palette) = info.palette.as_ref() {
         if let BitDepth::Sixteen = info.bit_depth {
-            Err(DecodingError::Format("Bit depth '16' is not valid for paletted images".into()))
+            Err(ImageError::InvalidData("Bit depth '16' is not valid for paletted images".into()))
         } else {
             let black = [0, 0, 0];
             if let Some(ref trns) = info.trns {
@@ -520,7 +384,7 @@ fn expand_paletted(buffer: &mut [u8], info: &Info) -> Result<(), DecodingError> 
             Ok(())
         }
     } else {
-        Err(DecodingError::Format("missing palette".into()))
+        Err(ImageError::InvalidData("missing palette".into()))
     }
 }
 
@@ -546,6 +410,149 @@ fn expand_gray_u8(buffer: &mut [u8], info: &Info) {
         })
     }
 }
+
+/// PNG Reader
+///
+/// This reader will try to read the png one row at a time,
+/// however for interlaced png files this is not posible and
+/// these are therefore readed at once.
+pub struct PngReader<R: Read> {
+    reader: Reader<R>,
+    buffer: Vec<u8>,
+    index: usize,
+}
+
+impl<R: Read> PngReader<R> {
+    fn new(mut reader: Reader<R>) -> ImageResult<PngReader<R>> {
+        let len = reader.output_buffer_size();
+        // Since interlaced images do not come in
+        // scanline order it is almost impossible to
+        // read them in a streaming fashion, however
+        // this shouldn't be a too big of a problem
+        // as most interlaced images should fit in memory.
+        let buffer = if reader.info().interlaced {
+            let mut buffer = vec![0; len];
+            reader.next_frame(&mut buffer)?;
+            buffer
+        } else {
+            Vec::new()
+        };
+
+        Ok(PngReader {
+            reader,
+            buffer,
+            index: 0,
+        })
+    }
+}
+
+impl<R: Read> Read for PngReader<R> {
+    fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
+        // io::Write::write for slice cannot fail
+        let readed = buf.write(&self.buffer[self.index..]).unwrap();
+
+        let mut bytes = readed;
+        self.index += readed;
+
+        while self.index + 1 >= self.buffer.len() {
+            match self.reader.next_row()? {
+                Some(row) => {
+                    // Faster to copy directly to external buffer
+                    let readed  = buf.write(row).unwrap();
+                    bytes += readed;
+
+                    self.buffer = (&row[readed..]).to_owned();
+                    self.index = 0;
+                }
+                None => return Ok(bytes)
+            }
+        }
+
+        Ok(bytes)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let mut bytes = self.buffer.len();
+        buf.extend_from_slice(&self.buffer);
+        self.buffer = Vec::new();
+        self.index = 0;
+
+        while let Some(row) = self.reader.next_row()? {
+            buf.extend_from_slice(row);
+            bytes += row.len();
+        }
+
+        Ok(bytes)
+    }
+}
+
+/// PNG decoder
+pub struct PngDecoder<R: Read> {
+    colortype: ColorType,
+    reader: Reader<R>,
+}
+
+impl<R: Read> PngDecoder<R> {
+    /// Creates a new decoder that decodes from the stream `r`.
+    pub fn new(r: R) -> ImageResult<PngDecoder<R>> {
+        let mut reader = Reader::new(r, StreamingDecoder::new(), Transformations::EXPAND);
+        reader.init()?;
+
+        let (ct, bits) = reader.output_color_type();
+        use PngColorType::*;
+        let colortype = match (ct, bits as u8) {
+            (Grayscale, 8) => ColorType::L8,
+            (Grayscale, 16) => ColorType::L16,
+            (GrayscaleAlpha, 8) => ColorType::LA8,
+            (GrayscaleAlpha, 16) => ColorType::LA16,
+            (RGB, 8) => ColorType::RGB8,
+            (RGB, 16) => ColorType::RGB16,
+            (RGBA, 8) => ColorType::RGBA8,
+            (RGBA, 16) => ColorType::RGBA16,
+
+            (Grayscale, _) |
+            (GrayscaleAlpha, _) |
+            (RGB, _) |
+            (RGBA, _) |
+            (Indexed, _) => unreachable!(),
+        };
+
+        Ok(PngDecoder { colortype, reader })
+    }
+
+    pub fn original_color_type(&self) -> (PngColorType, BitDepth) {
+        (self.reader.info().color_type, self.reader.info().bit_depth)
+    }
+}
+
+impl<'a, R: 'a + Read> ImageDecoder<'a> for PngDecoder<R> {
+    type Reader = PngReader<R>;
+
+    fn dimensions(&self) -> (u64, u64) {
+        let (w, h) = self.reader.info().size();
+        (w as u64, h as u64)
+    }
+
+    fn colortype(&self) -> ColorType {
+        self.colortype
+    }
+
+    fn into_reader(self) -> ImageResult<Self::Reader> {
+        PngReader::new(self.reader)
+    }
+
+    fn read_image(mut self, data: &mut [u8]) -> ImageResult<()> {
+        assert_eq!(data.len(), self.reader.output_buffer_size());
+        self.reader.next_frame(data)?;
+        Ok(())
+    }
+
+    fn scanline_bytes(&self) -> u64 {
+        let width = self.reader.info().width;
+        self.reader.output_line_size(width) as u64
+    }
+}
+
 /*
 #[cfg(test)]
 mod test {

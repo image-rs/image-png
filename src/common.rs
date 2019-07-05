@@ -2,7 +2,7 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ColorType {
+pub enum PngColorType {
     Grayscale = 0,
     RGB = 2,
     Indexed = 3,
@@ -10,10 +10,10 @@ pub enum ColorType {
     RGBA = 6
 }
 
-impl ColorType {
-    /// Returns the number of samples used per pixel of `ColorType`
+impl PngColorType {
+    /// Returns the number of samples used per pixel of `PngColorType`
     pub fn samples(&self) -> usize {
-        use self::ColorType::*;
+        use self::PngColorType::*;
         match *self {
             Grayscale | Indexed => 1,
             RGB => 3,
@@ -23,13 +23,13 @@ impl ColorType {
     }
     
     /// u8 -> Self. Temporary solution until Rust provides a canonical one.
-    pub fn from_u8(n: u8) -> Option<ColorType> {
+    pub fn from_u8(n: u8) -> Option<PngColorType> {
         match n {
-            0 => Some(ColorType::Grayscale),
-            2 => Some(ColorType::RGB),
-            3 => Some(ColorType::Indexed),
-            4 => Some(ColorType::GrayscaleAlpha),
-            6 => Some(ColorType::RGBA),
+            0 => Some(PngColorType::Grayscale),
+            2 => Some(PngColorType::RGB),
+            3 => Some(PngColorType::Indexed),
+            4 => Some(PngColorType::GrayscaleAlpha),
+            6 => Some(PngColorType::RGBA),
             _ => None
         }
     }
@@ -128,7 +128,7 @@ pub struct Info {
     pub width: u32,
     pub height: u32,
     pub bit_depth: BitDepth,
-    pub color_type: ColorType,
+    pub color_type: PngColorType,
     pub interlaced: bool,
     pub trns: Option<Vec<u8>>,
     pub pixel_dims: Option<PixelDimensions>,
@@ -143,7 +143,7 @@ impl Default for Info {
             width: 0,
             height: 0,
             bit_depth: BitDepth::Eight,
-            color_type: ColorType::Grayscale,
+            color_type: PngColorType::Grayscale,
             interlaced: false,
             palette: None,
             trns: None,
@@ -219,36 +219,33 @@ bitflags! {
         const IDENTITY            = 0x0000; // read and write */
         /// Strip 16-bit samples to 8 bits
         const STRIP_16            = 0x0001; // read only */
-        /// Discard the alpha channel
-        const STRIP_ALPHA         = 0x0002; // read only */
-        /// Expand 1; 2 and 4-bit samples to bytes
-        const PACKING             = 0x0004; // read and write */
-        /// Change order of packed pixels to LSB first
-        const PACKSWAP            = 0x0008; // read and write */
+        // /// Discard the alpha channel
+        // const STRIP_ALPHA         = 0x0002; // read only */
+        // /// Expand 1; 2 and 4-bit samples to bytes
+        // const PACKING             = 0x0004; // read and write */
+        // /// Change order of packed pixels to LSB first
+        // const PACKSWAP            = 0x0008; // read and write */
         /// Expand paletted images to RGB; expand grayscale images of
         /// less than 8-bit depth to 8-bit depth; and expand tRNS chunks
         /// to alpha channels.
         const EXPAND              = 0x0010; // read only */
-        /// Invert monochrome images
-        const INVERT_MONO         = 0x0020; // read and write */
-        /// Normalize pixels to the sBIT depth
-        const SHIFT               = 0x0040; // read and write */
-        /// Flip RGB to BGR; RGBA to BGRA
-        const BGR                 = 0x0080; // read and write */
-        /// Flip RGBA to ARGB or GA to AG
-        const SWAP_ALPHA          = 0x0100; // read and write */
-        /// Byte-swap 16-bit samples
-        const SWAP_ENDIAN         = 0x0200; // read and write */
-        /// Change alpha from opacity to transparency
-        const INVERT_ALPHA        = 0x0400; // read and write */
-        const STRIP_FILLER        = 0x0800; // write only */
-        const STRIP_FILLER_BEFORE = 0x0800; // write only
-        const STRIP_FILLER_AFTER  = 0x1000; // write only */
-        const GRAY_TO_RGB         = 0x2000; // read only */
-        const EXPAND_16           = 0x4000; // read only */
+        // /// Invert monochrome images
+        // const INVERT_MONO         = 0x0020; // read and write */
+        // /// Normalize pixels to the sBIT depth
+        // const SHIFT               = 0x0040; // read and write */
+        // /// Flip RGB to BGR; RGBA to BGRA
+        // const BGR                 = 0x0080; // read and write */
+        // /// Flip RGBA to ARGB or GA to AG
+        // const SWAP_ALPHA          = 0x0100; // read and write */
+        // /// Byte-swap 16-bit samples
+        // const SWAP_ENDIAN         = 0x0200; // read and write */
+        // /// Change alpha from opacity to transparency
+        // const INVERT_ALPHA        = 0x0400; // read and write */
+        // const STRIP_FILLER        = 0x0800; // write only */
+        // const STRIP_FILLER_BEFORE = 0x0800; // write only
+        // const STRIP_FILLER_AFTER  = 0x1000; // write only */
+        // const GRAY_TO_RGB         = 0x2000; // read only */
+        // const EXPAND_16           = 0x4000; // read only */
         const SCALE_16            = 0x8000; // read only */
     }
 }
-
-
-    

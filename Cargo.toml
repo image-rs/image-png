@@ -1,32 +1,33 @@
 [package]
-name = "png"
-version = "0.13.2"
-license = "MIT/Apache-2.0"
-description = "PNG decoding and encoding library in pure Rust"
 authors = ["nwin <nwin@users.noreply.github.com>"]
+description = "PNG decoding and encoding library in pure Rust"
+exclude = ["tests/*"]
+license = "MIT/Apache-2.0"
+name = "png"
 repository = "https://github.com/PistonDevelopers/image-png.git"
-exclude = [
-    "tests/*",
-]
-
+version = "0.13.2"
 [dependencies]
-inflate = "0.4.2"
-deflate = { version = "0.7.2", optional = true }
-num-iter = "0.1.32"
 bitflags = "1.0"
+image-core = { git = "https://github.com/image-rs/image-core" }
+inflate = "0.4.2"
+num-iter = "0.1.32"
+
+[dependencies.deflate]
+optional = true
+version = "0.7.2"
 
 [dev-dependencies]
 getopts = "0.2.14"
-term = "0.4"
 glob = "0.2.11"
 rand = "0.5.5"
+term = "0.4"
 
 [dev-dependencies.glium]
-version = "0.22"
-features = ["glutin"]
 default-features = false
+features = ["glutin"]
+version = "0.22"
 
 [features]
-png-encoding = ["deflate"]
 default = ["png-encoding"]
+png-encoding = ["deflate"]
 unstable = []

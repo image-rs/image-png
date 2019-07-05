@@ -1,17 +1,14 @@
-use std::borrow::Cow;
-use std::default::Default;
-use std::error;
-use std::fmt;
-use std::io;
-use std::cmp::min;
-use std::convert::From;
-
 extern crate inflate;
+
+use std::default::Default;
+use std::cmp::min;
+
+use image_core::ImageError;
 
 use self::inflate::InflateStream;
 use crc::Crc32;
 use traits::ReadBytesExt;
-use common::{ColorType, BitDepth, Info, Unit, PixelDimensions, AnimationControl, FrameControl};
+use common::{PngColorType, BitDepth, Info, Unit, PixelDimensions, AnimationControl, FrameControl};
 use chunk::{self, ChunkType, IHDR, IDAT, IEND};
 
 /// TODO check if these size are reasonable
@@ -42,7 +39,7 @@ enum State {
 pub enum Decoded {
     /// Nothing decoded yet
     Nothing,
-    Header(u32, u32, BitDepth, ColorType, bool),
+    Header(u32, u32, BitDepth, PngColorType, bool),
     ChunkBegin(u32, ChunkType),
     ChunkComplete(u32, ChunkType),
     PixelDimensions(PixelDimensions),
@@ -52,68 +49,6 @@ pub enum Decoded {
     ImageData,
     PartialChunk(ChunkType),
     ImageEnd,
-}
-
-#[derive(Debug)]
-pub enum DecodingError {
-    IoError(io::Error),
-    Format(Cow<'static, str>),
-    InvalidSignature,
-    CrcMismatch {
-        /// bytes to skip to try to recover from this error
-        recover: usize,
-        /// Stored CRC32 value
-        crc_val: u32,
-        /// Calculated CRC32 sum
-        crc_sum: u32,
-        chunk: ChunkType
-    },
-    Other(Cow<'static, str>),
-    CorruptFlateStream
-}
-
-impl error::Error for DecodingError {
-    fn description(&self) -> &str {
-        use self::DecodingError::*;
-        match *self {
-            IoError(ref err) => err.description(),
-            Format(ref desc) | Other(ref desc) => &desc,
-            InvalidSignature => "invalid signature",
-            CrcMismatch { .. } => "CRC error",
-            CorruptFlateStream => "compressed data stream corrupted"
-        }
-    }
-}
-
-impl fmt::Display for DecodingError {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(fmt, "{}", (self as &error::Error).description())
-    }
-}
-
-impl From<io::Error> for DecodingError {
-    fn from(err: io::Error) -> DecodingError {
-        DecodingError::IoError(err)
-    }
-}
-
-impl From<String> for DecodingError {
-    fn from(err: String) -> DecodingError {
-        DecodingError::Other(err.into())
-    }
-}
-
-impl From<DecodingError> for io::Error {
-    fn from(err: DecodingError) -> io::Error {
-        use std::error::Error;
-        match err {
-            DecodingError::IoError(err) => err,
-            err => io::Error::new(
-                io::ErrorKind::Other,
-                err.description()
-            )
-        }
-    }
 }
 
 /// PNG StreamingDecoder (low-level interface)
@@ -159,7 +94,7 @@ impl StreamingDecoder {
     /// been consumed from the input buffer and the current decoding result. If the decoded chunk
     /// was an image data chunk, it also appends the read data to `image_data`.
     pub fn update(&mut self, mut buf: &[u8], image_data: &mut Vec<u8>)
-    -> Result<(usize, Decoded), DecodingError> {
+    -> Result<(usize, Decoded), ImageError> {
         let len = buf.len();
         while buf.len() > 0 && self.state.is_some() {
             match self.next_state(buf, image_data) {
@@ -177,7 +112,7 @@ impl StreamingDecoder {
     }
 
     fn next_state<'a>(&'a mut self, buf: &[u8], image_data: &mut Vec<u8>)
-    -> Result<(usize, Decoded), DecodingError> {
+    -> Result<(usize, Decoded), ImageError> {
         use self::State::*;
 
         macro_rules! goto (
@@ -213,7 +148,7 @@ impl StreamingDecoder {
                 if signature == [137, 80, 78, 71, 13, 10, 26] && current_byte == 10 {
                     goto!(U32(U32Value::Length))
                 } else {
-                    Err(DecodingError::InvalidSignature)
+                    Err(ImageError::InvalidData("Invalid signature".to_owned()))
                 }
             },
             U32Byte3(type_, mut val) => {
@@ -247,12 +182,10 @@ impl StreamingDecoder {
                                 }
                             )
                         } else {
-                            Err(DecodingError::CrcMismatch {
-                                recover: 1,
-                                crc_val: val,
-                                crc_sum: self.current_chunk.0.checksum(),
-                                chunk: type_str
-                            })
+                            Err(ImageError::InvalidData(format!(
+                                "CRC mismatch {{ crc_val: {}, crc_sum: {}, chunk: {:?} }}",
+                                val, self.current_chunk.0.checksum(), type_str)
+                            ))
                         }
                     },
                 }
@@ -281,7 +214,7 @@ impl StreamingDecoder {
                             let mut buf = &self.current_chunk.2[..];
                             let next_seq_no = try!(buf.read_be());
                             if next_seq_no != seq_no + 1 {
-                                return Err(DecodingError::Format(format!(
+                                return Err(ImageError::InvalidData(format!(
                                     "Sequence is not in order, expected #{} got #{}.",
                                     seq_no + 1,
                                     next_seq_no
@@ -289,7 +222,7 @@ impl StreamingDecoder {
                             }
                             self.current_seq_no = Some(next_seq_no);
                         } else {
-                            return Err(DecodingError::Format("fcTL chunk missing before fdAT chunk.".into()))
+                            return Err(ImageError::InvalidData("fcTL chunk missing before fdAT chunk.".into()))
                         }
                         goto!(
                             0,
@@ -341,7 +274,9 @@ impl StreamingDecoder {
             }
             DecodeData(type_str, mut n) => {
                 let chunk_len = self.current_chunk.2.len();
-                let (c, data) = try!(self.inflater.update(&self.current_chunk.2[n..]));
+                let (c, data) = self.inflater
+                    .update(&self.current_chunk.2[n..])
+                    .map_err(|e| ImageError::InvalidData(format!("inflate error: {}", e)))?;
                 image_data.extend_from_slice(data);
                 n += c;
                 if n == chunk_len && data.len() == 0 && c == 0 {
@@ -362,10 +297,10 @@ impl StreamingDecoder {
     }
 
     fn parse_chunk(&mut self, type_str: [u8; 4])
-    -> Result<Decoded, DecodingError> {
+    -> Result<Decoded, ImageError> {
         self.state = Some(State::U32(U32Value::Crc(type_str)));
         if self.info.is_none() && type_str != IHDR {
-            return Err(DecodingError::Format(format!(
+            return Err(ImageError::InvalidData(format!(
                 "{} chunk appeared before IHDR chunk", String::from_utf8_lossy(&type_str)
             ).into()))
         }
@@ -399,21 +334,21 @@ impl StreamingDecoder {
         }
     }
 
-    fn get_info_or_err(&self) -> Result<&Info, DecodingError> {
-        self.info.as_ref().ok_or(DecodingError::Format(
+    fn get_info_or_err(&self) -> Result<&Info, ImageError> {
+        self.info.as_ref().ok_or(ImageError::InvalidData(
             "IHDR chunk missing".into()
         ))
     }
 
     fn parse_fctl(&mut self)
-    -> Result<Decoded, DecodingError> {
+    -> Result<Decoded, ImageError> {
         let mut buf = &self.current_chunk.2[..];
         let next_seq_no = try!(buf.read_be());
 
         // Asuming that fcTL is required before *every* fdAT-sequence
         self.current_seq_no = Some(if let Some(seq_no) = self.current_seq_no {
             if next_seq_no != seq_no + 1 {
-                return Err(DecodingError::Format(format!(
+                return Err(ImageError::InvalidData(format!(
                     "Sequence is not in order, expected #{} got #{}.",
                     seq_no + 1,
                     next_seq_no
@@ -422,7 +357,7 @@ impl StreamingDecoder {
             next_seq_no
         } else {
             if next_seq_no != 0 {
-                return Err(DecodingError::Format(format!(
+                return Err(ImageError::InvalidData(format!(
                     "Sequence is not in order, expected #{} got #{}.",
                     0,
                     next_seq_no
@@ -447,9 +382,9 @@ impl StreamingDecoder {
     }
 
     fn parse_actl(&mut self)
-    -> Result<Decoded, DecodingError> {
+    -> Result<Decoded, ImageError> {
         if self.have_idat {
-            Err(DecodingError::Format(
+            Err(ImageError::InvalidData(
                 "acTL chunk appeared after first IDAT chunk".into()
             ))
         } else {
@@ -464,7 +399,7 @@ impl StreamingDecoder {
     }
 
     fn parse_plte(&mut self)
-    -> Result<Decoded, DecodingError> {
+    -> Result<Decoded, ImageError> {
         let mut vec = Vec::new();
         vec.extend(self.current_chunk.2.iter().map(|&v| v));
         self.info.as_mut().map(
@@ -474,8 +409,8 @@ impl StreamingDecoder {
     }
 
     fn parse_trns(&mut self)
-    -> Result<Decoded, DecodingError> {
-        use common::ColorType::*;
+    -> Result<Decoded, ImageError> {
+        use PngColorType::*;
         let (color_type, bit_depth) = {
             let info = try!(self.get_info_or_err());
             (info.color_type, info.bit_depth as u8)
@@ -485,7 +420,7 @@ impl StreamingDecoder {
         let len = vec.len();
         let info = match self.info {
             Some(ref mut info) => info,
-            None => return Err(DecodingError::Format(
+            None => return Err(ImageError::InvalidData(
               "tRNS chunk occured before IHDR chunk".into()
             ))
         };
@@ -494,7 +429,7 @@ impl StreamingDecoder {
         match color_type {
             Grayscale => {
                 if len < 2 {
-                    return Err(DecodingError::Format(
+                    return Err(ImageError::InvalidData(
                         "not enough palette entries".into()
                     ))
                 }
@@ -506,7 +441,7 @@ impl StreamingDecoder {
             },
             RGB => {
                 if len < 6 {
-                    return Err(DecodingError::Format(
+                    return Err(ImageError::InvalidData(
                         "not enough palette entries".into()
                     ))
                 }
@@ -519,12 +454,12 @@ impl StreamingDecoder {
                 Ok(Decoded::Nothing)
             },
             Indexed => {
-                let _ = info.palette.as_ref().ok_or(DecodingError::Format(
+                let _ = info.palette.as_ref().ok_or(ImageError::InvalidData(
                     "tRNS chunk occured before PLTE chunk".into()
                 ));
                 Ok(Decoded::Nothing)
             },
-            c => Err(DecodingError::Format(
+            c => Err(ImageError::InvalidData(
                 format!("tRNS chunk found for color type ({})", c as u8).into()
             ))
         }
@@ -532,9 +467,9 @@ impl StreamingDecoder {
     }
 
     fn parse_phys(&mut self)
-    -> Result<Decoded, DecodingError> {
+    -> Result<Decoded, ImageError> {
         if self.have_idat {
-            Err(DecodingError::Format(
+            Err(ImageError::InvalidData(
                 "pHYs chunk appeared after first IDAT chunk".into()
             ))
         } else {
@@ -544,7 +479,7 @@ impl StreamingDecoder {
             let unit = try!(buf.read_be());
             let unit = match Unit::from_u8(unit) {
                 Some(unit) => unit,
-                None => return Err(DecodingError::Format(
+                None => return Err(ImageError::InvalidData(
                     format!("invalid unit ({})", unit).into()
                 ))
             };
@@ -559,7 +494,7 @@ impl StreamingDecoder {
     }
 
     fn parse_ihdr(&mut self)
-    -> Result<Decoded, DecodingError> {
+    -> Result<Decoded, ImageError> {
         // TODO: check if color/bit depths combination is valid
         let mut buf = &self.current_chunk.2[..];
         let width = try!(buf.read_be());
@@ -567,26 +502,26 @@ impl StreamingDecoder {
         let bit_depth = try!(buf.read_be());
         let bit_depth = match BitDepth::from_u8(bit_depth) {
             Some(bits) => bits,
-            None => return Err(DecodingError::Format(
+            None => return Err(ImageError::InvalidData(
                 format!("invalid bit depth ({})", bit_depth).into()
             ))
         };
         let color_type = try!(buf.read_be());
-        let color_type = match ColorType::from_u8(color_type) {
+        let color_type = match PngColorType::from_u8(color_type) {
             Some(color_type) => color_type,
-            None => return Err(DecodingError::Format(
+            None => return Err(ImageError::InvalidData(
                 format!("invalid color type ({})", color_type).into()
             ))
         };
         match try!(buf.read_be()) { // compression method
             0u8 => (),
-            n => return Err(DecodingError::Format(
+            n => return Err(ImageError::InvalidData(
                 format!("unknown compression method ({})", n).into()
             ))
         }
         match try!(buf.read_be()) { // filter method
             0u8 => (),
-            n => return Err(DecodingError::Format(
+            n => return Err(ImageError::InvalidData(
                 format!("unknown filter method ({})", n).into()
             ))
         }
@@ -595,7 +530,7 @@ impl StreamingDecoder {
             1 => {
                 true
             },
-            n => return Err(DecodingError::Format(
+            n => return Err(ImageError::InvalidData(
                 format!("unknown interlace method ({})", n).into()
             ))
         };

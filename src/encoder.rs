@@ -1,111 +1,104 @@
 extern crate deflate;
 
-use std::borrow::Cow;
-use std::error;
-use std::fmt;
-use std::io::{self, Write};
+use std::io::Write;
 use std::mem;
-use std::result;
+
+use image_core::{ColorType, ImageError, ImageResult};
 
 use chunk;
 use crc::Crc32;
 use common::{Info, PngColorType, BitDepth};
 use filter::{FilterType, filter};
-use traits::{WriteBytesExt, HasParameters, Parameter};
-
-pub type Result<T> = result::Result<T, EncodingError>;
-
-#[derive(Debug)]
-pub enum EncodingError {
-    IoError(io::Error),
-    Format(Cow<'static, str>),
-}
-
-impl error::Error for EncodingError {
-    fn description(&self) -> &str {
-        use self::EncodingError::*;
-        match *self {
-            IoError(ref err) => err.description(),
-            Format(ref desc) => &desc,
-        }
-    }
-}
-
-impl fmt::Display for EncodingError {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        write!(fmt, "{}", (self as &dyn error::Error).description())
-    }
-}
-
-impl From<io::Error> for EncodingError {
-    fn from(err: io::Error) -> EncodingError {
-        EncodingError::IoError(err)
-    }
-}
-impl From<EncodingError> for io::Error {
-    fn from(err: EncodingError) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, (&err as &dyn error::Error).description())
-    }
-}
+use traits::WriteBytesExt;
+use utils;
 
 /// PNG Encoder
-pub struct Encoder<W: Write> {
+pub struct PngEncoder<W: Write> {
     w: W,
     info: Info,
 }
 
-impl<W: Write> Encoder<W> {
-    pub fn new(w: W, width: u32, height: u32) -> Encoder<W> {
+impl<W: Write> PngEncoder<W> {
+    pub fn new(w: W, width: u32, height: u32, color_type: ColorType) -> ImageResult<Self> {
+        let (color_type, bits) = match color_type {
+            ColorType::L8 => (PngColorType::Grayscale, BitDepth::Eight),
+            ColorType::LA8 => (PngColorType::GrayscaleAlpha, BitDepth::Eight),
+            ColorType::RGB8 => (PngColorType::RGB, BitDepth::Eight),
+            ColorType::RGBA8 => (PngColorType::RGBA, BitDepth::Eight),
+            ColorType::L16 => (PngColorType::Grayscale, BitDepth::Sixteen),
+            ColorType::LA16 => (PngColorType::GrayscaleAlpha, BitDepth::Sixteen),
+            ColorType::RGB16 => (PngColorType::RGB, BitDepth::Sixteen),
+            ColorType::RGBA16 => (PngColorType::RGBA, BitDepth::Sixteen),
+            _ => return Err(ImageError::UnsupportedColor(color_type)),
+        };
+
         let mut info = Info::default();
         info.width = width;
         info.height = height;
-        Encoder { w: w, info: info }
+        info.bit_depth = bits;
+        info.color_type = color_type;
+        Self::write_header(w, info)
     }
 
-    pub fn write_header(self) -> Result<Writer<W>> {
-        Writer::new(self.w, self.info).init()
+    /// Create a `PngEncoder` that writes data with a specified output color type.
+    pub fn with_output_colortype(
+        w: W,
+        width: u32,
+        height: u32,
+        input_colortype: ColorType,
+        output_colortype: PngColorType,
+        output_bit_depth: BitDepth) -> ImageResult<Self>
+    {
+        if (input_colortype.bits_per_pixel() == 16) != (output_bit_depth == BitDepth::Sixteen) {
+            return Err(ImageError::UnsupportedFeature(
+                "Cannot convert between 16 bpp formats and non-16 bpp formats".to_owned()));
+        }
+
+        let input_png_colortype = match input_colortype {
+            ColorType::L8 => PngColorType::Grayscale,
+            ColorType::LA8 => PngColorType::GrayscaleAlpha,
+            ColorType::RGB8 => PngColorType::RGB,
+            ColorType::RGBA8 => PngColorType::RGBA,
+            ColorType::L16 => PngColorType::Grayscale,
+            ColorType::LA16 => PngColorType::GrayscaleAlpha,
+            ColorType::RGB16 => PngColorType::RGB,
+            ColorType::RGBA16 => PngColorType::RGBA,
+            _ => return Err(ImageError::UnsupportedColor(input_colortype)),
+        };
+
+        if input_png_colortype != output_colortype {
+            return Err(ImageError::UnsupportedFeature(
+                format!("Cannot convert between {:?} and {:?}", input_colortype, output_colortype)));
+        }
+
+        let mut info = Info::default();
+        info.width = width;
+        info.height = height;
+        info.bit_depth = output_bit_depth;
+        info.color_type = output_colortype;
+        Self::write_header(w, info)
     }
-}
 
-impl<W: Write> HasParameters for Encoder<W> {}
-
-impl<W: Write> Parameter<Encoder<W>> for PngColorType {
-    fn set_param(self, this: &mut Encoder<W>) {
-        this.info.color_type = self
-    }
-}
-
-impl<W: Write> Parameter<Encoder<W>> for BitDepth {
-    fn set_param(self, this: &mut Encoder<W>) {
-        this.info.bit_depth = self
-    }
-}
-
-/// PNG writer
-pub struct Writer<W: Write> {
-    w: W,
-    info: Info,
-}
-
-impl<W: Write> Writer<W> {
-    fn new(w: W, info: Info) -> Writer<W> {
-        let w = Writer { w: w, info: info };
-        w
+    /// *CURRENTLY UNIMPLEMENTED* function to create a `PngEncoder` with the specified palette.
+    pub fn with_palette(_w: W, _width: u32, _height: u32, _palette: &[u8]) {
+        unimplemented!();
     }
 
-    fn init(mut self) -> Result<Self> {
-        try!(self.w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10]));
+    fn write_header(mut w: W, info: Info) -> ImageResult<Self> {
+        try!(w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10]));
         let mut data = [0; 13];
-        try!((&mut data[..]).write_be(self.info.width));
-        try!((&mut data[4..]).write_be(self.info.height));
-        data[8] = self.info.bit_depth as u8;
-        data[9] = self.info.color_type as u8;
-        data[12] = if self.info.interlaced { 1 } else { 0 };
-        try!(self.write_chunk(chunk::IHDR, &data));
-        Ok(self)
+        try!((&mut data[..]).write_be(info.width));
+        try!((&mut data[4..]).write_be(info.height));
+        data[8] = info.bit_depth as u8;
+        data[9] = info.color_type as u8;
+        data[12] = if info.interlaced { 1 } else { 0 };
+
+        let mut encoder = Self { w, info };
+        try!(encoder.write_chunk(chunk::IHDR, &data));
+        Ok(encoder)
     }
 
-    pub fn write_chunk(&mut self, name: [u8; 4], data: &[u8]) -> Result<()> {
+    pub fn write_chunk(&mut self, name: [u8; 4], data: &[u8]) -> ImageResult<()> {
         try!(self.w.write_be(data.len() as u32));
         try!(self.w.write_all(&name));
         try!(self.w.write_all(data));
@@ -117,20 +110,34 @@ impl<W: Write> Writer<W> {
     }
 
     /// Writes the image data.
-    pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
+    pub fn write_image_data(&mut self, data: &[u8]) -> ImageResult<()> {
         let bpp = self.info.bytes_per_pixel();
-        let in_len = self.info.raw_row_length() - 1;
-        let mut prev = vec![0; in_len];
-        let mut current = vec![0; in_len];
+
+        // The constructors guarantee that the input color type will always be 8 or 16 bits per
+        // sample and further that the output bit depth (info.bit_depth) will only be <8 if the
+        // input bit depth is equal to 8.
+        let in_len = self.info.width as usize
+            * self.info.color_type.samples()
+            * if self.info.bit_depth == BitDepth::Sixteen { 2 } else { 1 };
+
         let data_size = in_len * self.info.height as usize;
         if data_size != data.len() {
             let message = format!("wrong data size, expected {} got {}", data_size, data.len());
-            return Err(EncodingError::Format(message.into()));
+            return Err(ImageError::InvalidData(message));
         }
+
+        let raw_len = self.info.raw_row_length() - 1;
+        let mut prev = vec![0; raw_len];
+        let mut current = vec![0; raw_len];
+
         let mut zlib = deflate::write::ZlibEncoder::new(Vec::new(), deflate::Compression::Fast);
         let filter_method = FilterType::Sub;
         for line in data.chunks(in_len) {
-            current.copy_from_slice(&line);
+            if (self.info.bit_depth as u8) < 8 {
+                utils::pack_bits(line, &mut current, self.info.bit_depth as u8);
+           } else {
+                current.copy_from_slice(&line);
+            }
             try!(zlib.write_all(&[filter_method as u8]));
             filter(filter_method, bpp, &prev, &mut current);
             try!(zlib.write_all(&current));
@@ -140,7 +147,7 @@ impl<W: Write> Writer<W> {
     }
 }
 
-impl<W: Write> Drop for Writer<W> {
+impl<W: Write> Drop for PngEncoder<W> {
     fn drop(&mut self) {
         let _ = self.write_chunk(chunk::IEND, &[]);
     }
@@ -149,6 +156,10 @@ impl<W: Write> Drop for Writer<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use image_core::ImageDecoder;
+
+    use crate::PngDecoder;
 
     extern crate rand;
     extern crate glob;
@@ -168,14 +179,12 @@ mod tests {
                     continue;
                 }
                 // Decode image
-                let decoder = ::Decoder::new(File::open(path).unwrap());
-                let (info, mut reader) = decoder.read_info().unwrap();
-                if info.line_size != 32 {
-                    // TODO encoding only works with line size 32?
-                    continue;
-                }
-                let mut buf = vec![0; info.buffer_size()];
-                reader.next_frame(&mut buf).unwrap();
+                let decoder = PngDecoder::new(File::open(path).unwrap()).unwrap();
+                let dimensions = decoder.dimensions();
+                let color_type = decoder.colortype();
+                let mut buf = vec![0; decoder.total_bytes() as usize];
+                decoder.read_image(&mut buf).unwrap();
+
                 // Encode decoded image
                 let mut out = Vec::new();
                 {
@@ -184,14 +193,16 @@ mod tests {
                         w: &mut out
                     };
 
-                    let mut encoder = Encoder::new(&mut wrapper, info.width, info.height).write_header().unwrap();
+                    let mut encoder = PngEncoder::new(&mut wrapper,
+                                                      dimensions.0 as u32,
+                                                      dimensions.1 as u32,
+                                                      color_type).unwrap();
                     encoder.write_image_data(&buf).unwrap();
                 }
                 // Decode encoded decoded image
-                let decoder = ::Decoder::new(&*out);
-                let (info, mut reader) = decoder.read_info().unwrap();
-                let mut buf2 = vec![0; info.buffer_size()];
-                reader.next_frame(&mut buf2).unwrap();
+                let decoder = PngDecoder::new(&*out).unwrap();
+                let mut buf2 = vec![0; decoder.total_bytes() as usize];
+                decoder.read_image(&mut buf2).unwrap();
                 // check if the encoded image is ok:
                 assert_eq!(buf, buf2);
             }
@@ -199,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn expect_error_on_wrong_image_len() -> Result<()> {
+    fn expect_error_on_wrong_image_len() -> ImageResult<()> {
         use std::io::Cursor;
 
         let width = 10;
@@ -207,14 +218,11 @@ mod tests {
 
         let output = vec![0u8; 1024];
         let writer = Cursor::new(output);
-        let mut encoder = Encoder::new(writer, width as u32, height as u32);
-        encoder.set(BitDepth::Eight);
-        encoder.set(PngColorType::RGB);
-        let mut png_writer = encoder.write_header()?;
+        let mut encoder = PngEncoder::new(writer, width as u32, height as u32, ColorType::RGB8).unwrap();
 
         let correct_image_size = width * height * 3;
         let image = vec![0u8; correct_image_size + 1];
-        let result = png_writer.write_image_data(image.as_ref());
+        let result = encoder.write_image_data(image.as_ref());
         assert!(result.is_err());
 
         Ok(())

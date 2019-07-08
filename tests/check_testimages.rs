@@ -1,5 +1,8 @@
 extern crate png;
 extern crate glob;
+extern crate image_core;
+
+use image_core::{ImageError, ImageDecoder};
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -11,7 +14,7 @@ use std::io::prelude::*;
 const BASE_PATH: [&'static str; 2] = [".", "tests"];
 
 fn process_images<F>(func: F)
-where F: Fn(PathBuf) -> Result<u32, png::DecodingError> {
+where F: Fn(PathBuf) -> Result<u32, ImageError> {
     let base: PathBuf = BASE_PATH.iter().collect();
     let test_suites = &["pngsuite", "pngsuite-extra", "bugfixes"];
     let mut results = HashMap::new();
@@ -31,7 +34,7 @@ where F: Fn(PathBuf) -> Result<u32, png::DecodingError> {
                 Err(_) if path.file_name().unwrap().to_str().unwrap().starts_with("x") => {
                     expected_failures += 1;
                     println!("Expected failure")
-                },   
+                },
                 err => panic!("{:?}", err)
             }
         }
@@ -52,7 +55,7 @@ where F: Fn(PathBuf) -> Result<u32, png::DecodingError> {
     assert_eq!(expected_failures, failures);
     for (path, crc) in results.iter() {
         assert_eq!(
-            ref_results.get(path).expect(&format!("reference for {:?} is missing", path)), 
+            ref_results.get(path).expect(&format!("reference for {:?} is missing", path)),
             crc
         )
     }
@@ -61,18 +64,20 @@ where F: Fn(PathBuf) -> Result<u32, png::DecodingError> {
 #[test]
 fn render_images() {
     process_images(|path| {
-        let decoder = png::Decoder::new(try!(File::open(path)));
-        let (info, mut reader) = try!(decoder.read_info());
-        let mut img_data = vec![0; info.buffer_size()];
-        try!(reader.next_frame(&mut img_data));
+        let decoder = png::PngDecoder::new(File::open(path)?)?;
+        let total_bytes = decoder.total_bytes();
+
         // First sanity check:
         assert_eq!(
-            img_data.len(), 
-            info.width as usize
-            * info.height as usize
-            * info.color_type.samples()
-            * info.bit_depth as usize/8
+            total_bytes,
+            decoder.dimensions().0
+                * decoder.dimensions().1
+                * decoder.colortype().bits_per_pixel() / 8
         );
+
+        let mut img_data = vec![0; total_bytes as usize];
+        decoder.read_image(&mut img_data)?;
+
         let mut crc = Crc32::new();
         crc.update(&img_data);
         Ok(crc.checksum())

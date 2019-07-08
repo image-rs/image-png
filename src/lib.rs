@@ -6,18 +6,17 @@
 //! `Decoder` serves as a builder for `Reader`. Calling `Decoder::read_info` reads from the `Read` until the
 //! image data is reached.
 //! ### Using the decoder
+//!     # extern crate image_core;
 //!     use std::fs::File;
+//!     use image_core::ImageDecoder;
+//!     use png::PngDecoder;
 //!
-//!     // The decoder is a build for reader and can be used to set various decoding options
-//!     // via `Transformations`. The default output transformation is `Transformations::EXPAND
-//!     // | Transformations::STRIP_ALPHA`.
-//!     let decoder = png::Decoder::new(File::open("tests/pngsuite/basi0g01.png").unwrap());
-//!     let (info, mut reader) = decoder.read_info().unwrap();
+//!     let decoder = PngDecoder::new(File::open("tests/pngsuite/basi0g01.png").unwrap()).unwrap();
+//!     let (width, height) = decoder.dimensions();
+//!     let color_type = decoder.colortype();
 //!     // Allocate the output buffer.
-//!     let mut buf = vec![0; info.buffer_size()];
-//!     // Read the next frame. Currently this function should only called once.
-//!     // The default options
-//!     reader.next_frame(&mut buf).unwrap();
+//!     let mut buf = vec![0; decoder.total_bytes() as usize];
+//!     decoder.read_image(&mut buf).unwrap();
 //! ## Encoder
 //! ### Using the encoder
 //! ```ignore
@@ -42,7 +41,7 @@
 //!
 //#![cfg_attr(test, feature(test))]
 
-#[macro_use] extern crate bitflags;
+#![deny(unsafe_code)]
 
 extern crate image_core;
 extern crate num_iter;
@@ -60,6 +59,6 @@ mod utils;
 pub use common::*;
 pub use decoder::{PngReader, PngDecoder, StreamingDecoder, Decoded};
 #[cfg(feature = "png-encoding")]
-pub use encoder::{Encoder, Writer, EncodingError};
+pub use encoder::PngEncoder;
 
 pub use traits::{Parameter, HasParameters};

@@ -6,8 +6,8 @@ license = "MIT/Apache-2.0"
 name = "png"
 repository = "https://github.com/PistonDevelopers/image-png.git"
 version = "0.13.2"
+
 [dependencies]
-bitflags = "1.0"
 image-core = { git = "https://github.com/image-rs/image-core" }
 inflate = "0.4.2"
 num-iter = "0.1.32"

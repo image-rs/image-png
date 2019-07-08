@@ -1,6 +1,7 @@
 extern crate glium;
 extern crate glob;
 extern crate png;
+extern crate image_core;
 
 use std::env;
 use std::io;
@@ -9,6 +10,8 @@ use std::borrow::Cow;
 use std::path;
 use std::error::Error;
 
+use image_core::ImageDecoder;
+
 use glium::{Surface, Rect, BlitTarget};
 use glium::texture::{RawImage2d, ClientFormat};
 use glium::glutin::{self, Event, VirtualKeyCode, dpi};
@@ -16,13 +19,15 @@ use glium::backend::glutin::Display;
 
 /// Load the image using `png`
 fn load_image(path: &path::PathBuf) -> io::Result<RawImage2d<'static, u8>> {
-    use png::ColorType::*;
-    let decoder = png::Decoder::new(try!(File::open(path)));
-    let (info, mut reader) = try!(decoder.read_info());
-    let mut img_data = vec![0; info.buffer_size()];
-    try!(reader.next_frame(&mut img_data));
+    use png::PngColorType::*;
+    let decoder = png::PngDecoder::new(try!(File::open(path)))?;
+    let color_type = decoder.original_colortype().0;
+    let (width, height) = decoder.dimensions();
 
-    let (data, format) = match info.color_type {
+    let mut img_data = vec![0; decoder.total_bytes() as usize];
+    decoder.read_image(&mut img_data)?;
+
+    let (data, format) = match color_type {
         RGB => (img_data, ClientFormat::U8U8U8),
         RGBA => (img_data, ClientFormat::U8U8U8U8),
         Grayscale => (
@@ -51,8 +56,8 @@ fn load_image(path: &path::PathBuf) -> io::Result<RawImage2d<'static, u8>> {
 
     Ok(RawImage2d {
         data: Cow::Owned(data),
-        width: info.width,
-        height: info.height,
+        width: width as u32,
+        height: height as u32,
         format: format
     })
 }

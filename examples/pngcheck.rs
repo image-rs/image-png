@@ -2,6 +2,7 @@
 
 extern crate getopts;
 extern crate glob;
+extern crate image_core;
 extern crate png;
 extern crate term;
 
@@ -10,6 +11,8 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::fs::File;
 use std::env;
+
+use image_core::ImageError;
 
 use getopts::{Matches, Options, ParsingStyle};
 use term::{color, Attr};
@@ -47,8 +50,8 @@ fn display_interlaced(i: bool) -> &'static str {
     }
 }
 
-fn display_image_type(bits: u8, color: png::ColorType) -> String {
-    use png::ColorType::*;
+fn display_image_type(bits: u8, color: png::PngColorType) -> String {
+    use png::PngColorType::*;
     format!(
         "{}-bit {}",
         bits,
@@ -62,8 +65,8 @@ fn display_image_type(bits: u8, color: png::ColorType) -> String {
     )
 }
 // channels after expansion of tRNS
-fn final_channels(c: png::ColorType, trns: bool) -> u8 {
-    use png::ColorType::*;
+fn final_channels(c: png::PngColorType, trns: bool) -> u8 {
+    use png::PngColorType::*;
     match c {
         Grayscale => 1 + if trns { 1 } else { 0 },
         RGB => 3,
@@ -90,7 +93,7 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
     // Image data
     let mut width = 0;
     let mut height = 0;
-    let mut color = png::ColorType::Grayscale;
+    let mut color = png::PngColorType::Grayscale;
     let mut bits = 0;
     let mut trns = false;
     let mut interlaced = false;
@@ -173,7 +176,7 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
         match decoder.update(buf, &mut Vec::new()) {
             Ok((_, ImageEnd)) => {
                 if !have_idat {
-                    try!(display_error(png::DecodingError::Format("IDAT chunk missing".into())));
+                    try!(display_error(ImageError::InvalidData("IDAT chunk missing".into())));
                     break;
                 }
                 if !c.verbose && !c.quiet {

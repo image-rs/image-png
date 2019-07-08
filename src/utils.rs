@@ -34,6 +34,24 @@ where F: Fn(u8, &mut[u8]) {
     }
 }
 
+pub fn pack_bits(input: &[u8], output: &mut [u8], bit_depth: u8) {
+    let inv_depth = 8 / bit_depth as usize;
+    let mask: u8 = match bit_depth {
+        4 => 0b11110000,
+        2 => 0b11000000,
+        1 => 0b10000000,
+        _ => unimplemented!(),
+    };
+    assert_eq!((input.len() + inv_depth - 1) / inv_depth, output.len());
+
+    for (i, chunk) in input.chunks(inv_depth).enumerate() {
+        output[i] = 0;
+        for (j, c) in chunk.iter().enumerate() {
+            output[i] |= (c & mask) >> (j * bit_depth as usize);
+        }
+    }
+}
+
 pub fn expand_trns_line(buf: &mut[u8], trns: &[u8], channels: usize) {
     let channels = channels as isize;
     let i = range_step(buf.len() as isize / (channels+1) * channels - channels, -channels, -channels);
@@ -195,4 +213,20 @@ fn test_adam7() {
     let it = Adam7Iterator::new(4, 4);
     let passes: Vec<_> = it.collect();
     assert_eq!(&*passes, &[(1, 0, 1), (4, 0, 1), (5, 0, 2), (6, 0, 2), (6, 1, 2), (7, 0, 4), (7, 1, 4)]);
+}
+
+#[test]
+fn test_pack_bits() {
+    let tests = [
+        (vec![0, 255, 134, 34, 4, 128], 1, vec![0b01100100]),
+        (vec![0, 255, 134, 34, 4, 126, 95, 254, 255], 1, vec![0b0110_0001, 0b10000000]),
+        (vec![0, 255, 134, 34, 4, 126, 95, 254, 255], 2, vec![0b00111000, 0b00010111, 0b11000000]),
+        (vec![0xb0, 0xe8, 0xe7, 0xff, 0x20], 4, vec![0xbe, 0xef, 0x20]),
+    ];
+
+    for (input, depth, target) in tests.iter() {
+        let mut out = vec![0; (input.len() + (8 / depth - 1) as usize) / (8 / *depth as usize)];
+        pack_bits(input, &mut out, *depth);
+        assert_eq!(out, *target);
+    }
 }

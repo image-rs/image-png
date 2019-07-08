@@ -8,7 +8,7 @@ use std::io::{self, Read, Write, BufReader, BufRead};
 
 use image_core::{ColorType, ImageDecoder, ImageError, ImageResult};
 
-use common::{PngColorType, BitDepth, Info, Transformations};
+use common::{PngColorType, BitDepth, Info};
 use filter::{unfilter, FilterType};
 use chunk::IDAT;
 use utils;
@@ -58,8 +58,6 @@ struct Reader<R: Read> {
     prev: Vec<u8>,
     /// Current raw line
     current: Vec<u8>,
-    /// Output transformations
-    transform: Transformations,
     /// Processed line
     processed: Vec<u8>
 }
@@ -72,7 +70,7 @@ macro_rules! get_info(
 
 impl<R: Read> Reader<R> {
     /// Creates a new PNG reader
-    fn new(r: R, d: StreamingDecoder, t: Transformations) -> Reader<R> {
+    fn new(r: R, d: StreamingDecoder) -> Reader<R> {
         Reader {
             decoder: ReadDecoder {
                 reader: BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
@@ -84,7 +82,6 @@ impl<R: Read> Reader<R> {
             adam7: None,
             prev: Vec::new(),
             current: Vec::new(),
-            transform: t,
             processed: Vec::new()
         }
     }
@@ -154,8 +151,7 @@ impl<R: Read> Reader<R> {
     /// Returns the next processed row of the image
     fn next_interlaced_row(&mut self) -> Result<Option<(&[u8], Option<(u8, u32, u32)>)>, ImageError> {
         use PngColorType::*;
-        let transform = self.transform;
-        if transform == ::Transformations::IDENTITY {
+        if self.identity_transform() {
             self.next_raw_interlaced_row()
         } else {
             // swap buffer to circumvent borrow issues
@@ -179,35 +175,26 @@ impl<R: Read> Reader<R> {
                 } else {
                     &mut *self.processed
                 };
-                let mut len = output_buffer.len();
-                if transform.contains(::Transformations::EXPAND) {
-                    match color_type {
-                        Indexed => {
-                            expand_paletted(output_buffer, get_info!(self))?
+                match color_type {
+                    Indexed => {
+                        expand_paletted(output_buffer, get_info!(self))?
+                    }
+                    Grayscale | GrayscaleAlpha if bit_depth < 8 => expand_gray_u8(
+                        output_buffer, get_info!(self)
+                    ),
+                    Grayscale | RGB if trns => {
+                        let channels = color_type.samples();
+                        let trns = get_info!(self).trns.as_ref().unwrap();
+                        if bit_depth == 8 {
+                            utils::expand_trns_line(output_buffer, &*trns, channels);
+                        } else {
+                            utils::expand_trns_line16(output_buffer, &*trns, channels);
                         }
-                        Grayscale | GrayscaleAlpha if bit_depth < 8 => expand_gray_u8(
-                            output_buffer, get_info!(self)
-                        ),
-                        Grayscale | RGB if trns => {
-                            let channels = color_type.samples();
-                            let trns = get_info!(self).trns.as_ref().unwrap();
-                            if bit_depth == 8 {
-                                utils::expand_trns_line(output_buffer, &*trns, channels);
-                            } else {
-                                utils::expand_trns_line16(output_buffer, &*trns, channels);
-                            }
-                        },
-                        _ => ()
-                    }
-                }
-                if bit_depth == 16 && transform.intersects(::Transformations::SCALE_16 | ::Transformations::STRIP_16) {
-                    len /= 2;
-                    for i in 0..len {
-                        output_buffer[i] = output_buffer[2 * i];
-                    }
+                    },
+                    _ => ()
                 }
                 Ok(Some((
-                    &output_buffer[..len],
+                    &*output_buffer,
                     adam7
                 )))
             } else {
@@ -219,33 +206,29 @@ impl<R: Read> Reader<R> {
     /// Returns the color type and the number of bits per sample
     /// of the data returned by `Reader::next_row` and Reader::frames`.
     fn output_color_type(&mut self) -> (PngColorType, BitDepth) {
-        use PngColorType::*;
-        let t = self.transform;
-        let info = get_info!(self);
-        if t == ::Transformations::IDENTITY {
-            (info.color_type, info.bit_depth)
-        } else {
-            let bits = match info.bit_depth as u8 {
-                16 if t.intersects(
-                    ::Transformations::SCALE_16 | ::Transformations::STRIP_16
-                ) => 8,
-                _ if t.contains(::Transformations::EXPAND) => 8,
-                n => n
-            };
-            let color_type = if t.contains(::Transformations::EXPAND) {
-                let has_trns = info.trns.is_some();
-                match info.color_type {
-                    Grayscale if has_trns => GrayscaleAlpha,
-                    RGB if has_trns => RGBA,
-                    Indexed if has_trns => RGBA,
-                    Indexed => RGB,
-                    ct => ct
-                }
-            } else {
-                info.color_type
-            };
-            (color_type, BitDepth::from_u8(bits).unwrap())
+        let info = self.info();
+        let has_trns = info.trns.is_some();
+
+        let bit_depth = match info.bit_depth {
+            BitDepth::One |
+            BitDepth::Two |
+            BitDepth::Four => BitDepth::Eight,
+            b => b,
+        };
+
+        match info.color_type {
+            PngColorType::Grayscale if has_trns => (PngColorType::GrayscaleAlpha, bit_depth),
+            PngColorType::RGB if has_trns => (PngColorType::RGBA, bit_depth),
+            PngColorType::Indexed if has_trns => (PngColorType::RGBA, BitDepth::Eight),
+            PngColorType::Indexed => (PngColorType::RGB, BitDepth::Eight),
+            c => (c, bit_depth),
         }
+    }
+
+    fn identity_transform(&mut self) -> bool {
+        let output = self.output_color_type();
+        let info = self.info();
+        output == (info.color_type, info.bit_depth)
     }
 
     /// Returns the number of bytes required to hold a deinterlaced image frame
@@ -258,30 +241,22 @@ impl<R: Read> Reader<R> {
 
     /// Returns the number of bytes required to hold a deinterlaced row.
     fn output_line_size(&self, width: u32) -> usize {
-        let size = self.line_size(width);
-        if get_info!(self).bit_depth as u8 == 16 && self.transform.intersects(
-            ::Transformations::SCALE_16 | ::Transformations::STRIP_16
-        ) {
-            size / 2
-        } else {
-            size
-        }
+        self.line_size(width)
     }
 
     /// Returns the number of bytes required to decode a deinterlaced row.
     fn line_size(&self, width: u32) -> usize {
         use PngColorType::*;
-        let t = self.transform;
         let info = get_info!(self);
         let trns = info.trns.is_some();
         // TODO 16 bit
         let bits = match info.color_type {
-            Indexed if trns && t.contains(::Transformations::EXPAND) => 4 * 8,
-            Indexed if t.contains(::Transformations::EXPAND) => 3 * 8,
-            RGB if trns && t.contains(::Transformations::EXPAND) => 4 * 8,
-            Grayscale if trns && t.contains(::Transformations::EXPAND) => 2 * 8,
-            Grayscale if t.contains(::Transformations::EXPAND) => 1 * 8,
-            GrayscaleAlpha if t.contains(::Transformations::EXPAND) => 2 * 8,
+            Indexed if trns => 4 * 8,
+            Indexed => 3 * 8,
+            RGB if trns => 4 * 8,
+            Grayscale if trns => 2 * 8,
+            Grayscale  => 1 * 8,
+            GrayscaleAlpha => 2 * 8,
             // divide by 2 as it will get mutiplied by two later
             _ if info.bit_depth as u8 == 16 => info.bits_per_pixel() / 2,
             _ => info.bits_per_pixel()
@@ -495,32 +470,36 @@ pub struct PngDecoder<R: Read> {
 impl<R: Read> PngDecoder<R> {
     /// Creates a new decoder that decodes from the stream `r`.
     pub fn new(r: R) -> ImageResult<PngDecoder<R>> {
-        let mut reader = Reader::new(r, StreamingDecoder::new(), Transformations::EXPAND);
+        use PngColorType::*;
+
+        let mut reader = Reader::new(r, StreamingDecoder::new());
         reader.init()?;
 
-        let (ct, bits) = reader.output_color_type();
-        use PngColorType::*;
-        let colortype = match (ct, bits as u8) {
-            (Grayscale, 8) => ColorType::L8,
-            (Grayscale, 16) => ColorType::L16,
-            (GrayscaleAlpha, 8) => ColorType::LA8,
-            (GrayscaleAlpha, 16) => ColorType::LA16,
-            (RGB, 8) => ColorType::RGB8,
-            (RGB, 16) => ColorType::RGB16,
-            (RGBA, 8) => ColorType::RGBA8,
-            (RGBA, 16) => ColorType::RGBA16,
+        let colortype = match reader.output_color_type() {
+            (Grayscale, BitDepth::Sixteen) => ColorType::L16,
+            (GrayscaleAlpha, BitDepth::Sixteen) => ColorType::LA16,
+            (RGB, BitDepth::Sixteen) => ColorType::RGB16,
+            (RGBA, BitDepth::Sixteen) => ColorType::RGBA16,
 
-            (Grayscale, _) |
-            (GrayscaleAlpha, _) |
-            (RGB, _) |
-            (RGBA, _) |
+            (Grayscale, _) => ColorType::L8,
+            (GrayscaleAlpha, _) => ColorType::LA8,
+            (RGB, _) => ColorType::RGB8,
+            (RGBA, _) => ColorType::RGBA8,
+
             (Indexed, _) => unreachable!(),
         };
 
         Ok(PngDecoder { colortype, reader })
     }
 
-    pub fn original_color_type(&self) -> (PngColorType, BitDepth) {
+    /// The color type of the image before any transformation.
+    ///
+    /// Some possible original color types do not have any matching variant in image_core::ColorType
+    /// so decoding transparently converts image data into one of those formats. This function can
+    /// be used to see what the color type was before any such transformations. The value can be
+    /// also be passed back into the library when creating an encoder to avoid modifying the on-disk
+    /// representation.
+    pub fn original_colortype(&self) -> (PngColorType, BitDepth) {
         (self.reader.info().color_type, self.reader.info().bit_depth)
     }
 }

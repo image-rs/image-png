@@ -21,12 +21,12 @@
 //! ## Encoder
 //! ### Using the encoder
 //! ```no_run
+//! # #[cfg(feature="png-encoding")]
+//! # {
 //! // For reading and opening files
 //! use std::path::Path;
 //! use std::fs::File;
 //! use std::io::BufWriter;
-//! // To use encoder.set()
-//! use png::HasParameters;
 //!
 //! let path = Path::new(r"/path/to/image.png");
 //! let file = File::create(path).unwrap();
@@ -39,6 +39,7 @@
 //!
 //! let data = [255, 0, 0, 255, 0, 0, 0, 255]; // An array containing a RGBA sequence. First pixel is red and second pixel is black.
 //! writer.write_image_data(&data).unwrap(); // Save
+//! # }
 //! ```
 //!
 //#![cfg_attr(test, feature(test))]

@@ -390,7 +390,12 @@ impl<W: Write> Writer<W> {
                     ))
                 } else {
                     self.separate_default_image = true;
-                    self.write_image_data(data)
+                    const MAX_CHUNK_LEN: u32 = (1u32 << 31) - 1;
+                    let zlib_encoded = self.deflate_image_data(data)?;
+                    for chunk in zlib_encoded.chunks(MAX_CHUNK_LEN as usize) {
+                        self.write_chunk(chunk::IDAT, &chunk)?;
+                    }
+                    Ok(())
                 }
             }
             _ => Err(EncodingError::Format(

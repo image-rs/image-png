@@ -1,7 +1,7 @@
 //! Common types shared between the encoder and decoder
 use crate::filter;
 
-use std::fmt;
+use std::{convert::TryFrom, fmt};
 
 /// Describes the layout of samples in a pixel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,9 +16,13 @@ pub enum ColorType {
 
 impl ColorType {
     /// Returns the number of samples used per pixel of `ColorType`
-    pub fn samples(&self) -> usize {
+    pub fn samples(self) -> usize {
+        self.samples_u8().into()
+    }
+
+    pub(crate) fn samples_u8(self) -> u8 {
         use self::ColorType::*;
-        match *self {
+        match self {
             Grayscale | Indexed => 1,
             RGB => 3,
             GrayscaleAlpha => 2,
@@ -37,6 +41,36 @@ impl ColorType {
             _ => None,
         }
     }
+
+    pub(crate) fn checked_raw_row_length(self, depth: BitDepth, width: u32) -> Option<usize> {
+        // No overflow can occur in 64 bits, we multiply 32-bit with 5 more bits.
+        let bits = u64::from(width) * u64::from(self.samples_u8()) * u64::from(depth.into_u8());
+        TryFrom::try_from(1 + (bits + 7) / 8).ok()
+    }
+
+    pub(crate) fn raw_row_length_from_width(self, depth: BitDepth, width: u32) -> usize {
+        let samples = width as usize * self.samples();
+        1 + match depth {
+            BitDepth::Sixteen => samples * 2,
+            BitDepth::Eight => samples,
+            subbyte => {
+                let samples_per_byte = 8 / subbyte as usize;
+                let whole = samples / samples_per_byte;
+                let fract = usize::from(samples % samples_per_byte > 0);
+                whole + fract
+            }
+        }
+    }
+
+    pub(crate) fn is_combination_invalid(self, bit_depth: BitDepth) -> bool {
+        // Section 11.2.2 of the PNG standard disallows several combinations
+        // of bit depth and color type
+        ((bit_depth == BitDepth::One || bit_depth == BitDepth::Two || bit_depth == BitDepth::Four)
+            && (self == ColorType::RGB
+                || self == ColorType::GrayscaleAlpha
+                || self == ColorType::RGBA))
+            || (bit_depth == BitDepth::Sixteen && self == ColorType::Indexed)
+    }
 }
 
 /// Bit depth of the png file
@@ -50,6 +84,21 @@ pub enum BitDepth {
     Sixteen = 16,
 }
 
+/// Internal count of bytes per pixel.
+/// This is used for filtering which never uses sub-byte units. This essentially reduces the number
+/// of possible byte chunk lengths to a very small set of values appropriate to be defined as an
+/// enum.
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum BytesPerPixel {
+    One = 1,
+    Two = 2,
+    Three = 3,
+    Four = 4,
+    Six = 6,
+    Eight = 8,
+}
+
 impl BitDepth {
     /// u8 -> Self. Temporary solution until Rust provides a canonical one.
     pub fn from_u8(n: u8) -> Option<BitDepth> {
@@ -61,6 +110,10 @@ impl BitDepth {
             16 => Some(BitDepth::Sixteen),
             _ => None,
         }
+    }
+
+    pub(crate) fn into_u8(self) -> u8 {
+        self as u8
     }
 }
 
@@ -235,8 +288,81 @@ pub enum Compression {
     Rle,
 }
 
+/// An unsigned integer scaled version of a floating point value,
+/// equivalent to an integer quotient with fixed denominator (100_000)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScaledFloat(u32);
+
+impl ScaledFloat {
+    const SCALING: f32 = 100_000.0;
+
+    /// Gets whether the value is within the clamped range of this type.
+    pub fn in_range(value: f32) -> bool {
+        value >= 0.0 && (value * Self::SCALING).floor() <= std::u32::MAX as f32
+    }
+
+    /// Gets whether the value can be exactly converted in round-trip.
+    #[allow(clippy::float_cmp)] // Stupid tool, the exact float compare is _the entire point_.
+    pub fn exact(value: f32) -> bool {
+        let there = Self::forward(value);
+        let back = Self::reverse(there);
+        value == back
+    }
+
+    fn forward(value: f32) -> u32 {
+        (value.max(0.0) * Self::SCALING).floor() as u32
+    }
+
+    fn reverse(encoded: u32) -> f32 {
+        encoded as f32 / Self::SCALING
+    }
+
+    /// Slightly inaccurate scaling and quantization.
+    /// Clamps the value into the representible range if it is negative of too large.
+    pub fn new(value: f32) -> Self {
+        Self {
+            0: Self::forward(value),
+        }
+    }
+
+    /// Fully accurate construction from a value scaled as per specification.
+    pub fn from_scaled(val: u32) -> Self {
+        Self { 0: val }
+    }
+
+    /// Get the accurate encoded value.
+    pub fn into_scaled(self) -> u32 {
+        self.0
+    }
+
+    /// Get the unscaled value as a floating point.
+    pub fn into_value(self) -> f32 {
+        Self::reverse(self.0) as f32
+    }
+}
+
+/// Chromaticities of the color space primaries
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceChromaticities {
+    pub white: (ScaledFloat, ScaledFloat),
+    pub red: (ScaledFloat, ScaledFloat),
+    pub green: (ScaledFloat, ScaledFloat),
+    pub blue: (ScaledFloat, ScaledFloat),
+}
+
+impl SourceChromaticities {
+    pub fn new(white: (f32, f32), red: (f32, f32), green: (f32, f32), blue: (f32, f32)) -> Self {
+        SourceChromaticities {
+            white: (ScaledFloat::new(white.0), ScaledFloat::new(white.1)),
+            red: (ScaledFloat::new(red.0), ScaledFloat::new(red.1)),
+            green: (ScaledFloat::new(green.0), ScaledFloat::new(green.1)),
+            blue: (ScaledFloat::new(blue.0), ScaledFloat::new(blue.1)),
+        }
+    }
+}
+
 /// PNG info struct
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Info {
     pub width: u32,
     pub height: u32,
@@ -245,11 +371,14 @@ pub struct Info {
     pub interlaced: bool,
     pub trns: Option<Vec<u8>>,
     pub pixel_dims: Option<PixelDimensions>,
+    /// Source system's gamma
+    pub source_gamma: Option<ScaledFloat>,
     pub palette: Option<Vec<u8>>,
     pub frame_control: Option<FrameControl>,
     pub animation_control: Option<AnimationControl>,
     pub compression: Compression,
     pub filter: filter::FilterType,
+    pub source_chromaticities: Option<SourceChromaticities>,
 }
 
 impl Default for Info {
@@ -263,12 +392,14 @@ impl Default for Info {
             palette: None,
             trns: None,
             pixel_dims: None,
+            source_gamma: None,
             frame_control: None,
             animation_control: None,
             // Default to `deflate::Compresion::Fast` and `filter::FilterType::Sub`
             // to maintain backward compatible output.
             compression: Compression::Fast,
             filter: filter::FilterType::Sub,
+            source_chromaticities: None,
         }
     }
 }
@@ -301,7 +432,28 @@ impl Info {
 
     /// Returns the bytes per pixel
     pub fn bytes_per_pixel(&self) -> usize {
+        // If adjusting this for expansion or other transformation passes, remember to keep the old
+        // implementation for bpp_in_prediction, which is internal to the png specification.
         self.color_type.samples() * ((self.bit_depth as usize + 7) >> 3)
+    }
+
+    /// Return the number of bytes for this pixel used in prediction.
+    ///
+    /// Some filters use prediction, over the raw bytes of a scanline. Where a previous pixel is
+    /// require for such forms the specification instead references previous bytes. That is, for
+    /// a gray pixel of bit depth 2, the pixel used in prediction is actually 4 pixels prior. This
+    /// has the consequence that the number of possible values is rather small. To make this fact
+    /// more obvious in the type system and the optimizer we use an explicit enum here.
+    pub(crate) fn bpp_in_prediction(&self) -> BytesPerPixel {
+        match self.bytes_per_pixel() {
+            1 => BytesPerPixel::One,
+            2 => BytesPerPixel::Two,
+            3 => BytesPerPixel::Three,
+            4 => BytesPerPixel::Four,
+            6 => BytesPerPixel::Six,   // Only rgb×16bit
+            8 => BytesPerPixel::Eight, // Only rgba×16bit
+            _ => unreachable!("Not a possible byte rounded pixel width"),
+        }
     }
 
     /// Returns the number of bytes needed for one deinterlaced image
@@ -311,33 +463,29 @@ impl Info {
 
     /// Returns the number of bytes needed for one deinterlaced row
     pub fn raw_row_length(&self) -> usize {
-        let bits = self.width as usize * self.color_type.samples() * self.bit_depth as usize;
-        let extra = bits % 8;
-        bits / 8
-            + match extra {
-                0 => 0,
-                _ => 1,
-            }
-            + 1 // filter method
+        self.raw_row_length_from_width(self.width)
+    }
+
+    pub(crate) fn checked_raw_row_length(&self) -> Option<usize> {
+        self.color_type
+            .checked_raw_row_length(self.bit_depth, self.width)
     }
 
     /// Returns the number of bytes needed for one deinterlaced row of width `width`
     pub fn raw_row_length_from_width(&self, width: u32) -> usize {
-        let bits = width as usize * self.color_type.samples() * self.bit_depth as usize;
-        let extra = bits % 8;
-        bits / 8
-            + match extra {
-                0 => 0,
-                _ => 1,
-            }
-            + 1 // filter method
+        self.color_type
+            .raw_row_length_from_width(self.bit_depth, width)
+    }
+}
+
+impl BytesPerPixel {
+    pub(crate) fn into_usize(self) -> usize {
+        self as usize
     }
 }
 
 bitflags! {
-    /// # Output transformations
-    ///
-    /// Only `IDENTITY` and `TRANSFORM_EXPAND | TRANSFORM_STRIP_ALPHA` can be used at the moment.
+    /// Output transformations
     pub struct Transformations: u32 {
         /// No transformation
         const IDENTITY            = 0x0000; // read and write */

@@ -11,8 +11,11 @@ use std::result;
 use crc32fast::Hasher as Crc32;
 use deflate::write::ZlibEncoder;
 
-use crate::chunk;
-use crate::common::{AnimationControl, BitDepth, ColorType, Compression, FrameControl, Info};
+use crate::chunk::{self, ChunkType};
+use crate::common::{
+    AnimationControl, BitDepth, BytesPerPixel, ColorType, Compression, FrameControl, Info,
+    ScaledFloat,
+};
 use crate::filter::{filter, FilterType};
 use crate::traits::WriteBytesExt;
 
@@ -68,7 +71,14 @@ impl<W: Write> Encoder<W> {
         Encoder { w, info }
     }
 
-    pub fn new_animated_with_frame_rate(w: W, width: u32, height: u32, frames: u32, delay_num: u16, delay_den: u16) -> Result<Encoder<W>> {
+    pub fn new_animated_with_frame_rate(
+        w: W,
+        width: u32,
+        height: u32,
+        frames: u32,
+        delay_num: u16,
+        delay_den: u16,
+    ) -> Result<Encoder<W>> {
         let mut enc = Encoder::new_animated(w, width, height, frames)?;
 
         let mut frame_ctl = enc.info.frame_control.unwrap();
@@ -83,7 +93,10 @@ impl<W: Write> Encoder<W> {
         if frames > 0 {
             let mut encoder = Encoder::new(w, width, height);
 
-            let animation_ctl = AnimationControl { num_frames: frames, num_plays: 0 };
+            let animation_ctl = AnimationControl {
+                num_frames: frames,
+                num_plays: 0,
+            };
             let mut frame_ctl = FrameControl::default();
             frame_ctl.width = width;
             frame_ctl.height = height;
@@ -93,9 +106,32 @@ impl<W: Write> Encoder<W> {
 
             Ok(encoder)
         } else {
-            Err(EncodingError::Format("invalid number of frames for an animated PNG".into()))
+            Err(EncodingError::Format(
+                "invalid number of frames for an animated PNG".into(),
+            ))
         }
+    }
 
+    pub fn set_palette(&mut self, palette: Vec<u8>) {
+        self.info.palette = Some(palette);
+    }
+
+    pub fn set_trns(&mut self, trns: Vec<u8>) {
+        self.info.trns = Some(trns);
+    }
+
+    /// Set the display gamma of the source system on which the image was generated or last edited.
+    pub fn set_source_gamma(&mut self, source_gamma: ScaledFloat) {
+        self.info.source_gamma = Some(source_gamma);
+    }
+
+    /// Set the chromaticities for the source system's display channels (red, green, blue) and the whitepoint
+    /// of the source system on which the image was generated or last edited.
+    pub fn set_source_chromaticities(
+        &mut self,
+        source_chromaticities: super::SourceChromaticities,
+    ) {
+        self.info.source_chromaticities = Some(source_chromaticities);
     }
 
     pub fn write_header(self) -> Result<Writer<W>> {
@@ -146,9 +182,24 @@ pub struct Writer<W: Write> {
 
 const DEFAULT_BUFFER_LENGTH: usize = 4 * 1024;
 
+fn write_chunk<W: Write>(mut w: W, name: chunk::ChunkType, data: &[u8]) -> Result<()> {
+    w.write_be(data.len() as u32)?;
+    w.write_all(&name.0)?;
+    w.write_all(data)?;
+    let mut crc = Crc32::new();
+    crc.update(&name.0);
+    crc.update(data);
+    w.write_be(crc.finalize())?;
+    Ok(())
+}
+
 impl<W: Write> Writer<W> {
     fn new(w: W, info: Info) -> Writer<W> {
-        Writer { w: w, info: info, separate_default_image: false }
+        Writer {
+            w,
+            info,
+            separate_default_image: false,
+        }
     }
 
     fn init(mut self) -> Result<Self> {
@@ -160,7 +211,12 @@ impl<W: Write> Writer<W> {
             return Err(EncodingError::Format("Zero height not allowed".into()));
         }
 
-        if self.is_bit_depth_color_type_combination_invalid() {
+        // TODO: this could yield the typified BytesPerPixel.
+        if self
+            .info
+            .color_type
+            .is_combination_invalid(self.info.bit_depth)
+        {
             return Err(EncodingError::Format(
                 format!(
                     "Invalid combination of bit-depth '{:?}' and color-type '{:?}'",
@@ -178,31 +234,51 @@ impl<W: Write> Writer<W> {
         data[9] = self.info.color_type as u8;
         data[12] = if self.info.interlaced { 1 } else { 0 };
         self.write_chunk(chunk::IHDR, &data)?;
+
+        if let Some(p) = &self.info.palette {
+            write_chunk(&mut self.w, chunk::PLTE, p)?;
+        };
+
+        if let Some(t) = &self.info.trns {
+            write_chunk(&mut self.w, chunk::tRNS, t)?;
+        }
+
+        if let Some(g) = &self.info.source_gamma {
+            write_chunk(&mut self.w, chunk::gAMA, &g.into_scaled().to_be_bytes())?;
+        }
+
+        if let Some(c) = &self.info.source_chromaticities {
+            let enc = Self::chromaticities_to_be_bytes(&c);
+            write_chunk(&mut self.w, chunk::cHRM, &enc)?;
+        }
+
         Ok(self)
     }
 
-    fn is_bit_depth_color_type_combination_invalid(&self) -> bool {
-        let bit_depth = self.info.bit_depth;
-        let color_type = self.info.color_type;
-
-        // Section 11.2.2 of the PNG standard disallows several combinations
-        // of bit depth and color type
-        ((bit_depth == BitDepth::One || bit_depth == BitDepth::Two || bit_depth == BitDepth::Four)
-            && (color_type == ColorType::RGB
-                || color_type == ColorType::GrayscaleAlpha
-                || color_type == ColorType::RGBA))
-            || (bit_depth == BitDepth::Sixteen && color_type == ColorType::Indexed)
+    #[rustfmt::skip]
+    fn chromaticities_to_be_bytes(c: &super::common::SourceChromaticities) -> [u8; 32] {
+        let white_x = c.white.0.into_scaled().to_be_bytes();
+        let white_y = c.white.1.into_scaled().to_be_bytes();
+        let red_x = c.red.0.into_scaled().to_be_bytes();
+        let red_y = c.red.1.into_scaled().to_be_bytes();
+        let green_x = c.green.0.into_scaled().to_be_bytes();
+        let green_y = c.green.1.into_scaled().to_be_bytes();
+        let blue_x = c.blue.0.into_scaled().to_be_bytes();
+        let blue_y = c.blue.1.into_scaled().to_be_bytes();
+        [
+            white_x[0], white_x[1], white_x[2], white_x[3],
+            white_y[0], white_y[1], white_y[2], white_y[3],
+            red_x[0],   red_x[1],   red_x[2],   red_x[3],
+            red_y[0],   red_y[1],   red_y[2],   red_y[3],
+            green_x[0], green_x[1], green_x[2], green_x[3],
+            green_y[0], green_y[1], green_y[2], green_y[3],
+            blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
+            blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
+        ]
     }
 
-    pub fn write_chunk(&mut self, name: [u8; 4], data: &[u8]) -> Result<()> {
-        self.w.write_be(data.len() as u32)?;
-        self.w.write_all(&name)?;
-        self.w.write_all(data)?;
-        let mut crc = Crc32::new();
-        crc.update(&name);
-        crc.update(data);
-        self.w.write_be(crc.finalize())?;
-        Ok(())
+    pub fn write_chunk(&mut self, name: ChunkType, data: &[u8]) -> Result<()> {
+        write_chunk(&mut self.w, name, data)
     }
 
     /// Writes the image data.
@@ -216,7 +292,13 @@ impl<W: Write> Writer<W> {
     }
 
     fn deflate_image_data(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let bpp = self.info.bytes_per_pixel();
+        if self.info.color_type == ColorType::Indexed && self.info.palette.is_none() {
+            return Err(EncodingError::Format(
+                "can't write indexed image without palette".into(),
+            ));
+        }
+
+        let bpp = self.info.bpp_in_prediction();
         let in_len = self.info.raw_row_length() - 1;
         let prev = vec![0; in_len];
         let mut prev = prev.as_slice();
@@ -280,25 +362,35 @@ impl<W: Write> Writer<W> {
 
     pub fn write_separate_default_image(&mut self, data: &[u8]) -> Result<()> {
         match self.info {
-            Info { animation_control: Some(_), frame_control: Some(frame_control), ..} => {
+            Info {
+                animation_control: Some(_),
+                frame_control: Some(frame_control),
+                ..
+            } => {
                 if frame_control.sequence_number != 0 {
-                    Err(EncodingError::Format("separate default image provided after frame sequence has begun".into()))
+                    Err(EncodingError::Format(
+                        "separate default image provided after frame sequence has begun".into(),
+                    ))
                 } else if self.separate_default_image {
-                    Err(EncodingError::Format("default image already written".into()))
+                    Err(EncodingError::Format(
+                        "default image already written".into(),
+                    ))
                 } else {
                     self.separate_default_image = true;
                     self.write_image_data(data)
                 }
             }
-            _ => {
-                Err(EncodingError::Format("default image provided for a non-animated PNG".into()))
-            }
+            _ => Err(EncodingError::Format(
+                "default image provided for a non-animated PNG".into(),
+            )),
         }
     }
 
     #[allow(non_snake_case)]
     fn write_fcTL(&mut self) -> Result<()> {
-        let frame_ctl = self.info.frame_control.ok_or(EncodingError::Format("cannot write fcTL for a non-animated PNG".into()))?;
+        let frame_ctl = self.info.frame_control.ok_or_else(|| {
+            EncodingError::Format("cannot write fcTL for a non-animated PNG".into())
+        })?;
         let mut data = [0u8; 26];
 
         (&mut data[..]).write_be(frame_ctl.sequence_number)?;
@@ -318,7 +410,14 @@ impl<W: Write> Writer<W> {
     fn write_fdAT(&mut self, data: &[u8]) -> Result<()> {
         // println!("Writing fdAT:{:?}", self.info.frame_control.unwrap().sequence_number+1);
 
-        let sequence_number = self.info.frame_control.ok_or_else(|| EncodingError::Format("cannot write fdAT for a non-animated PNG".into()))?.sequence_number+1u32;
+        let sequence_number = self
+            .info
+            .frame_control
+            .ok_or_else(|| {
+                EncodingError::Format("cannot write fdAT for a non-animated PNG".into())
+            })?
+            .sequence_number
+            + 1u32;
 
         let mut data = self.deflate_image_data(data)?;
         data.splice(0..0, sequence_number.to_be_bytes().iter().cloned());
@@ -330,17 +429,27 @@ impl<W: Write> Writer<W> {
         // println!("{:?}", self.info.frame_control.unwrap().sequence_number);
 
         match self.info {
-            Info { animation_control: Some(AnimationControl { num_frames: 0, ..}) , frame_control: Some(_), ..} => {
-                Err(EncodingError::Format("exceeded number of frames specified".into()))
-            },
-            Info { animation_control: Some(anim_ctl), frame_control: Some(frame_control), ..} => {
+            Info {
+                animation_control: Some(AnimationControl { num_frames: 0, .. }),
+                frame_control: Some(_),
+                ..
+            } => Err(EncodingError::Format(
+                "exceeded number of frames specified".into(),
+            )),
+            Info {
+                animation_control: Some(anim_ctl),
+                frame_control: Some(frame_control),
+                ..
+            } => {
                 match frame_control.sequence_number {
                     0 => {
-                        let ret = if self.separate_default_image { // If we've already written the default image we can write frames the normal way
+                        let ret = if self.separate_default_image {
+                            // If we've already written the default image we can write frames the normal way
                             // fcTL + fdAT
 
                             self.write_fcTL().and(self.write_fdAT(data))
-                        } else { // If not we'll have to set the first frame to be both:
+                        } else {
+                            // If not we'll have to set the first frame to be both:
                             // fcTL + first frame (IDAT)
 
                             self.write_fcTL().and(self.write_image_data(data))
@@ -350,7 +459,7 @@ impl<W: Write> Writer<W> {
                         fc.inc_seq_num(1);
                         self.info.frame_control = Some(fc);
                         ret
-                    },
+                    }
                     x if x == 2 * anim_ctl.num_frames - 1 => {
                         // println!("We're done, boss");
 
@@ -361,7 +470,7 @@ impl<W: Write> Writer<W> {
                         fc.set_seq_num(0);
                         self.info.frame_control = Some(fc);
                         ret
-                    },
+                    }
                     _ => {
                         // Usual case:
                         // fcTL + fdAT
@@ -373,10 +482,10 @@ impl<W: Write> Writer<W> {
                         ret
                     }
                 }
-            },
-            _ => {
-                Err(EncodingError::Format("frame provided for a non-animated PNG".into()))
             }
+            _ => Err(EncodingError::Format(
+                "frame provided for a non-animated PNG".into(),
+            )),
         }
     }
 }
@@ -458,13 +567,13 @@ pub struct StreamWriter<'a, W: Write> {
     prev_buf: Vec<u8>,
     curr_buf: Vec<u8>,
     index: usize,
-    bpp: usize,
+    bpp: BytesPerPixel,
     filter: FilterType,
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
     fn new(mut writer: ChunkOutput<'a, W>, buf_len: usize) -> StreamWriter<'a, W> {
-        let bpp = writer.as_mut().info.bytes_per_pixel();
+        let bpp = writer.as_mut().info.bpp_in_prediction();
         let in_len = writer.as_mut().info.raw_row_length() - 1;
         let filter = writer.as_mut().info.filter;
         let prev_buf = vec![0; in_len];
@@ -546,6 +655,7 @@ mod tests {
                     // x* files are expected to fail to decode
                     continue;
                 }
+                eprintln!("{}", path.display());
                 // Decode image
                 let decoder = crate::Decoder::new(File::open(path).unwrap());
                 let (info, mut reader) = decoder.read_info().unwrap();
@@ -554,6 +664,7 @@ mod tests {
                     continue;
                 }
                 let mut buf = vec![0; info.buffer_size()];
+                eprintln!("{:?}", info);
                 reader.next_frame(&mut buf).unwrap();
                 // Encode decoded image
                 let mut out = Vec::new();
@@ -629,6 +740,69 @@ mod tests {
                 assert_eq!(buf, buf2);
             }
         }
+    }
+
+    #[test]
+    fn image_palette() -> Result<()> {
+        let samples = 3;
+        for bit_depth in vec![1u8, 2, 4, 8] {
+            // Do a reference decoding, choose a fitting palette image from pngsuite
+            let path = format!("tests/pngsuite/basn3p0{}.png", bit_depth);
+            let decoder = crate::Decoder::new(File::open(&path).unwrap());
+            let (info, mut reader) = decoder.read_info().unwrap();
+
+            let palette: Vec<u8> = reader.info().palette.clone().unwrap();
+            let mut decoded_pixels = vec![0; info.buffer_size()];
+            assert_eq!(
+                info.width as usize * info.height as usize * samples,
+                decoded_pixels.len()
+            );
+            reader.next_frame(&mut decoded_pixels).unwrap();
+
+            let pixels_per_byte = 8 / usize::from(bit_depth);
+            let mut indexed_data = vec![0; decoded_pixels.len() / samples];
+            {
+                // Retransform the image into palette bits.
+                let mut indexes = vec![];
+                for color in decoded_pixels.chunks(samples) {
+                    let j = palette
+                        .chunks(samples)
+                        .position(|pcolor| color == pcolor)
+                        .unwrap();
+                    indexes.push(j as u8);
+                }
+
+                let idx_per_byte = indexes.chunks(pixels_per_byte);
+                indexed_data.truncate(idx_per_byte.len());
+                for (pixels, byte) in idx_per_byte.zip(&mut indexed_data) {
+                    let mut shift = 8;
+                    for idx in pixels {
+                        shift -= bit_depth;
+                        *byte = *byte | idx << shift;
+                    }
+                }
+            };
+
+            let mut out = Vec::new();
+            {
+                let mut encoder = Encoder::new(&mut out, info.width, info.height);
+                encoder.set_depth(BitDepth::from_u8(bit_depth).unwrap());
+                encoder.set_color(ColorType::Indexed);
+                encoder.set_palette(palette.clone());
+
+                let mut writer = encoder.write_header().unwrap();
+                writer.write_image_data(&indexed_data).unwrap();
+            }
+
+            // Decode re-encoded image
+            let decoder = crate::Decoder::new(&*out);
+            let (info, mut reader) = decoder.read_info().unwrap();
+            let mut redecoded = vec![0; info.buffer_size()];
+            reader.next_frame(&mut redecoded).unwrap();
+            // check if the encoded image is ok:
+            assert_eq!(decoded_pixels, redecoded);
+        }
+        Ok(())
     }
 
     #[test]
@@ -845,6 +1019,48 @@ mod tests {
         roundtrip(FilterType::Up)?;
         roundtrip(FilterType::Avg)?;
         roundtrip(FilterType::Paeth)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn some_gamma_roundtrip() -> io::Result<()> {
+        let pixel: Vec<_> = (0..48).collect();
+
+        let roundtrip = |gamma: Option<ScaledFloat>| -> io::Result<()> {
+            let mut buffer = vec![];
+            let mut encoder = Encoder::new(&mut buffer, 4, 4);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_color(ColorType::RGB);
+            encoder.set_filter(FilterType::Avg);
+            if let Some(gamma) = gamma {
+                encoder.set_source_gamma(gamma);
+            }
+            encoder.write_header()?.write_image_data(&pixel)?;
+
+            let decoder = crate::Decoder::new(io::Cursor::new(buffer));
+            let (info, mut reader) = decoder.read_info()?;
+            assert_eq!(
+                reader.info().source_gamma,
+                gamma,
+                "Deviation with gamma {:?}",
+                gamma
+            );
+            assert_eq!(info.width, 4);
+            assert_eq!(info.height, 4);
+            let mut dest = vec![0; pixel.len()];
+            reader.next_frame(&mut dest)?;
+
+            Ok(())
+        };
+
+        roundtrip(None)?;
+        roundtrip(Some(ScaledFloat::new(0.35)))?;
+        roundtrip(Some(ScaledFloat::new(0.45)))?;
+        roundtrip(Some(ScaledFloat::new(0.55)))?;
+        roundtrip(Some(ScaledFloat::new(0.7)))?;
+        roundtrip(Some(ScaledFloat::new(1.0)))?;
+        roundtrip(Some(ScaledFloat::new(2.5)))?;
 
         Ok(())
     }

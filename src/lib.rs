@@ -15,9 +15,10 @@
 //!     let (info, mut reader) = decoder.read_info().unwrap();
 //!     // Allocate the output buffer.
 //!     let mut buf = vec![0; info.buffer_size()];
-//!     // Read the next frame. Currently this function should only called once.
-//!     // The default options
+//!     // Read the next frame. An APNG might contain multiple frames.
 //!     reader.next_frame(&mut buf).unwrap();
+//!     // Inspect more details of the last read frame.
+//!     let in_animation = reader.info().frame_control.is_some();
 //! ## Encoder
 //! ### Using the encoder
 //! ```no_run
@@ -34,6 +35,16 @@
 //! let mut encoder = png::Encoder::new(w, 2, 1); // Width is 2 pixels and height is 1.
 //! encoder.set_color(png::ColorType::RGBA);
 //! encoder.set_depth(png::BitDepth::Eight);
+//! encoder.set_trns(vec!(0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8));
+//! encoder.set_source_gamma(png::ScaledFloat::from_scaled(45455)); // 1.0 / 2.2, scaled by 100000
+//! encoder.set_source_gamma(png::ScaledFloat::new(1.0 / 2.2));     // 1.0 / 2.2, unscaled, but rounded
+//! let source_chromaticities = png::SourceChromaticities::new(     // Using unscaled instantiation here
+//!     (0.31270, 0.32900),
+//!     (0.64000, 0.33000),
+//!     (0.30000, 0.60000),
+//!     (0.15000, 0.06000)
+//! );
+//! encoder.set_source_chromaticities(source_chromaticities);
 //! let mut writer = encoder.write_header().unwrap();
 //!
 //! let data = [255, 0, 0, 255, 0, 0, 0, 255]; // An array containing a RGBA sequence. First pixel is red and second pixel is black.
@@ -42,6 +53,8 @@
 //! ```
 //!
 //#![cfg_attr(test, feature(test))]
+
+#![forbid(unsafe_code)]
 
 #[macro_use]
 extern crate bitflags;

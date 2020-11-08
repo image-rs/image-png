@@ -51,6 +51,7 @@ impl From<io::Error> for EncodingError {
         EncodingError::IoError(err)
     }
 }
+
 impl From<EncodingError> for io::Error {
     fn from(err: EncodingError) -> io::Error {
         io::Error::new(io::ErrorKind::Other, err.to_string())
@@ -71,45 +72,34 @@ impl<W: Write> Encoder<W> {
         Encoder { w, info }
     }
 
-    pub fn new_animated_with_frame_rate(
-        w: W,
-        width: u32,
-        height: u32,
-        frames: u32,
-        delay_num: u16,
-        delay_den: u16,
-    ) -> Result<Encoder<W>> {
-        let mut enc = Encoder::new_animated(w, width, height, frames)?;
-
-        let mut frame_ctl = enc.info.frame_control.unwrap();
-        frame_ctl.delay_num = delay_num;
-        frame_ctl.delay_den = delay_den;
-
-        enc.info.frame_control = Some(frame_ctl);
-        Ok(enc)
+    /// Sets the default frame rate of the animation
+    ///
+    /// It will fail if `set_animation_info` isn't called before
+    pub fn set_frame_rate(&mut self, delay_num: u16, delay_den: u16) -> Result<()> {
+        if let Some(ref mut frame_ctl) = self.info.frame_control {
+            frame_ctl.delay_num = delay_num;
+            frame_ctl.delay_den = delay_den;
+            Ok(())
+        } else {
+            Err(EncodingError::Format("It's not an animation".into()))
+        }
     }
 
-    pub fn new_animated(w: W, width: u32, height: u32, frames: u32) -> Result<Encoder<W>> {
-        if frames > 0 {
-            let mut encoder = Encoder::new(w, width, height);
+    /// Set the informations needed to encode an APNG
+    ///
+    /// If num_plays is set to 0 it will repeat infinitely
+    pub fn set_animation_info(&mut self, frames: u32, num_plays: u32) {
+        let animation_ctl = AnimationControl {
+            num_frames: frames,
+            num_plays,
+        };
 
-            let animation_ctl = AnimationControl {
-                num_frames: frames,
-                num_plays: 0,
-            };
-            let mut frame_ctl = FrameControl::default();
-            frame_ctl.width = width;
-            frame_ctl.height = height;
+        let mut frame_ctl = FrameControl::default();
+        frame_ctl.width = self.info.width;
+        frame_ctl.height = self.info.height;
 
-            encoder.info.animation_control = Some(animation_ctl);
-            encoder.info.frame_control = Some(frame_ctl);
-
-            Ok(encoder)
-        } else {
-            Err(EncodingError::Format(
-                "invalid number of frames for an animated PNG".into(),
-            ))
-        }
+        self.info.frame_control = Some(frame_ctl);
+        self.info.animation_control = Some(animation_ctl);
     }
 
     pub fn set_palette(&mut self, palette: Vec<u8>) {
@@ -651,7 +641,7 @@ mod tests {
                 .unwrap()
                 .map(|r| r.unwrap())
             {
-                if path.file_name().unwrap().to_str().unwrap().starts_with("x") {
+                if path.file_name().unwrap().to_str().unwrap().starts_with('x') {
                     // x* files are expected to fail to decode
                     continue;
                 }
@@ -698,7 +688,7 @@ mod tests {
                 .unwrap()
                 .map(|r| r.unwrap())
             {
-                if path.file_name().unwrap().to_str().unwrap().starts_with("x") {
+                if path.file_name().unwrap().to_str().unwrap().starts_with('x') {
                     // x* files are expected to fail to decode
                     continue;
                 }
@@ -745,7 +735,7 @@ mod tests {
     #[test]
     fn image_palette() -> Result<()> {
         let samples = 3;
-        for bit_depth in vec![1u8, 2, 4, 8] {
+        for &bit_depth in &[1u8, 2, 4, 8] {
             // Do a reference decoding, choose a fitting palette image from pngsuite
             let path = format!("tests/pngsuite/basn3p0{}.png", bit_depth);
             let decoder = crate::Decoder::new(File::open(&path).unwrap());
@@ -778,7 +768,7 @@ mod tests {
                     let mut shift = 8;
                     for idx in pixels {
                         shift -= bit_depth;
-                        *byte = *byte | idx << shift;
+                        *byte |= idx << shift;
                     }
                 }
             };

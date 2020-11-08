@@ -87,19 +87,28 @@ impl<W: Write> Encoder<W> {
 
     /// Set the informations needed to encode an APNG
     ///
-    /// If num_plays is set to 0 it will repeat infinitely
-    pub fn set_animation_info(&mut self, frames: u32, num_plays: u32) {
-        let animation_ctl = AnimationControl {
-            num_frames: frames,
-            num_plays,
-        };
+    /// If `num_plays` is set to 0 it will repeat infinitely
+    ///
+    /// It will fail if `frames` is 0
+    pub fn set_animation_info(&mut self, frames: u32, num_plays: u32) -> Result<()> {
+        if frames == 0 {
+            Err(EncodingError::Format(
+                "invalid number of frames for an animated PNG".into(),
+            ))
+        } else {
+            let animation_ctl = AnimationControl {
+                num_frames: frames,
+                num_plays,
+            };
 
-        let mut frame_ctl = FrameControl::default();
-        frame_ctl.width = self.info.width;
-        frame_ctl.height = self.info.height;
+            let mut frame_ctl = FrameControl::default();
+            frame_ctl.width = self.info.width;
+            frame_ctl.height = self.info.height;
 
-        self.info.frame_control = Some(frame_ctl);
-        self.info.animation_control = Some(animation_ctl);
+            self.info.frame_control = Some(frame_ctl);
+            self.info.animation_control = Some(animation_ctl);
+            Ok(())
+        }
     }
 
     pub fn set_palette(&mut self, palette: Vec<u8>) {
@@ -242,6 +251,13 @@ impl<W: Write> Writer<W> {
             write_chunk(&mut self.w, chunk::cHRM, &enc)?;
         }
 
+        if let Some(animation_ctl) = &self.info.animation_control {
+            let mut data = [0u8; 8];
+            (&mut data[..4]).write_be(animation_ctl.num_frames)?;
+            (&mut data[..4]).write_be(animation_ctl.num_plays)?;
+            write_chunk(&mut self.w, chunk::acTL, &data)?;
+        }
+
         Ok(self)
     }
 
@@ -276,7 +292,14 @@ impl<W: Write> Writer<W> {
         const MAX_CHUNK_LEN: u32 = (1u32 << 31) - 1;
         let zlib_encoded = self.deflate_image_data(data)?;
         for chunk in zlib_encoded.chunks(MAX_CHUNK_LEN as usize) {
-            self.write_chunk(chunk::IDAT, &chunk)?;
+            match self.info {
+                Info {
+                    animation_control: Some(_),
+                    frame_control: Some(_),
+                    ..
+                } => self.write_fdAT(&chunk)?,
+                _ => self.write_chunk(chunk::IDAT, &chunk)?,
+            }
         }
         Ok(())
     }
@@ -415,10 +438,8 @@ impl<W: Write> Writer<W> {
         self.write_chunk(chunk::fdAT, &data)
     }
 
-    pub fn write_frame(&mut self, data: &[u8]) -> Result<()> {
-        // println!("{:?}", self.info.frame_control.unwrap().sequence_number);
-
-        match self.info {
+    pub fn advance_frame(&mut self) -> Result<()> {
+        match &mut self.info {
             Info {
                 animation_control: Some(AnimationControl { num_frames: 0, .. }),
                 frame_control: Some(_),
@@ -427,51 +448,13 @@ impl<W: Write> Writer<W> {
                 "exceeded number of frames specified".into(),
             )),
             Info {
-                animation_control: Some(anim_ctl),
-                frame_control: Some(frame_control),
+                animation_control: Some(animation_ctl),
+                frame_control: Some(frame_ctl),
                 ..
             } => {
-                match frame_control.sequence_number {
-                    0 => {
-                        let ret = if self.separate_default_image {
-                            // If we've already written the default image we can write frames the normal way
-                            // fcTL + fdAT
-
-                            self.write_fcTL().and(self.write_fdAT(data))
-                        } else {
-                            // If not we'll have to set the first frame to be both:
-                            // fcTL + first frame (IDAT)
-
-                            self.write_fcTL().and(self.write_image_data(data))
-                        };
-
-                        let mut fc = self.info.frame_control.unwrap();
-                        fc.inc_seq_num(1);
-                        self.info.frame_control = Some(fc);
-                        ret
-                    }
-                    x if x == 2 * anim_ctl.num_frames - 1 => {
-                        // println!("We're done, boss");
-
-                        // This is the last frame:
-                        // Do the usual and also set AnimationControl to no remaining frames:
-                        let ret = self.write_fcTL().and(self.write_fdAT(data));
-                        let mut fc = self.info.frame_control.unwrap();
-                        fc.set_seq_num(0);
-                        self.info.frame_control = Some(fc);
-                        ret
-                    }
-                    _ => {
-                        // Usual case:
-                        // fcTL + fdAT
-                        // println!("Buisness as usual");
-                        let ret = self.write_fcTL().and(self.write_fdAT(data));
-                        let mut fc = self.info.frame_control.unwrap();
-                        fc.inc_seq_num(2);
-                        self.info.frame_control = Some(fc);
-                        ret
-                    }
-                }
+                animation_ctl.num_frames -= 1;
+                frame_ctl.sequence_number += 1;
+                self.write_fcTL()
             }
             _ => Err(EncodingError::Format(
                 "frame provided for a non-animated PNG".into(),

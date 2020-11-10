@@ -9,37 +9,37 @@ pub struct ChunkType(pub [u8; 4]);
 // -- Critical chunks --
 
 /// Image header
-pub const IHDR: ChunkType = ChunkType([b'I', b'H', b'D', b'R']);
+pub const IHDR: ChunkType = ChunkType(*b"IHDR");
 /// Palette
-pub const PLTE: ChunkType = ChunkType([b'P', b'L', b'T', b'E']);
+pub const PLTE: ChunkType = ChunkType(*b"PLTE");
 /// Image data
-pub const IDAT: ChunkType = ChunkType([b'I', b'D', b'A', b'T']);
+pub const IDAT: ChunkType = ChunkType(*b"IDAT");
 /// Image trailer
-pub const IEND: ChunkType = ChunkType([b'I', b'E', b'N', b'D']);
+pub const IEND: ChunkType = ChunkType(*b"IEND");
 
 // -- Ancillary chunks --
 
 /// Transparency
-pub const tRNS: ChunkType = ChunkType([b't', b'R', b'N', b'S']);
+pub const tRNS: ChunkType = ChunkType(*b"tRNS");
 /// Background colour
-pub const bKGD: ChunkType = ChunkType([b'b', b'K', b'G', b'D']);
+pub const bKGD: ChunkType = ChunkType(*b"bKGD");
 /// Image last-modification time
-pub const tIME: ChunkType = ChunkType([b't', b'I', b'M', b'E']);
+pub const tIME: ChunkType = ChunkType(*b"tIME");
 /// Physical pixel dimensions
-pub const pHYs: ChunkType = ChunkType([b'p', b'H', b'Y', b's']);
+pub const pHYs: ChunkType = ChunkType(*b"pHYs");
 /// Source system's pixel chromaticities
-pub const cHRM: ChunkType = ChunkType([b'c', b'H', b'R', b'M']);
+pub const cHRM: ChunkType = ChunkType(*b"cHRM");
 /// Source system's gamma value
-pub const gAMA: ChunkType = ChunkType([b'g', b'A', b'M', b'A']);
+pub const gAMA: ChunkType = ChunkType(*b"gAMA");
 
 // -- Extension chunks --
 
 /// Animation control
-pub const acTL: ChunkType = ChunkType([b'a', b'c', b'T', b'L']);
+pub const acTL: ChunkType = ChunkType(*b"acTL");
 /// Frame control
-pub const fcTL: ChunkType = ChunkType([b'f', b'c', b'T', b'L']);
+pub const fcTL: ChunkType = ChunkType(*b"fcTL");
 /// Frame data
-pub const fdAT: ChunkType = ChunkType([b'f', b'd', b'A', b'T']);
+pub const fdAT: ChunkType = ChunkType(*b"fdAT");
 
 // -- Chunk type determination --
 

@@ -179,7 +179,27 @@ pub struct Writer<W: Write> {
     separate_default_image: bool,
 }
 
-const DEFAULT_BUFFER_LENGTH: usize = 4 * 1024;
+#[rustfmt::skip]
+fn chromaticities_to_be_bytes(c: &super::common::SourceChromaticities) -> [u8; 32] {
+    let white_x = c.white.0.into_scaled().to_be_bytes();
+    let white_y = c.white.1.into_scaled().to_be_bytes();
+    let red_x = c.red.0.into_scaled().to_be_bytes();
+    let red_y = c.red.1.into_scaled().to_be_bytes();
+    let green_x = c.green.0.into_scaled().to_be_bytes();
+    let green_y = c.green.1.into_scaled().to_be_bytes();
+    let blue_x = c.blue.0.into_scaled().to_be_bytes();
+    let blue_y = c.blue.1.into_scaled().to_be_bytes();
+    [
+        white_x[0], white_x[1], white_x[2], white_x[3],
+        white_y[0], white_y[1], white_y[2], white_y[3],
+        red_x[0],   red_x[1],   red_x[2],   red_x[3],
+        red_y[0],   red_y[1],   red_y[2],   red_y[3],
+        green_x[0], green_x[1], green_x[2], green_x[3],
+        green_y[0], green_y[1], green_y[2], green_y[3],
+        blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
+        blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
+    ]
+}
 
 fn write_chunk<W: Write>(mut w: W, name: chunk::ChunkType, data: &[u8]) -> Result<()> {
     w.write_be(data.len() as u32)?;
@@ -193,6 +213,8 @@ fn write_chunk<W: Write>(mut w: W, name: chunk::ChunkType, data: &[u8]) -> Resul
 }
 
 impl<W: Write> Writer<W> {
+    const DEFAULT_BUFFER_LENGTH: usize = 4 * 1024;
+
     fn new(w: W, info: Info) -> Writer<W> {
         Writer {
             w,
@@ -247,40 +269,18 @@ impl<W: Write> Writer<W> {
         }
 
         if let Some(c) = &self.info.source_chromaticities {
-            let enc = Self::chromaticities_to_be_bytes(&c);
+            let enc = chromaticities_to_be_bytes(&c);
             write_chunk(&mut self.w, chunk::cHRM, &enc)?;
         }
 
         if let Some(animation_ctl) = &self.info.animation_control {
-            let mut data = [0u8; 8];
-            (&mut data[..4]).write_be(animation_ctl.num_frames)?;
-            (&mut data[..4]).write_be(animation_ctl.num_plays)?;
+            let mut data = [0; 8];
+            (&mut data[..]).write_be(animation_ctl.num_frames)?;
+            (&mut data[4..]).write_be(animation_ctl.num_plays)?;
             write_chunk(&mut self.w, chunk::acTL, &data)?;
         }
 
         Ok(self)
-    }
-
-    #[rustfmt::skip]
-    fn chromaticities_to_be_bytes(c: &super::common::SourceChromaticities) -> [u8; 32] {
-        let white_x = c.white.0.into_scaled().to_be_bytes();
-        let white_y = c.white.1.into_scaled().to_be_bytes();
-        let red_x = c.red.0.into_scaled().to_be_bytes();
-        let red_y = c.red.1.into_scaled().to_be_bytes();
-        let green_x = c.green.0.into_scaled().to_be_bytes();
-        let green_y = c.green.1.into_scaled().to_be_bytes();
-        let blue_x = c.blue.0.into_scaled().to_be_bytes();
-        let blue_y = c.blue.1.into_scaled().to_be_bytes();
-        [
-            white_x[0], white_x[1], white_x[2], white_x[3],
-            white_y[0], white_y[1], white_y[2], white_y[3],
-            red_x[0],   red_x[1],   red_x[2],   red_x[3],
-            red_y[0],   red_y[1],   red_y[2],   red_y[3],
-            green_x[0], green_x[1], green_x[2], green_x[3],
-            green_y[0], green_y[1], green_y[2], green_y[3],
-            blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
-            blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
-        ]
     }
 
     pub fn write_chunk(&mut self, name: ChunkType, data: &[u8]) -> Result<()> {
@@ -295,11 +295,22 @@ impl<W: Write> Writer<W> {
             match self.info {
                 Info {
                     animation_control: Some(_),
-                    frame_control: Some(_),
+                    frame_control:
+                        Some(FrameControl {
+                            sequence_number, ..
+                        }),
                     ..
-                } => self.write_fdAT(&chunk)?,
-                _ => self.write_chunk(chunk::IDAT, &chunk)?,
-            }
+                } => self
+                    .check_animation()
+                    .and(self.write_fcTL())
+                    .and(if sequence_number == 0 {
+                        self.write_chunk(chunk::IDAT, &chunk)
+                    } else {
+                        self.write_fdAT(&chunk)
+                    })
+                    .map(|_| self.info.animation_control.as_mut().unwrap().num_frames -= 1),
+                _ => self.write_chunk(chunk::IDAT, &chunk),
+            }?
         }
         Ok(())
     }
@@ -343,7 +354,7 @@ impl<W: Write> Writer<W> {
     /// This borrows the writer. This preserves it which allows manually
     /// appending additional chunks after the image data has been written
     pub fn stream_writer(&mut self) -> StreamWriter<W> {
-        self.stream_writer_with_size(DEFAULT_BUFFER_LENGTH)
+        self.stream_writer_with_size(Self::DEFAULT_BUFFER_LENGTH)
     }
 
     /// Create a stream writer with custom buffer size.
@@ -361,7 +372,7 @@ impl<W: Write> Writer<W> {
     /// chunk size is 4K, use `stream_writer_with_size` to set another chuck
     /// size.
     pub fn into_stream_writer(self) -> StreamWriter<'static, W> {
-        self.into_stream_writer_with_size(DEFAULT_BUFFER_LENGTH)
+        self.into_stream_writer_with_size(Self::DEFAULT_BUFFER_LENGTH)
     }
 
     /// Turn this into a stream writer with custom buffer size.
@@ -406,11 +417,10 @@ impl<W: Write> Writer<W> {
 
     #[allow(non_snake_case)]
     fn write_fcTL(&mut self) -> Result<()> {
-        let frame_ctl = self.info.frame_control.ok_or_else(|| {
+        let frame_ctl = self.info.frame_control.as_mut().ok_or_else(|| {
             EncodingError::Format("cannot write fcTL for a non-animated PNG".into())
         })?;
         let mut data = [0u8; 26];
-
         (&mut data[..]).write_be(frame_ctl.sequence_number)?;
         (&mut data[4..]).write_be(frame_ctl.width)?;
         (&mut data[8..]).write_be(frame_ctl.height)?;
@@ -421,29 +431,27 @@ impl<W: Write> Writer<W> {
         data[24] = frame_ctl.dispose_op as u8;
         data[25] = frame_ctl.blend_op as u8;
 
-        self.write_chunk(chunk::fcTL, &data)
+        write_chunk(&mut self.w, chunk::fcTL, &data)?;
+        frame_ctl.inc_seq_num(1);
+        Ok(())
     }
 
     #[allow(non_snake_case)]
     fn write_fdAT(&mut self, data: &[u8]) -> Result<()> {
-        // println!("Writing fdAT:{:?}", self.info.frame_control.unwrap().sequence_number+1);
+        let frame_ctl = self.info.frame_control.as_mut().ok_or_else(|| {
+            EncodingError::Format("cannot write fdAT for a non-animated PNG".into())
+        })?;
 
-        let sequence_number = self
-            .info
-            .frame_control
-            .ok_or_else(|| {
-                EncodingError::Format("cannot write fdAT for a non-animated PNG".into())
-            })?
-            .sequence_number
-            + 1u32;
+        let mut all_data = vec![0u8; data.len() + 4];
+        (&mut all_data[..]).write_be(frame_ctl.sequence_number)?;
+        (&mut all_data[4..]).write_all(data)?;
 
-        let mut data = self.deflate_image_data(data)?;
-        data.splice(0..0, sequence_number.to_be_bytes().iter().cloned());
-
-        self.write_chunk(chunk::fdAT, &data)
+        write_chunk(&mut self.w, chunk::fdAT, &all_data)?;
+        frame_ctl.inc_seq_num(1);
+        Ok(())
     }
 
-    pub fn advance_frame(&mut self) -> Result<()> {
+    fn check_animation(&mut self) -> Result<()> {
         match &mut self.info {
             Info {
                 animation_control: Some(AnimationControl { num_frames: 0, .. }),
@@ -453,14 +461,10 @@ impl<W: Write> Writer<W> {
                 "exceeded number of frames specified".into(),
             )),
             Info {
-                animation_control: Some(animation_ctl),
-                frame_control: Some(frame_ctl),
+                animation_control: Some(_),
+                frame_control: Some(_),
                 ..
-            } => {
-                animation_ctl.num_frames -= 1;
-                frame_ctl.sequence_number += 1;
-                self.write_fcTL()
-            }
+            } => Ok(()),
             _ => Err(EncodingError::Format(
                 "frame provided for a non-animated PNG".into(),
             )),
@@ -495,8 +499,19 @@ impl<'a, W: Write> ChunkWriter<'a, W> {
     }
 }
 
-impl<'a, W: Write> AsMut<Writer<W>> for ChunkOutput<'a, W> {
-    fn as_mut(&mut self) -> &mut Writer<W> {
+impl<'a, W: Write> std::ops::Deref for ChunkOutput<'a, W> {
+    type Target = Writer<W>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            ChunkOutput::Borrowed(writer) => writer,
+            ChunkOutput::Owned(writer) => writer,
+        }
+    }
+}
+
+impl<'a, W: Write> std::ops::DerefMut for ChunkOutput<'a, W> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             ChunkOutput::Borrowed(writer) => writer,
             ChunkOutput::Owned(writer) => writer,
@@ -510,9 +525,7 @@ impl<'a, W: Write> Write for ChunkWriter<'a, W> {
         self.index += written;
 
         if self.index + 1 >= self.buffer.len() {
-            self.writer
-                .as_mut()
-                .write_chunk(chunk::IDAT, &self.buffer)?;
+            self.writer.write_chunk(chunk::IDAT, &self.buffer)?;
             self.index = 0;
         }
 
@@ -522,7 +535,6 @@ impl<'a, W: Write> Write for ChunkWriter<'a, W> {
     fn flush(&mut self) -> io::Result<()> {
         if self.index > 0 {
             self.writer
-                .as_mut()
                 .write_chunk(chunk::IDAT, &self.buffer[..=self.index])?;
         }
         self.index = 0;
@@ -550,14 +562,14 @@ pub struct StreamWriter<'a, W: Write> {
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
-    fn new(mut writer: ChunkOutput<'a, W>, buf_len: usize) -> StreamWriter<'a, W> {
-        let bpp = writer.as_mut().info.bpp_in_prediction();
-        let in_len = writer.as_mut().info.raw_row_length() - 1;
-        let filter = writer.as_mut().info.filter;
+    fn new(writer: ChunkOutput<'a, W>, buf_len: usize) -> StreamWriter<'a, W> {
+        let bpp = writer.info.bpp_in_prediction();
+        let in_len = writer.info.raw_row_length() - 1;
+        let filter = writer.info.filter;
         let prev_buf = vec![0; in_len];
         let curr_buf = vec![0; in_len];
 
-        let compression = writer.as_mut().info.compression.clone();
+        let compression = writer.info.compression.clone();
         let chunk_writer = ChunkWriter::new(writer, buf_len);
         let zlib = deflate::write::ZlibEncoder::new(chunk_writer, compression);
 

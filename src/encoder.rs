@@ -300,17 +300,18 @@ impl<W: Write> Writer<W> {
                             sequence_number, ..
                         }),
                     ..
-                } => self
-                    .check_animation()
-                    .and(self.write_fcTL())
-                    .and(if sequence_number == 0 {
-                        self.write_chunk(chunk::IDAT, &chunk)
+                } => {
+                    self.check_animation()?;
+                    self.write_fcTL()?;
+                    if sequence_number == 0 {
+                        self.write_chunk(chunk::IDAT, &chunk)?;
                     } else {
-                        self.write_fdAT(&chunk)
-                    })
-                    .map(|_| self.info.animation_control.as_mut().unwrap().num_frames -= 1),
-                _ => self.write_chunk(chunk::IDAT, &chunk),
-            }?
+                        self.write_fdAT(&chunk)?;
+                    }
+                    self.info.animation_control.as_mut().unwrap().num_frames -= 1;
+                }
+                _ => self.write_chunk(chunk::IDAT, &chunk)?,
+            }
         }
         Ok(())
     }

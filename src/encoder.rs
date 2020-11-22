@@ -303,7 +303,7 @@ impl<W: Write> Writer<W> {
                 } => {
                     self.check_animation()?;
                     self.write_fcTL()?;
-                    if sequence_number == 0 {
+                    if sequence_number == 0 && !self.separate_default_image {
                         self.write_chunk(chunk::IDAT, &chunk)?;
                     } else {
                         self.write_fdAT(&chunk)?;

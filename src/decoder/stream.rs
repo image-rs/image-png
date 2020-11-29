@@ -11,7 +11,7 @@ use std::io;
 use crc32fast::Hasher as Crc32;
 
 use super::zlib::ZlibStream;
-use crate::chunk::{self, ChunkType, IDAT, IEND, IHDR};
+use crate::chunk::{self, ChunkType};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, ColorType, DisposeOp, FrameControl, Info, PixelDimensions,
     ScaledFloat, SourceChromaticities, Unit,
@@ -269,7 +269,7 @@ impl StreamingDecoder {
                             val as u8,
                         ]);
                         if type_str != self.current_chunk.type_
-                            && (self.current_chunk.type_ == IDAT
+                            && (self.current_chunk.type_ == chunk::IDAT
                                 || self.current_chunk.type_ == chunk::fdAT)
                         {
                             self.current_chunk.type_ = type_str;
@@ -296,7 +296,7 @@ impl StreamingDecoder {
                         if CHECKSUM_DISABLED || val == sum {
                             goto!(
                                 State::U32(U32Value::Length),
-                                emit if type_str == IEND {
+                                emit if type_str == chunk::IEND {
                                     Decoded::ImageEnd
                                 } else {
                                     Decoded::ChunkComplete(val, type_str)
@@ -318,7 +318,7 @@ impl StreamingDecoder {
             U32(type_) => goto!(U32Byte1(type_, u32::from(current_byte) << 24)),
             PartialChunk(type_str) => {
                 match type_str {
-                    IDAT => {
+                    chunk::IDAT => {
                         self.have_idat = true;
                         goto!(
                             0,
@@ -428,13 +428,13 @@ impl StreamingDecoder {
 
     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
         self.state = Some(State::U32(U32Value::Crc(type_str)));
-        if self.info.is_none() && type_str != IHDR {
+        if self.info.is_none() && type_str != chunk::IHDR {
             return Err(DecodingError::Format(
                 format!("{:?} chunk appeared before IHDR chunk", type_str).into(),
             ));
         }
         match match type_str {
-            IHDR => self.parse_ihdr(),
+            chunk::IHDR => self.parse_ihdr(),
             chunk::PLTE => self.parse_plte(),
             chunk::tRNS => self.parse_trns(),
             chunk::pHYs => self.parse_phys(),

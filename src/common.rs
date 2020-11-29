@@ -1,7 +1,8 @@
 //! Common types shared between the encoder and decoder
-use crate::filter;
+use crate::{chunk, filter};
 
-use std::{convert::TryFrom, fmt};
+use io::Write;
+use std::{convert::TryFrom, fmt, io};
 
 /// Describes the layout of samples in a pixel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +273,7 @@ pub struct AnimationControl {
 }
 
 /// The type and strength of applied compression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Compression {
     /// Default level  
     Default,
@@ -326,12 +327,12 @@ impl ScaledFloat {
     }
 
     /// Fully accurate construction from a value scaled as per specification.
-    pub fn from_scaled(val: u32) -> Self {
+    pub const fn from_scaled(val: u32) -> Self {
         Self { 0: val }
     }
 
     /// Get the accurate encoded value.
-    pub fn into_scaled(self) -> u32 {
+    pub const fn into_scaled(self) -> u32 {
         self.0
     }
 
@@ -361,6 +362,16 @@ impl SourceChromaticities {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Time {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
 /// PNG info struct
 #[derive(Clone, Debug)]
 pub struct Info {
@@ -379,6 +390,7 @@ pub struct Info {
     pub compression: Compression,
     pub filter: filter::FilterType,
     pub source_chromaticities: Option<SourceChromaticities>,
+    pub time: Option<Time>,
 }
 
 impl Default for Info {
@@ -400,6 +412,7 @@ impl Default for Info {
             compression: Compression::Fast,
             filter: filter::FilterType::Sub,
             source_chromaticities: None,
+            time: <_>::default(),
         }
     }
 }
@@ -475,6 +488,43 @@ impl Info {
     pub fn raw_row_length_from_width(&self, width: u32) -> usize {
         self.color_type
             .raw_row_length_from_width(self.bit_depth, width)
+    }
+
+    pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        chunk::IHDR_encode(
+            w,
+            self.width,
+            self.height,
+            self.bit_depth,
+            self.color_type,
+            self.interlaced,
+        )?;
+
+        if let Some(p) = &self.palette {
+            chunk::PLTE_encode(w, p)?;
+        };
+
+        if let Some(t) = &self.trns {
+            chunk::encode_chunk(w, chunk::tRNS, t)?;
+        }
+
+        if let Some(t) = self.time {
+            chunk::tIME_encode(w, t)?;
+        };
+
+        if let Some(g) = self.source_gamma {
+            chunk::gAMA_encode(w, g)?;
+        }
+
+        if let Some(c) = self.source_chromaticities {
+            chunk::cHRM_encode(w, c)?;
+        }
+
+        if let Some(animation_ctl) = self.animation_control {
+            chunk::acTL_encode(w, animation_ctl)?;
+        }
+
+        Ok(())
     }
 }
 

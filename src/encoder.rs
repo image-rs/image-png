@@ -1,30 +1,28 @@
-extern crate crc32fast;
-extern crate deflate;
+mod animation;
+mod image;
 
-use std::borrow::Cow;
-use std::error;
-use std::fmt;
-use std::io::{self, Read, Write};
-use std::mem;
-use std::result;
+use io::Write;
+use std::{error, fmt, io, result};
 
-use crc32fast::Hasher as Crc32;
 use deflate::write::ZlibEncoder;
 
-use crate::chunk::{self, ChunkType};
-use crate::common::{
-    AnimationControl, BitDepth, BytesPerPixel, ColorType, Compression, FrameControl, Info,
-    ScaledFloat,
-};
+use crate::common::{BitDepth, BytesPerPixel, ColorType, Compression};
 use crate::filter::{filter, FilterType};
-use crate::traits::WriteBytesExt;
 
 pub type Result<T> = result::Result<T, EncodingError>;
 
 #[derive(Debug)]
 pub enum EncodingError {
     IoError(io::Error),
-    Format(Cow<'static, str>),
+    ZeroWidth,
+    ZeroHeight,
+    ZeroFrames,
+    Invalid(BitDepth, ColorType),
+    WrongDataSize(usize, usize),
+    AlreadyFinished,
+    MissingPalette,
+    EmptyPalette,
+    WrongPaletteLength,
 }
 
 impl error::Error for EncodingError {
@@ -38,314 +36,116 @@ impl error::Error for EncodingError {
 
 impl fmt::Display for EncodingError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        use self::EncodingError::*;
         match self {
-            IoError(err) => write!(fmt, "{}", err),
-            Format(desc) => write!(fmt, "{}", desc),
+            Self::IoError(err) => write!(fmt, "{}", err),
+            Self::ZeroWidth => write!(fmt, "Image width must be greater than zero"),
+            Self::ZeroHeight => write!(fmt, "Image height must be greater than zero"),
+            Self::ZeroFrames => write!(fmt, "An animation must have at least one frame"),
+            Self::Invalid(b, c) => write!(
+                fmt,
+                "Invalid combination of bit-depth '{:?}' and color type '{:?}'",
+                b, c
+            ),
+            Self::WrongDataSize(d, e) => write!(fmt, "Expected {} bytes, found {} bytes", e, d),
+            Self::AlreadyFinished => write!(fmt, "All the image data has been written"),
+            Self::MissingPalette => write!(fmt, "Missing palette for indexed image color data"),
+            Self::EmptyPalette => write!(fmt, "The provided palette contains no data"),
+            Self::WrongPaletteLength => write!(
+                fmt,
+                "The length of the provided palette isn't a multiple of three"
+            ),
         }
     }
 }
 
 impl From<io::Error> for EncodingError {
-    fn from(err: io::Error) -> EncodingError {
-        EncodingError::IoError(err)
+    fn from(err: io::Error) -> Self {
+        Self::IoError(err)
     }
 }
 
 impl From<EncodingError> for io::Error {
-    fn from(err: EncodingError) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, err.to_string())
+    fn from(err: EncodingError) -> Self {
+        Self::new(io::ErrorKind::Other, err)
     }
 }
 
-/// PNG Encoder
-pub struct Encoder<W: Write> {
-    w: W,
-    info: Info,
+struct ZlibWriter<W: Write> {
+    curr_buf: Vec<u8>,
+    prev_buf: Vec<u8>,
+    index: usize,
+    zenc: ZlibEncoder<W>,
 }
 
-impl<W: Write> Encoder<W> {
-    pub fn new(w: W, width: u32, height: u32) -> Encoder<W> {
-        let mut info = Info::default();
-        info.width = width;
-        info.height = height;
-        Encoder { w, info }
-    }
-
-    /// Sets the default frame rate of the animation
-    ///
-    /// It will fail if `set_animation_info` isn't called before
-    pub fn set_frame_rate(&mut self, delay_num: u16, delay_den: u16) -> Result<()> {
-        if let Some(ref mut frame_ctl) = self.info.frame_control {
-            frame_ctl.delay_num = delay_num;
-            frame_ctl.delay_den = delay_den;
-            Ok(())
-        } else {
-            Err(EncodingError::Format("It's not an animation".into()))
+impl<W: Write> ZlibWriter<W> {
+    pub fn new(w: W, buf_len: usize, compression: Compression) -> Self {
+        Self {
+            curr_buf: vec![0; buf_len],
+            prev_buf: vec![0; buf_len],
+            index: 0,
+            zenc: ZlibEncoder::new(w, compression),
         }
     }
 
-    /// Set the informations needed to encode an APNG
-    ///
-    /// If `num_plays` is set to 0 it will repeat infinitely
-    ///
-    /// It will fail if `frames` is 0
-    pub fn set_animation_info(&mut self, frames: u32, num_plays: u32) -> Result<()> {
-        if frames == 0 {
-            Err(EncodingError::Format(
-                "invalid number of frames for an animated PNG".into(),
-            ))
-        } else {
-            let animation_ctl = AnimationControl {
-                num_frames: frames,
-                num_plays,
-            };
-
-            let mut frame_ctl = FrameControl::default();
-            frame_ctl.width = self.info.width;
-            frame_ctl.height = self.info.height;
-
-            self.info.frame_control = Some(frame_ctl);
-            self.info.animation_control = Some(animation_ctl);
-            Ok(())
-        }
-    }
-
-    pub fn set_palette(&mut self, palette: Vec<u8>) {
-        self.info.palette = Some(palette);
-    }
-
-    pub fn set_trns(&mut self, trns: Vec<u8>) {
-        self.info.trns = Some(trns);
-    }
-
-    /// Set the display gamma of the source system on which the image was generated or last edited.
-    pub fn set_source_gamma(&mut self, source_gamma: ScaledFloat) {
-        self.info.source_gamma = Some(source_gamma);
-    }
-
-    /// Set the chromaticities for the source system's display channels (red, green, blue) and the whitepoint
-    /// of the source system on which the image was generated or last edited.
-    pub fn set_source_chromaticities(
+    pub fn compress_data(
         &mut self,
-        source_chromaticities: super::SourceChromaticities,
-    ) {
-        self.info.source_chromaticities = Some(source_chromaticities);
-    }
+        data: &[u8],
+        filt: FilterType,
+        bpp: BytesPerPixel,
+    ) -> io::Result<()> {
+        let mut start = 0;
+        if self.index > 0 {
+            if self.index + data.len() < self.curr_buf.len() {
+                start = data.len();
+                self.curr_buf[self.index..self.index + data.len()].copy_from_slice(data);
+                self.index += data.len();
+            } else {
+                start = self.curr_buf.len() - self.index;
 
-    pub fn write_header(self) -> Result<Writer<W>> {
-        Writer::new(self.w, self.info).init()
-    }
-
-    /// Set the color of the encoded image.
-    ///
-    /// These correspond to the color types in the png IHDR data that will be written. The length
-    /// of the image data that is later supplied must match the color type, otherwise an error will
-    /// be emitted.
-    pub fn set_color(&mut self, color: ColorType) {
-        self.info.color_type = color;
-    }
-
-    /// Set the indicated depth of the image data.
-    pub fn set_depth(&mut self, depth: BitDepth) {
-        self.info.bit_depth = depth;
-    }
-
-    /// Set compression parameters.
-    ///
-    /// Accepts a `Compression` or any type that can transform into a `Compression`. Notably `deflate::Compression` and
-    /// `deflate::CompressionOptions` which "just work".
-    pub fn set_compression<C: Into<Compression>>(&mut self, compression: C) {
-        self.info.compression = compression.into();
-    }
-
-    /// Set the used filter type.
-    ///
-    /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
-    /// sample values based on the previous. For a potentially better compression ratio, at the
-    /// cost of more complex processing, try out [`FilterType::Paeth`].
-    ///
-    /// [`FilterType::Sub`]: enum.FilterType.html#variant.Sub
-    /// [`FilterType::Paeth`]: enum.FilterType.html#variant.Paeth
-    pub fn set_filter(&mut self, filter: FilterType) {
-        self.info.filter = filter;
-    }
-}
-
-/// PNG writer
-pub struct Writer<W: Write> {
-    w: W,
-    info: Info,
-    separate_default_image: bool,
-}
-
-#[rustfmt::skip]
-fn chromaticities_to_be_bytes(c: &super::common::SourceChromaticities) -> [u8; 32] {
-    let white_x = c.white.0.into_scaled().to_be_bytes();
-    let white_y = c.white.1.into_scaled().to_be_bytes();
-    let red_x = c.red.0.into_scaled().to_be_bytes();
-    let red_y = c.red.1.into_scaled().to_be_bytes();
-    let green_x = c.green.0.into_scaled().to_be_bytes();
-    let green_y = c.green.1.into_scaled().to_be_bytes();
-    let blue_x = c.blue.0.into_scaled().to_be_bytes();
-    let blue_y = c.blue.1.into_scaled().to_be_bytes();
-    [
-        white_x[0], white_x[1], white_x[2], white_x[3],
-        white_y[0], white_y[1], white_y[2], white_y[3],
-        red_x[0],   red_x[1],   red_x[2],   red_x[3],
-        red_y[0],   red_y[1],   red_y[2],   red_y[3],
-        green_x[0], green_x[1], green_x[2], green_x[3],
-        green_y[0], green_y[1], green_y[2], green_y[3],
-        blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
-        blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
-    ]
-}
-
-fn write_chunk<W: Write>(mut w: W, name: chunk::ChunkType, data: &[u8]) -> Result<()> {
-    w.write_be(data.len() as u32)?;
-    w.write_all(&name.0)?;
-    w.write_all(data)?;
-    let mut crc = Crc32::new();
-    crc.update(&name.0);
-    crc.update(data);
-    w.write_be(crc.finalize())?;
-    Ok(())
-}
-
-impl<W: Write> Writer<W> {
-    const DEFAULT_BUFFER_LENGTH: usize = 4 * 1024;
-
-    fn new(w: W, info: Info) -> Writer<W> {
-        Writer {
-            w,
-            info,
-            separate_default_image: false,
-        }
-    }
-
-    fn init(mut self) -> Result<Self> {
-        if self.info.width == 0 {
-            return Err(EncodingError::Format("Zero width not allowed".into()));
-        }
-
-        if self.info.height == 0 {
-            return Err(EncodingError::Format("Zero height not allowed".into()));
-        }
-
-        // TODO: this could yield the typified BytesPerPixel.
-        if self
-            .info
-            .color_type
-            .is_combination_invalid(self.info.bit_depth)
-        {
-            return Err(EncodingError::Format(
-                format!(
-                    "Invalid combination of bit-depth '{:?}' and color-type '{:?}'",
-                    self.info.bit_depth, self.info.color_type
-                )
-                .into(),
-            ));
-        }
-
-        self.w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?;
-        let mut data = [0; 13];
-        (&mut data[..]).write_be(self.info.width)?;
-        (&mut data[4..]).write_be(self.info.height)?;
-        data[8] = self.info.bit_depth as u8;
-        data[9] = self.info.color_type as u8;
-        data[12] = if self.info.interlaced { 1 } else { 0 };
-        self.write_chunk(chunk::IHDR, &data)?;
-
-        if let Some(p) = &self.info.palette {
-            write_chunk(&mut self.w, chunk::PLTE, p)?;
-        };
-
-        if let Some(t) = &self.info.trns {
-            write_chunk(&mut self.w, chunk::tRNS, t)?;
-        }
-
-        if let Some(g) = &self.info.source_gamma {
-            write_chunk(&mut self.w, chunk::gAMA, &g.into_scaled().to_be_bytes())?;
-        }
-
-        if let Some(c) = &self.info.source_chromaticities {
-            let enc = chromaticities_to_be_bytes(&c);
-            write_chunk(&mut self.w, chunk::cHRM, &enc)?;
-        }
-
-        if let Some(animation_ctl) = &self.info.animation_control {
-            let mut data = [0; 8];
-            (&mut data[..]).write_be(animation_ctl.num_frames)?;
-            (&mut data[4..]).write_be(animation_ctl.num_plays)?;
-            write_chunk(&mut self.w, chunk::acTL, &data)?;
-        }
-
-        Ok(self)
-    }
-
-    pub fn write_chunk(&mut self, name: ChunkType, data: &[u8]) -> Result<()> {
-        write_chunk(&mut self.w, name, data)
-    }
-
-    /// Writes the image data.
-    pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
-        const MAX_CHUNK_LEN: u32 = (1u32 << 31) - 1;
-        let zlib_encoded = self.deflate_image_data(data)?;
-        for chunk in zlib_encoded.chunks(MAX_CHUNK_LEN as usize) {
-            match self.info {
-                Info {
-                    animation_control: Some(_),
-                    frame_control:
-                        Some(FrameControl {
-                            sequence_number, ..
-                        }),
-                    ..
-                } => {
-                    self.check_animation()?;
-                    self.write_fcTL()?;
-                    if sequence_number == 0 && !self.separate_default_image {
-                        self.write_chunk(chunk::IDAT, &chunk)?;
-                    } else {
-                        self.write_fdAT(&chunk)?;
-                    }
-                    self.info.animation_control.as_mut().unwrap().num_frames -= 1;
-                }
-                _ => self.write_chunk(chunk::IDAT, &chunk)?,
+                self.curr_buf[self.index..].copy_from_slice(&data[..start]);
+                self.index = 0;
+                self.filter(filt, bpp)?;
             }
         }
+
+        let mut iter = data[start..].chunks_exact(self.curr_buf.len());
+        for line in &mut iter {
+            // assert_eq!(self.index, 0);
+            self.curr_buf.copy_from_slice(line);
+            self.filter(filt, bpp)?;
+        }
+
+        let rem = iter.remainder();
+        self.curr_buf[..rem.len()].copy_from_slice(rem);
+        self.index += rem.len();
+
         Ok(())
     }
 
-    fn deflate_image_data(&self, data: &[u8]) -> Result<Vec<u8>> {
-        if self.info.color_type == ColorType::Indexed && self.info.palette.is_none() {
-            return Err(EncodingError::Format(
-                "can't write indexed image without palette".into(),
-            ));
-        }
+    fn filter(&mut self, filt: FilterType, bpp: BytesPerPixel) -> io::Result<()> {
+        let prev = self.curr_buf.clone();
+        filter(filt, bpp, &self.prev_buf, &mut self.curr_buf);
+        self.prev_buf = prev;
 
-        let bpp = self.info.bpp_in_prediction();
-        let in_len = self.info.raw_row_length() - 1;
-        let prev = vec![0; in_len];
-        let mut prev = prev.as_slice();
-        let mut current = vec![0; in_len];
-        let data_size = in_len * self.info.height as usize;
-        if data_size != data.len() {
-            let message = format!("wrong data size, expected {} got {}", data_size, data.len());
-            return Err(EncodingError::Format(message.into()));
-        }
-        let mut zlib = ZlibEncoder::new(Vec::new(), self.info.compression.clone());
-        let filter_method = self.info.filter;
-        for line in data.chunks(in_len) {
-            current.copy_from_slice(&line);
-            zlib.write_all(&[filter_method as u8])?;
-            filter(filter_method, bpp, &prev, &mut current);
-            zlib.write_all(&current)?;
-            prev = line;
-        }
-        let data = zlib.finish()?;
-        Ok(data)
+        self.zenc.write_all(&[filt as u8])?;
+        self.zenc.write_all(&self.curr_buf)
     }
 
+    pub fn buffered(&self) -> usize {
+        self.index
+    }
+
+    pub fn finish(self) -> io::Result<W> {
+        self.zenc.finish()
+    }
+}
+
+// --- For backwards compatibility ---
+
+pub use image::ImageEncoder as Encoder;
+pub use image::ImageWriter as Writer;
+
+impl<W: Write> Writer<W> {
     /// Create an stream writer.
     ///
     /// This allows you create images that do not fit in memory. The default
@@ -355,7 +155,9 @@ impl<W: Write> Writer<W> {
     /// This borrows the writer. This preserves it which allows manually
     /// appending additional chunks after the image data has been written
     pub fn stream_writer(&mut self) -> StreamWriter<W> {
-        self.stream_writer_with_size(Self::DEFAULT_BUFFER_LENGTH)
+        StreamWriter {
+            w: Exclusive::MutRef(self),
+        }
     }
 
     /// Create a stream writer with custom buffer size.
@@ -363,8 +165,10 @@ impl<W: Write> Writer<W> {
     /// See [`stream_writer`].
     ///
     /// [`stream_writer`]: #fn.stream_writer
-    pub fn stream_writer_with_size(&mut self, size: usize) -> StreamWriter<W> {
-        StreamWriter::new(ChunkOutput::Borrowed(self), size)
+    pub fn stream_writer_with_size(&mut self, _: usize) -> StreamWriter<W> {
+        StreamWriter {
+            w: Exclusive::MutRef(self),
+        }
     }
 
     /// Turn this into a stream writer for image data.
@@ -373,7 +177,9 @@ impl<W: Write> Writer<W> {
     /// chunk size is 4K, use `stream_writer_with_size` to set another chuck
     /// size.
     pub fn into_stream_writer(self) -> StreamWriter<'static, W> {
-        self.into_stream_writer_with_size(Self::DEFAULT_BUFFER_LENGTH)
+        StreamWriter {
+            w: Exclusive::Owned(self),
+        }
     }
 
     /// Turn this into a stream writer with custom buffer size.
@@ -381,251 +187,56 @@ impl<W: Write> Writer<W> {
     /// See [`into_stream_writer`].
     ///
     /// [`into_stream_writer`]: #fn.into_stream_writer
-    pub fn into_stream_writer_with_size(self, size: usize) -> StreamWriter<'static, W> {
-        StreamWriter::new(ChunkOutput::Owned(self), size)
-    }
-
-    pub fn write_separate_default_image(&mut self, data: &[u8]) -> Result<()> {
-        match self.info {
-            Info {
-                animation_control: Some(_),
-                frame_control: Some(frame_control),
-                ..
-            } => {
-                if frame_control.sequence_number != 0 {
-                    Err(EncodingError::Format(
-                        "separate default image provided after frame sequence has begun".into(),
-                    ))
-                } else if self.separate_default_image {
-                    Err(EncodingError::Format(
-                        "default image already written".into(),
-                    ))
-                } else {
-                    self.separate_default_image = true;
-                    const MAX_CHUNK_LEN: u32 = (1u32 << 31) - 1;
-                    let zlib_encoded = self.deflate_image_data(data)?;
-                    for chunk in zlib_encoded.chunks(MAX_CHUNK_LEN as usize) {
-                        self.write_chunk(chunk::IDAT, &chunk)?;
-                    }
-                    Ok(())
-                }
-            }
-            _ => Err(EncodingError::Format(
-                "default image provided for a non-animated PNG".into(),
-            )),
-        }
-    }
-
-    #[allow(non_snake_case)]
-    fn write_fcTL(&mut self) -> Result<()> {
-        let frame_ctl = self.info.frame_control.as_mut().ok_or_else(|| {
-            EncodingError::Format("cannot write fcTL for a non-animated PNG".into())
-        })?;
-        let mut data = [0u8; 26];
-        (&mut data[..]).write_be(frame_ctl.sequence_number)?;
-        (&mut data[4..]).write_be(frame_ctl.width)?;
-        (&mut data[8..]).write_be(frame_ctl.height)?;
-        (&mut data[12..]).write_be(frame_ctl.x_offset)?;
-        (&mut data[16..]).write_be(frame_ctl.y_offset)?;
-        (&mut data[20..]).write_be(frame_ctl.delay_num)?;
-        (&mut data[22..]).write_be(frame_ctl.delay_den)?;
-        data[24] = frame_ctl.dispose_op as u8;
-        data[25] = frame_ctl.blend_op as u8;
-
-        write_chunk(&mut self.w, chunk::fcTL, &data)?;
-        frame_ctl.inc_seq_num(1);
-        Ok(())
-    }
-
-    #[allow(non_snake_case)]
-    fn write_fdAT(&mut self, data: &[u8]) -> Result<()> {
-        let frame_ctl = self.info.frame_control.as_mut().ok_or_else(|| {
-            EncodingError::Format("cannot write fdAT for a non-animated PNG".into())
-        })?;
-
-        let mut all_data = vec![0u8; data.len() + 4];
-        (&mut all_data[..]).write_be(frame_ctl.sequence_number)?;
-        (&mut all_data[4..]).write_all(data)?;
-
-        write_chunk(&mut self.w, chunk::fdAT, &all_data)?;
-        frame_ctl.inc_seq_num(1);
-        Ok(())
-    }
-
-    fn check_animation(&mut self) -> Result<()> {
-        match &mut self.info {
-            Info {
-                animation_control: Some(AnimationControl { num_frames: 0, .. }),
-                frame_control: Some(_),
-                ..
-            } => Err(EncodingError::Format(
-                "exceeded number of frames specified".into(),
-            )),
-            Info {
-                animation_control: Some(_),
-                frame_control: Some(_),
-                ..
-            } => Ok(()),
-            _ => Err(EncodingError::Format(
-                "frame provided for a non-animated PNG".into(),
-            )),
+    pub fn into_stream_writer_with_size(self, _: usize) -> StreamWriter<'static, W> {
+        StreamWriter {
+            w: Exclusive::Owned(self),
         }
     }
 }
 
-impl<W: Write> Drop for Writer<W> {
-    fn drop(&mut self) {
-        let _ = self.write_chunk(chunk::IEND, &[]);
-    }
+enum Exclusive<'a, T> {
+    MutRef(&'a mut T),
+    Owned(T),
 }
 
-struct ChunkWriter<'a, W: Write> {
-    writer: ChunkOutput<'a, W>,
-    buffer: Vec<u8>,
-    index: usize,
-}
-
-enum ChunkOutput<'a, W: Write> {
-    Borrowed(&'a mut Writer<W>),
-    Owned(Writer<W>),
-}
-
-impl<'a, W: Write> ChunkWriter<'a, W> {
-    fn new(writer: ChunkOutput<'a, W>, buf_len: usize) -> ChunkWriter<'a, W> {
-        ChunkWriter {
-            writer,
-            buffer: vec![0; buf_len],
-            index: 0,
-        }
-    }
-}
-
-impl<'a, W: Write> std::ops::Deref for ChunkOutput<'a, W> {
-    type Target = Writer<W>;
+impl<'a, T> std::ops::Deref for Exclusive<'a, T> {
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        match self {
-            ChunkOutput::Borrowed(writer) => writer,
-            ChunkOutput::Owned(writer) => writer,
+        match *self {
+            Self::MutRef(&mut ref v) | Self::Owned(ref v) => v,
         }
     }
 }
 
-impl<'a, W: Write> std::ops::DerefMut for ChunkOutput<'a, W> {
+impl<'a, T> std::ops::DerefMut for Exclusive<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            ChunkOutput::Borrowed(writer) => writer,
-            ChunkOutput::Owned(writer) => writer,
+            Self::MutRef(v) => v,
+            Self::Owned(v) => v,
         }
     }
 }
 
-impl<'a, W: Write> Write for ChunkWriter<'a, W> {
-    fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
-        let written = buf.read(&mut self.buffer[self.index..])?;
-        self.index += written;
-
-        if self.index + 1 >= self.buffer.len() {
-            self.writer.write_chunk(chunk::IDAT, &self.buffer)?;
-            self.index = 0;
-        }
-
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if self.index > 0 {
-            self.writer
-                .write_chunk(chunk::IDAT, &self.buffer[..=self.index])?;
-        }
-        self.index = 0;
-        Ok(())
-    }
-}
-
-impl<'a, W: Write> Drop for ChunkWriter<'a, W> {
-    fn drop(&mut self) {
-        let _ = self.flush();
-    }
-}
-
-/// Streaming png writer
-///
-/// This may silently fail in the destructor, so it is a good idea to call
-/// [`finish`](#method.finish) or [`flush`](https://doc.rust-lang.org/stable/std/io/trait.Write.html#tymethod.flush) before dropping.
 pub struct StreamWriter<'a, W: Write> {
-    writer: deflate::write::ZlibEncoder<ChunkWriter<'a, W>>,
-    prev_buf: Vec<u8>,
-    curr_buf: Vec<u8>,
-    index: usize,
-    bpp: BytesPerPixel,
-    filter: FilterType,
-}
-
-impl<'a, W: Write> StreamWriter<'a, W> {
-    fn new(writer: ChunkOutput<'a, W>, buf_len: usize) -> StreamWriter<'a, W> {
-        let bpp = writer.info.bpp_in_prediction();
-        let in_len = writer.info.raw_row_length() - 1;
-        let filter = writer.info.filter;
-        let prev_buf = vec![0; in_len];
-        let curr_buf = vec![0; in_len];
-
-        let compression = writer.info.compression.clone();
-        let chunk_writer = ChunkWriter::new(writer, buf_len);
-        let zlib = deflate::write::ZlibEncoder::new(chunk_writer, compression);
-
-        StreamWriter {
-            writer: zlib,
-            index: 0,
-            prev_buf,
-            curr_buf,
-            bpp,
-            filter,
-        }
-    }
-
-    pub fn finish(mut self) -> Result<()> {
-        // TODO: call `writer.finish` somehow?
-        self.flush()?;
-        Ok(())
-    }
+    w: Exclusive<'a, Writer<W>>,
 }
 
 impl<'a, W: Write> Write for StreamWriter<'a, W> {
-    fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
-        let written = buf.read(&mut self.curr_buf[self.index..])?;
-        self.index += written;
-
-        if self.index >= self.curr_buf.len() {
-            self.writer.write_all(&[self.filter as u8])?;
-            filter(self.filter, self.bpp, &self.prev_buf, &mut self.curr_buf);
-            self.writer.write_all(&self.curr_buf)?;
-            mem::swap(&mut self.prev_buf, &mut self.curr_buf);
-            self.index = 0;
-        }
-
-        Ok(written)
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.w.write_image_data(buf)?;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()?;
-        if self.index > 0 {
-            let message = format!("wrong data size, got {} bytes too many", self.index);
-            return Err(EncodingError::Format(message.into()).into());
-        }
-        Ok(())
-    }
-}
-
-impl<'a, W: Write> Drop for StreamWriter<'a, W> {
-    fn drop(&mut self) {
-        let _ = self.flush();
+        Ok(self.w.finish()?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ScaledFloat;
 
     extern crate glob;
 
@@ -779,7 +390,7 @@ mod tests {
                 let mut encoder = Encoder::new(&mut out, info.width, info.height);
                 encoder.set_depth(BitDepth::from_u8(bit_depth).unwrap());
                 encoder.set_color(ColorType::Indexed);
-                encoder.set_palette(palette.clone());
+                encoder.set_palette(palette.clone()).ok();
 
                 let mut writer = encoder.write_header().unwrap();
                 writer.write_image_data(&indexed_data).unwrap();
@@ -813,6 +424,7 @@ mod tests {
         let correct_image_size = width * height * 3;
         let image = vec![0u8; correct_image_size + 1];
         let result = png_writer.write_image_data(image.as_ref());
+
         assert!(result.is_err());
 
         Ok(())
@@ -912,6 +524,7 @@ mod tests {
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::One);
         encoder.set_color(ColorType::Indexed);
+        encoder.set_palette(vec![0, 0, 0]).unwrap();
         assert!(encoder.write_header().is_ok());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -922,6 +535,7 @@ mod tests {
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Two);
         encoder.set_color(ColorType::Indexed);
+        encoder.set_palette(vec![0, 0, 0]).unwrap();
         assert!(encoder.write_header().is_ok());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -932,6 +546,7 @@ mod tests {
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Four);
         encoder.set_color(ColorType::Indexed);
+        encoder.set_palette(vec![0, 0, 0]).unwrap();
         assert!(encoder.write_header().is_ok());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -947,6 +562,7 @@ mod tests {
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Eight);
         encoder.set_color(ColorType::Indexed);
+        encoder.set_palette(vec![0, 0, 0]).unwrap();
         assert!(encoder.write_header().is_ok());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);

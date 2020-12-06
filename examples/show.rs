@@ -173,10 +173,11 @@ fn resize_window(display: &Display, image: &RawImage2d<'static, u8>) {
     if width < 50 && height < 50 {
         width *= 10;
         height *= 10;
-    } else if width < 5 && height < 5 {
-        width *= 10;
-        height *= 10;
     }
+    // else if width < 5 && height < 5 {
+    //     width *= 10;
+    //     height *= 10;
+    // }
     display
         .gl_window()
         .window()

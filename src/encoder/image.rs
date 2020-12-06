@@ -9,7 +9,7 @@ use std::io;
 
 const MAX_CHUNK_LEN: u32 = u32::MAX >> 1;
 
-/// PNG Encoder
+/// PNG Image Encoder
 pub struct ImageEncoder<W: io::Write> {
     w: W,
     info: Info,
@@ -88,7 +88,7 @@ impl<W: Write> ImageEncoder<W> {
     ///
     /// [`FilterType::Sub`]: enum.FilterType.html#variant.Sub
     /// [`FilterType::Paeth`]: enum.FilterType.html#variant.Paeth
-    pub fn set_filter(&mut self, filter: FilterType) {
+    pub fn set_default_filter(&mut self, filter: FilterType) {
         self.info.filter = filter;
     }
 
@@ -96,41 +96,9 @@ impl<W: Write> ImageEncoder<W> {
         self.buf_size = size;
     }
 
-    pub fn write_header(self) -> Result<ImageWriter<W>> {
-        ImageWriter::new(self.w, self.info, self.buf_size)
-    }
-}
+    pub fn write_header(mut self) -> Result<ImageWriter<W>> {
+        let info = self.info;
 
-struct ChunkWriter<W: Write> {
-    w: W,
-}
-
-impl<W: Write> ChunkWriter<W> {
-    pub fn get_mut(&mut self) -> &mut W {
-        &mut self.w
-    }
-}
-
-impl<W: Write> Write for ChunkWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        chunk::encode_chunk(&mut self.w, chunk::IDAT, buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// PNG writer
-pub struct ImageWriter<W: Write> {
-    w: Option<ZlibWriter<BufWriter<ChunkWriter<W>>>>,
-    info: Info,
-    total: usize,
-}
-
-impl<W: Write> ImageWriter<W> {
-    fn new(mut w: W, info: Info, buf_size: usize) -> Result<Self> {
         if info.width == 0 {
             return Err(EncodingError::ZeroWidth);
         }
@@ -147,22 +115,64 @@ impl<W: Write> ImageWriter<W> {
             return Err(EncodingError::MissingPalette);
         }
 
-        w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?;
+        self.w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?;
 
-        info.encode(&mut w)?;
+        info.encode(&mut self.w)?;
 
+        // This doesn't need everything from `info` but the compiler probably knows that
+        Ok(ImageWriter::new(self.w, info, self.buf_size))
+    }
+}
+
+pub(super) struct IDATChunkWriter<W: Write> {
+    pub w: W,
+}
+
+impl<W: Write> Write for IDATChunkWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        chunk::encode_chunk(&mut self.w, chunk::IDAT, buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// PNG writer
+pub struct ImageWriter<W: Write> {
+    w: Option<ZlibWriter<io::BufWriter<IDATChunkWriter<W>>>>,
+    // info: Info,
+    total: usize,
+}
+
+impl<W: Write> ImageWriter<W> {
+    pub(super) fn new(w: W, info: Info, buf_size: usize) -> Self {
         let in_len = info.raw_row_length() - 1;
         let total = in_len * info.height as usize;
 
-        let chunk_writer = ChunkWriter { w };
+        let chunk_writer = IDATChunkWriter { w };
         let buf_writer = BufWriter::with_capacity(buf_size, chunk_writer);
-        let zlib_writer = ZlibWriter::new(buf_writer, in_len, info.compression);
+        let zlib_writer = ZlibWriter::new(
+            buf_writer,
+            in_len,
+            info.compression,
+            info.bpp_in_prediction(),
+            info.filter,
+        );
 
-        Ok(Self {
+        Self {
             w: Some(zlib_writer),
-            info,
             total,
-        })
+        }
+    }
+
+    // TODO: I don't think this would cause any damage
+    pub fn set_filter(&mut self, filter: FilterType) -> Result<()> {
+        match self.w {
+            Some(ref mut w) => Ok(w.filter = filter),
+            None => Err(EncodingError::AlreadyFinished),
+        }
     }
 
     /// Writes the image data.
@@ -173,12 +183,7 @@ impl<W: Write> ImageWriter<W> {
             return Err(EncodingError::WrongDataSize(data.len(), self.total));
         }
         self.total -= data.len();
-
-        let bpp = self.info.bpp_in_prediction();
-        let filter = self.info.filter;
-
-        w.compress_data(data, filter, bpp)?;
-        Ok(())
+        Ok(w.compress_data(data)?)
     }
 
     pub fn finish(&mut self) -> Result<()> {
@@ -190,10 +195,9 @@ impl<W: Write> ImageWriter<W> {
             } else if w.buffered() != 0 {
                 Err(EncodingError::WrongDataSize(w.buffered(), 0))
             } else {
-                let mut buf_writer = w.finish()?;
-                buf_writer.flush()?;
-                let w = buf_writer.get_mut().get_mut();
-                Ok(chunk::encode_chunk(w, chunk::IEND, &[])?)
+                // into_inner calls flush
+                let mut w = w.finish()?.into_inner().map_err(io::Error::from)?.w;
+                Ok(chunk::encode_chunk(&mut w, chunk::IEND, &[])?)
             }
         } else {
             Ok(())
@@ -203,7 +207,6 @@ impl<W: Write> ImageWriter<W> {
 
 impl<W: Write> Drop for ImageWriter<W> {
     fn drop(&mut self) {
-        // TODO: should this panic if is err?
         self.finish().ok();
     }
 }

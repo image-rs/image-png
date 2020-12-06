@@ -1,6 +1,8 @@
 mod animation;
 mod image;
 
+pub use animation::{AnimationEncoder, FrameEncoder, FrameWriter};
+
 use io::Write;
 use std::{error, fmt, io, result};
 
@@ -23,6 +25,8 @@ pub enum EncodingError {
     MissingPalette,
     EmptyPalette,
     WrongPaletteLength,
+    MissingFrames(u32),
+    FrameOutOfBounds(u32, u32),
 }
 
 impl error::Error for EncodingError {
@@ -54,6 +58,14 @@ impl fmt::Display for EncodingError {
                 fmt,
                 "The length of the provided palette isn't a multiple of three"
             ),
+            Self::MissingFrames(f) => {
+                write!(fmt, "There are {} frames yet to be written", f)
+            }
+            Self::FrameOutOfBounds(w, h) => write!(
+                fmt,
+                "The frame size is restricted to an area of {}x{} pixels",
+                w, h
+            ),
         }
     }
 }
@@ -70,29 +82,46 @@ impl From<EncodingError> for io::Error {
     }
 }
 
+// pub trait PNGEncoder: Sized {
+//     fn set<R, P: Parameter<Self, Result = R>>(&mut self, param: P) -> R {
+//         param.set(self)
+//     }
+// }
+
+// pub trait Parameter<E: PNGEncoder> {
+//     type Result;
+
+//     fn set(self, enc: &mut E) -> Self::Result;
+// }
+
 struct ZlibWriter<W: Write> {
     curr_buf: Vec<u8>,
     prev_buf: Vec<u8>,
     index: usize,
     zenc: ZlibEncoder<W>,
+    bpp: BytesPerPixel,
+    pub filter: FilterType,
 }
 
 impl<W: Write> ZlibWriter<W> {
-    pub fn new(w: W, buf_len: usize, compression: Compression) -> Self {
+    pub fn new(
+        w: W,
+        buf_len: usize,
+        compression: Compression,
+        bpp: BytesPerPixel,
+        filter: FilterType,
+    ) -> Self {
         Self {
             curr_buf: vec![0; buf_len],
             prev_buf: vec![0; buf_len],
             index: 0,
             zenc: ZlibEncoder::new(w, compression),
+            bpp,
+            filter,
         }
     }
 
-    pub fn compress_data(
-        &mut self,
-        data: &[u8],
-        filt: FilterType,
-        bpp: BytesPerPixel,
-    ) -> io::Result<()> {
+    pub fn compress_data(&mut self, data: &[u8]) -> io::Result<()> {
         let mut start = 0;
         if self.index > 0 {
             if self.index + data.len() < self.curr_buf.len() {
@@ -104,7 +133,7 @@ impl<W: Write> ZlibWriter<W> {
 
                 self.curr_buf[self.index..].copy_from_slice(&data[..start]);
                 self.index = 0;
-                self.filter(filt, bpp)?;
+                self.filter()?;
             }
         }
 
@@ -112,7 +141,7 @@ impl<W: Write> ZlibWriter<W> {
         for line in &mut iter {
             // assert_eq!(self.index, 0);
             self.curr_buf.copy_from_slice(line);
-            self.filter(filt, bpp)?;
+            self.filter()?;
         }
 
         let rem = iter.remainder();
@@ -122,19 +151,23 @@ impl<W: Write> ZlibWriter<W> {
         Ok(())
     }
 
-    fn filter(&mut self, filt: FilterType, bpp: BytesPerPixel) -> io::Result<()> {
+    /// Filters the data before compressing
+    fn filter(&mut self) -> io::Result<()> {
         let prev = self.curr_buf.clone();
-        filter(filt, bpp, &self.prev_buf, &mut self.curr_buf);
+        filter(self.filter, self.bpp, &self.prev_buf, &mut self.curr_buf);
         self.prev_buf = prev;
 
-        self.zenc.write_all(&[filt as u8])?;
+        self.zenc.write_all(&[self.filter as u8])?;
         self.zenc.write_all(&self.curr_buf)
     }
 
+    /// Returns the number of bytes that haven't been compressed and encoded yet
     pub fn buffered(&self) -> usize {
         self.index
     }
 
+    /// Finishes the compression by writing the chunksum at the end, consumes the zlib writer
+    /// and returns the inner one
     pub fn finish(self) -> io::Result<W> {
         self.zenc.finish()
     }
@@ -607,7 +640,7 @@ mod tests {
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
             encoder.set_color(ColorType::RGB);
-            encoder.set_filter(filter);
+            encoder.set_default_filter(filter);
             encoder.write_header()?.write_image_data(&pixel)?;
 
             let decoder = crate::Decoder::new(io::Cursor::new(buffer));
@@ -639,7 +672,7 @@ mod tests {
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
             encoder.set_color(ColorType::RGB);
-            encoder.set_filter(FilterType::Avg);
+            encoder.set_default_filter(FilterType::Avg);
             if let Some(gamma) = gamma {
                 encoder.set_source_gamma(gamma);
             }

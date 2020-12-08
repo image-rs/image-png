@@ -1,3 +1,7 @@
+## 0.16.8
+
+* Fixed a bug that led to data corruption when encoding with Average filter.
+
 ## 0.16.7
 
 * Added `Encoder::set_trns` to register a transparency table to be written.

@@ -1,12 +1,14 @@
 #![allow(non_snake_case)]
 
-use crate::{
-    chunk, filter::filter, AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType,
-    Compression, DisposeOp, FilterType, FrameControl, Info, ScaledFloat, SourceChromaticities,
+use crate::chunk;
+use crate::common::{
+    AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
+    FrameControl, Info, ParameterError, ParameterErrorKind, ScaledFloat, SourceChromaticities,
     Time,
 };
-// use chunk::ChunkType;
+use crate::filter::{filter, AdaptiveFilterType, FilterType};
 
+// use chunk::ChunkType;
 use io::Write;
 use std::{error, fmt, io, result};
 
@@ -17,18 +19,31 @@ pub type Result<T = ()> = result::Result<T, EncodingError>;
 #[derive(Debug)]
 pub enum EncodingError {
     IoError(io::Error),
+    Format(FormatError),
+    Parameter(ParameterError),
+    LimitsExceeded,
+}
+
+#[derive(Debug)]
+pub struct FormatError {
+    inner: FormatErrorKind,
+}
+
+#[derive(Debug)]
+enum FormatErrorKind {
     ZeroWidth,
     ZeroHeight,
     ZeroFrames,
-    Invalid(BitDepth, ColorType),
-    WrongDataSize(usize, usize),
-    AlreadyFinished,
-    MissingPalette,
-    EmptyPalette,
-    WrongPaletteLength,
+    ZeroColors,
+    InvalidColorCombination(BitDepth, ColorType),
+    NoPalette,
+    WrongPaletteSize,
+    // TODO: wait, what?
+    WrittenTooMuch(usize),
+    MissingData(usize),
+    NotAnimated,
+    FrameOutOfBounds, // add more info
     MissingFrames(u32),
-    FrameOutOfBounds(u32, u32),
-    NotAnAnimation,
 }
 
 impl error::Error for EncodingError {
@@ -42,33 +57,36 @@ impl error::Error for EncodingError {
 
 impl fmt::Display for EncodingError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        use EncodingError::*;
         match self {
-            Self::IoError(err) => write!(fmt, "{}", err),
-            Self::ZeroWidth => write!(fmt, "Image width must be greater than zero"),
-            Self::ZeroHeight => write!(fmt, "Image height must be greater than zero"),
-            Self::ZeroFrames => write!(fmt, "An animation must have at least one frame"),
-            Self::Invalid(b, c) => write!(
+            IoError(err) => write!(fmt, "{}", err),
+            Format(desc) => write!(fmt, "{}", desc),
+            Parameter(desc) => write!(fmt, "{}", desc),
+            LimitsExceeded => write!(fmt, "Limits are exceeded."),
+        }
+    }
+}
+
+impl fmt::Display for FormatError {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        use FormatErrorKind::*;
+        match self.inner {
+            ZeroWidth => write!(fmt, "Zero width not allowed"),
+            ZeroHeight => write!(fmt, "Zero height not allowed"),
+            ZeroFrames => write!(fmt, "Zero frames not allowed"),
+            ZeroColors => write!(fmt, "The color palette must contain at least one color"),
+            InvalidColorCombination(depth, color) => write!(
                 fmt,
-                "Invalid combination of bit-depth '{:?}' and color type '{:?}'",
-                b, c
+                "Invalid combination of bit-depth '{:?}' and color-type '{:?}'",
+                depth, color
             ),
-            Self::WrongDataSize(d, e) => write!(fmt, "Expected {} bytes, found {} bytes", e, d),
-            Self::AlreadyFinished => write!(fmt, "All the image data has been written"),
-            Self::MissingPalette => write!(fmt, "Missing palette for indexed image color data"),
-            Self::EmptyPalette => write!(fmt, "The provided palette contains no data"),
-            Self::WrongPaletteLength => write!(
-                fmt,
-                "The length of the provided palette isn't a multiple of three"
-            ),
-            Self::MissingFrames(f) => {
-                write!(fmt, "There are {} frames yet to be written", f)
-            }
-            Self::FrameOutOfBounds(w, h) => write!(
-                fmt,
-                "The frame size is restricted to an area of {}x{} pixels",
-                w, h
-            ),
-            Self::NotAnAnimation => write!(fmt, "The `animated` method hasn't been called"),
+            NoPalette => write!(fmt, "Can't write indexed image without palette"),
+            WrongPaletteSize => write!(fmt, "The palette must contain RGB colors"),
+            WrittenTooMuch(index) => write!(fmt, "Wrong data size, got {} bytes too many", index),
+            MissingData(index) => write!(fmt, "Wrong data size, needs {} more bytes", index),
+            NotAnimated => write!(fmt, "Not an animation"),
+            FrameOutOfBounds => write!(fmt, "The frame doesn't fit in the image"),
+            MissingFrames(frames) => write!(fmt, "There are still {} frames to write", frames),
         }
     }
 }
@@ -92,6 +110,7 @@ struct ZlibWriter<W: Write> {
     zenc: ZlibEncoder<W>,
     bpp: BytesPerPixel,
     pub filter: FilterType,
+    pub adaptive: AdaptiveFilterType,
 }
 
 impl<W: Write> ZlibWriter<W> {
@@ -101,6 +120,7 @@ impl<W: Write> ZlibWriter<W> {
         compression: Compression,
         bpp: BytesPerPixel,
         filter: FilterType,
+        adaptive: AdaptiveFilterType,
     ) -> Self {
         Self {
             curr_buf: vec![0; buf_len],
@@ -109,6 +129,7 @@ impl<W: Write> ZlibWriter<W> {
             zenc: ZlibEncoder::new(w, compression),
             bpp,
             filter,
+            adaptive,
         }
     }
 
@@ -145,17 +166,23 @@ impl<W: Write> ZlibWriter<W> {
     /// Filters the data before compressing
     fn filter(&mut self) -> io::Result<()> {
         let prev = self.curr_buf.clone();
-        filter(self.filter, self.bpp, &self.prev_buf, &mut self.curr_buf);
+        let method = filter(
+            self.filter,
+            self.adaptive,
+            self.bpp,
+            &self.prev_buf,
+            &mut self.curr_buf,
+        );
         self.prev_buf = prev;
 
-        self.zenc.write_all(&[self.filter as u8])?;
+        self.zenc.write_all(&[method as u8])?;
         self.zenc.write_all(&self.curr_buf)
     }
 
-    /// Returns the number of bytes that haven't been compressed and encoded yet
-    pub fn buffered(&self) -> usize {
-        self.index
-    }
+    // /// Returns the number of bytes that haven't been compressed and encoded yet
+    // pub fn buffered(&self) -> usize {
+    //     self.index
+    // }
 
     /// Finishes the compression by writing the chunksum at the end, consumes the zlib writer
     /// and returns the inner one
@@ -325,6 +352,15 @@ pub struct Encoder<W: io::Write> {
     w: W,
     info: Info,
     sep_def_img: bool,
+    adaptive: AdaptiveFilterType,
+    filter: FilterType,
+}
+
+// Private impl.
+impl From<FormatErrorKind> for FormatError {
+    fn from(kind: FormatErrorKind) -> Self {
+        FormatError { inner: kind }
+    }
 }
 
 impl<W: Write> Encoder<W> {
@@ -336,12 +372,14 @@ impl<W: Write> Encoder<W> {
             w,
             info,
             sep_def_img: false,
+            filter: <_>::default(),
+            adaptive: <_>::default(),
         }
     }
 
     pub fn animated(&mut self, frames: u32, repeat: u32) -> Result {
         if frames == 0 {
-            Err(EncodingError::ZeroFrames)
+            Err(EncodingError::Format(FormatErrorKind::ZeroFrames.into()))
         } else {
             self.info.animation_control = Some(AnimationControl {
                 num_frames: frames,
@@ -362,9 +400,11 @@ impl<W: Write> Encoder<W> {
 
     pub fn set_palette(&mut self, palette: Vec<u8>) -> Result<()> {
         if palette.is_empty() {
-            Err(EncodingError::EmptyPalette)
+            Err(EncodingError::Format(FormatErrorKind::ZeroColors.into()))
         } else if palette.len() % 3 != 0 {
-            Err(EncodingError::WrongPaletteLength)
+            Err(EncodingError::Format(
+                FormatErrorKind::WrongPaletteSize.into(),
+            ))
         } else {
             self.info.palette = Some(palette);
             Ok(())
@@ -384,6 +424,14 @@ impl<W: Write> Encoder<W> {
     /// of the source system on which the image was generated or last edited.
     pub fn set_source_chromaticities(&mut self, source_chromaticities: SourceChromaticities) {
         self.info.source_chromaticities = Some(source_chromaticities);
+    }
+
+    /// Mark the image data as conforming to the SRGB color space with the specified rendering intent.
+    ///
+    /// Matching source gamma and chromaticities chunks are added automatically.
+    /// Any manually specified source gamma or chromaticities will be ignored.
+    pub fn set_srgb(&mut self, rendering_intent: super::SrgbRenderingIntent) {
+        self.info.srgb = Some(rendering_intent);
     }
 
     /// Set the color of the encoded image.
@@ -417,12 +465,24 @@ impl<W: Write> Encoder<W> {
     /// [`FilterType::Sub`]: enum.FilterType.html#variant.Sub
     /// [`FilterType::Paeth`]: enum.FilterType.html#variant.Paeth
     pub fn set_default_filter(&mut self, filter: FilterType) {
-        self.info.filter = filter;
+        self.filter = filter;
+    }
+
+    /// Set the adaptive filter type.
+    ///
+    /// Adaptive filtering attempts to select the best filter for each line
+    /// based on heuristics which minimize the file size for compression rather
+    /// than use a single filter for the entire image. The default method is
+    /// [`AdaptiveFilterType::NonAdaptive`].
+    ///
+    /// [`AdaptiveFilterType::NonAdaptive`]: enum.AdaptiveFilterType.html
+    pub fn set_default_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
+        self.adaptive = adaptive_filter;
     }
 
     pub fn set_default_frame_delay(&mut self, delay_num: u16, delay_den: u16) -> Result {
         if self.info.animation_control.is_none() {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         } else {
             let fctl = self.info.frame_control.as_mut().unwrap();
             fctl.delay_num = delay_num;
@@ -433,7 +493,7 @@ impl<W: Write> Encoder<W> {
 
     pub fn set_default_dispose_op(&mut self, dispose: DisposeOp) -> Result {
         if self.info.animation_control.is_none() {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         } else {
             let fctl = self.info.frame_control.as_mut().unwrap();
             fctl.dispose_op = dispose;
@@ -443,7 +503,7 @@ impl<W: Write> Encoder<W> {
 
     pub fn set_default_blend_op(&mut self, blend: BlendOp) -> Result {
         if self.info.animation_control.is_none() {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         } else {
             let fctl = self.info.frame_control.as_mut().unwrap();
             fctl.blend_op = blend;
@@ -454,7 +514,7 @@ impl<W: Write> Encoder<W> {
     // This could be a parameter of .animated(..., sep_def_image: bool)
     pub fn with_separate_default_image(&mut self) -> Result {
         if self.info.animation_control.is_none() {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         } else {
             self.sep_def_img = true;
             Ok(())
@@ -465,26 +525,34 @@ impl<W: Write> Encoder<W> {
         let info = self.info;
 
         if info.width == 0 {
-            return Err(EncodingError::ZeroWidth);
+            return Err(EncodingError::Format(FormatErrorKind::ZeroWidth.into()));
         }
 
         if info.height == 0 {
-            return Err(EncodingError::ZeroHeight);
+            return Err(EncodingError::Format(FormatErrorKind::ZeroHeight.into()));
         }
 
         if info.color_type.is_combination_invalid(info.bit_depth) {
-            return Err(EncodingError::Invalid(info.bit_depth, info.color_type));
+            return Err(EncodingError::Format(
+                FormatErrorKind::InvalidColorCombination(info.bit_depth, info.color_type).into(),
+            ));
         }
 
         if info.color_type == ColorType::Indexed && info.palette.is_none() {
-            return Err(EncodingError::MissingPalette);
+            return Err(EncodingError::Format(FormatErrorKind::NoPalette.into()));
         }
 
         self.w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?;
 
         info.encode(&mut self.w)?;
 
-        Ok(FrameEncoder::new(self.w, info, self.sep_def_img))
+        Ok(FrameEncoder::new(
+            self.w,
+            info,
+            self.sep_def_img,
+            self.filter,
+            self.adaptive,
+        ))
     }
 }
 
@@ -500,10 +568,18 @@ pub struct FrameEncoder<W: Write> {
     anim_data: Option<AnimationData>,
     total: u32,
     written: u32,
+    filter: FilterType,
+    adaptive: AdaptiveFilterType,
 }
 
 impl<W: Write> FrameEncoder<W> {
-    fn new(w: W, info: Info, sep_def: bool) -> Self {
+    fn new(
+        w: W,
+        info: Info,
+        sep_def: bool,
+        filter: FilterType,
+        adaptive: AdaptiveFilterType,
+    ) -> Self {
         let frames;
         let anim_data = if let Some(actl) = info.animation_control {
             let fctl = info.frame_control.unwrap();
@@ -523,6 +599,8 @@ impl<W: Write> FrameEncoder<W> {
             anim_data,
             total: frames,
             written: 0,
+            filter,
+            adaptive,
         }
     }
 
@@ -531,7 +609,7 @@ impl<W: Write> FrameEncoder<W> {
             anim_data.fctl.dispose_op = op;
             Ok(())
         } else {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         }
     }
 
@@ -540,7 +618,7 @@ impl<W: Write> FrameEncoder<W> {
             anim_data.fctl.blend_op = op;
             Ok(())
         } else {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         }
     }
 
@@ -550,16 +628,19 @@ impl<W: Write> FrameEncoder<W> {
             anim_data.fctl.delay_num = delay_num;
             Ok(())
         } else {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         }
     }
 
     pub fn set_frame_position(&mut self, x: u32, y: u32, width: u32, height: u32) -> Result<()> {
         if let Some(ref mut anim_data) = self.anim_data {
             if x + width > self.info.width || y + height > self.info.height {
-                Err(EncodingError::FrameOutOfBounds(
-                    self.info.width,
-                    self.info.height,
+                // Err(EncodingError::FrameOutOfBounds(
+                //     self.info.width,
+                //     self.info.height,
+                // ))
+                Err(EncodingError::Format(
+                    FormatErrorKind::FrameOutOfBounds.into(),
                 ))
             } else {
                 anim_data.fctl.x_offset = x;
@@ -569,7 +650,7 @@ impl<W: Write> FrameEncoder<W> {
                 Ok(())
             }
         } else {
-            Err(EncodingError::NotAnAnimation)
+            Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         }
     }
 
@@ -580,11 +661,18 @@ impl<W: Write> FrameEncoder<W> {
     pub fn write_frame_header<'a>(&'a mut self) -> Result<Writer<'a, W>> {
         if let Some(ref mut w) = self.w {
             if self.written == self.total {
-                Err(EncodingError::AlreadyFinished)
+                Err(EncodingError::Parameter(
+                    ParameterErrorKind::PolledAfterEndOfImage.into(),
+                ))
             } else if let Some(ref mut anim_data) = self.anim_data {
                 if anim_data.sep_def {
                     anim_data.sep_def = false;
-                    Ok(Writer::new(w, self.info.clone()))
+                    Ok(Writer::new(
+                        w,
+                        self.info.clone(),
+                        self.filter,
+                        self.adaptive,
+                    ))
                 } else {
                     if self.written == 1 {
                         w.get_mut().set_fdAT(true);
@@ -596,14 +684,26 @@ impl<W: Write> FrameEncoder<W> {
                     anim_data.fctl = self.info.frame_control.unwrap();
 
                     self.written += 1;
-                    Ok(Writer::new(w, self.info.clone()))
+                    Ok(Writer::new(
+                        w,
+                        self.info.clone(),
+                        self.filter,
+                        self.adaptive,
+                    ))
                 }
             } else {
                 self.written = 1;
-                Ok(Writer::new(w, self.info.clone()))
+                Ok(Writer::new(
+                    w,
+                    self.info.clone(),
+                    self.filter,
+                    self.adaptive,
+                ))
             }
         } else {
-            Err(EncodingError::AlreadyFinished)
+            Err(EncodingError::Parameter(
+                ParameterErrorKind::PolledAfterEndOfImage.into(),
+            ))
         }
     }
 
@@ -611,7 +711,9 @@ impl<W: Write> FrameEncoder<W> {
         if let Some(mut w) = self.w.take() {
             if self.remaining() > 0 {
                 self.w = Some(w);
-                Err(EncodingError::MissingFrames(self.remaining()))
+                Err(EncodingError::Format(
+                    FormatErrorKind::MissingFrames(self.remaining()).into(),
+                ))
             } else {
                 Ok(chunk::encode_chunk(
                     w.get_mut().get_mut(),
@@ -620,7 +722,9 @@ impl<W: Write> FrameEncoder<W> {
                 )?)
             }
         } else {
-            Err(EncodingError::AlreadyFinished)
+            Err(EncodingError::Parameter(
+                ParameterErrorKind::PolledAfterEndOfImage.into(),
+            ))
         }
     }
 }
@@ -639,7 +743,12 @@ pub struct Writer<'a, W: Write> {
 }
 
 impl<'a, W: Write> Writer<'a, W> {
-    fn new(w: &'a mut io::BufWriter<ChunkWriter<W>>, info: Info) -> Self {
+    fn new(
+        w: &'a mut io::BufWriter<ChunkWriter<W>>,
+        info: Info,
+        filter: FilterType,
+        adaptive: AdaptiveFilterType,
+    ) -> Self {
         let (width, height) = info
             .frame_control
             .map(|fctl| (fctl.width, fctl.height))
@@ -653,7 +762,8 @@ impl<'a, W: Write> Writer<'a, W> {
             in_len,
             info.compression,
             info.bpp_in_prediction(),
-            info.filter,
+            filter,
+            adaptive,
         );
 
         Self {
@@ -665,10 +775,14 @@ impl<'a, W: Write> Writer<'a, W> {
 
     /// Writes the image data.
     pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
-        let w = self.w.as_mut().ok_or(EncodingError::AlreadyFinished)?;
+        let w = self.w.as_mut().ok_or_else(|| {
+            EncodingError::Parameter(ParameterErrorKind::PolledAfterEndOfImage.into())
+        })?;
 
         if self.total < data.len() {
-            return Err(EncodingError::WrongDataSize(data.len(), self.total));
+            return Err(EncodingError::Format(
+                FormatErrorKind::WrittenTooMuch(data.len() - self.total).into(),
+            ));
         }
         self.total -= data.len();
 
@@ -679,7 +793,18 @@ impl<'a, W: Write> Writer<'a, W> {
     pub fn set_filter(&mut self, filter: FilterType) -> Result<()> {
         match self.w {
             Some(ref mut w) => Ok(w.filter = filter),
-            None => Err(EncodingError::AlreadyFinished),
+            None => Err(EncodingError::Parameter(
+                ParameterErrorKind::PolledAfterEndOfImage.into(),
+            )),
+        }
+    }
+
+    pub fn set_adaptive_filter(&mut self, adaptive: AdaptiveFilterType) -> Result<()> {
+        match self.w {
+            Some(ref mut w) => Ok(w.adaptive = adaptive),
+            None => Err(EncodingError::Parameter(
+                ParameterErrorKind::PolledAfterEndOfImage.into(),
+            )),
         }
     }
 
@@ -688,9 +813,9 @@ impl<'a, W: Write> Writer<'a, W> {
             if self.total > 0 {
                 // Replace the writer has it should be possible to add the missing data
                 self.w = Some(w);
-                Err(EncodingError::WrongDataSize(0, self.total))
-            } else if w.buffered() != 0 {
-                Err(EncodingError::WrongDataSize(w.buffered(), 0))
+                Err(EncodingError::Format(
+                    FormatErrorKind::MissingData(self.total).into(),
+                ))
             } else {
                 let w = w.finish()?;
                 w.flush()?;
@@ -1038,7 +1163,7 @@ mod tests {
         let writer = Cursor::new(output);
         let mut encoder = Encoder::new(writer, width as u32, height as u32);
         encoder.set_depth(BitDepth::Eight);
-        encoder.set_color(ColorType::RGB);
+        encoder.set_color(ColorType::Rgb);
         let mut png_writer = encoder.write_header()?;
 
         let correct_image_size = width * height * 3;
@@ -1081,7 +1206,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::One);
-        encoder.set_color(ColorType::RGB);
+        encoder.set_color(ColorType::Rgb);
         assert!(encoder.write_header().is_err());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -1091,12 +1216,12 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::One);
-        encoder.set_color(ColorType::RGBA);
+        encoder.set_color(ColorType::Rgba);
         assert!(encoder.write_header().is_err());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Two);
-        encoder.set_color(ColorType::RGB);
+        encoder.set_color(ColorType::Rgb);
         assert!(encoder.write_header().is_err());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -1106,12 +1231,12 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Two);
-        encoder.set_color(ColorType::RGBA);
+        encoder.set_color(ColorType::Rgba);
         assert!(encoder.write_header().is_err());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Four);
-        encoder.set_color(ColorType::RGB);
+        encoder.set_color(ColorType::Rgb);
         assert!(encoder.write_header().is_err());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -1121,7 +1246,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Four);
-        encoder.set_color(ColorType::RGBA);
+        encoder.set_color(ColorType::Rgba);
         assert!(encoder.write_header().is_err());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -1179,7 +1304,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Eight);
-        encoder.set_color(ColorType::RGB);
+        encoder.set_color(ColorType::Rgb);
         assert!(encoder.write_header().is_ok());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -1195,7 +1320,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Eight);
-        encoder.set_color(ColorType::RGBA);
+        encoder.set_color(ColorType::Rgba);
         assert!(encoder.write_header().is_ok());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -1205,7 +1330,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Sixteen);
-        encoder.set_color(ColorType::RGB);
+        encoder.set_color(ColorType::Rgb);
         assert!(encoder.write_header().is_ok());
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
@@ -1215,7 +1340,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut writer, 1, 1);
         encoder.set_depth(BitDepth::Sixteen);
-        encoder.set_color(ColorType::RGBA);
+        encoder.set_color(ColorType::Rgba);
         assert!(encoder.write_header().is_ok());
 
         Ok(())
@@ -1229,7 +1354,7 @@ mod tests {
             let mut buffer = vec![];
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
-            encoder.set_color(ColorType::RGB);
+            encoder.set_color(ColorType::Rgb);
             encoder.set_default_filter(filter);
             encoder
                 .write_header()?
@@ -1265,7 +1390,7 @@ mod tests {
             let mut buffer = vec![];
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
-            encoder.set_color(ColorType::RGB);
+            encoder.set_color(ColorType::Rgb);
             encoder.set_default_filter(FilterType::Avg);
             if let Some(gamma) = gamma {
                 encoder.set_source_gamma(gamma);

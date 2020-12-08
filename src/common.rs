@@ -1,5 +1,5 @@
 //! Common types shared between the encoder and decoder
-use crate::{chunk, filter};
+use crate::chunk;
 
 use io::Write;
 use std::{convert::TryFrom, fmt, io};
@@ -9,10 +9,10 @@ use std::{convert::TryFrom, fmt, io};
 #[repr(u8)]
 pub enum ColorType {
     Grayscale = 0,
-    RGB = 2,
+    Rgb = 2,
     Indexed = 3,
     GrayscaleAlpha = 4,
-    RGBA = 6,
+    Rgba = 6,
 }
 
 impl ColorType {
@@ -25,9 +25,9 @@ impl ColorType {
         use self::ColorType::*;
         match self {
             Grayscale | Indexed => 1,
-            RGB => 3,
+            Rgb => 3,
             GrayscaleAlpha => 2,
-            RGBA => 4,
+            Rgba => 4,
         }
     }
 
@@ -35,10 +35,10 @@ impl ColorType {
     pub fn from_u8(n: u8) -> Option<ColorType> {
         match n {
             0 => Some(ColorType::Grayscale),
-            2 => Some(ColorType::RGB),
+            2 => Some(ColorType::Rgb),
             3 => Some(ColorType::Indexed),
             4 => Some(ColorType::GrayscaleAlpha),
-            6 => Some(ColorType::RGBA),
+            6 => Some(ColorType::Rgba),
             _ => None,
         }
     }
@@ -67,9 +67,9 @@ impl ColorType {
         // Section 11.2.2 of the PNG standard disallows several combinations
         // of bit depth and color type
         ((bit_depth == BitDepth::One || bit_depth == BitDepth::Two || bit_depth == BitDepth::Four)
-            && (self == ColorType::RGB
+            && (self == ColorType::Rgb
                 || self == ColorType::GrayscaleAlpha
-                || self == ColorType::RGBA))
+                || self == ColorType::Rgba))
             || (bit_depth == BitDepth::Sixteen && self == ColorType::Indexed)
     }
 }
@@ -299,11 +299,11 @@ impl AnimationControl {
 /// The type and strength of applied compression.
 #[derive(Debug, Clone, Copy)]
 pub enum Compression {
-    /// Default level  
+    /// Default level
     Default,
     /// Fast minimal compression
     Fast,
-    /// Higher compression level  
+    /// Higher compression level
     ///
     /// Best in this context isn't actually the highest possible level
     /// the encoder can do, but is meant to emulate the `Best` setting in the `Flate2`
@@ -443,6 +443,49 @@ impl Time {
     }
 }
 
+/// The rendering intent for an sRGB image.
+///
+/// Presence of this data also indicates that the image conforms to the sRGB color space.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SrgbRenderingIntent {
+    /// For images preferring good adaptation to the output device gamut at the expense of colorimetric accuracy, such as photographs.
+    Perceptual = 0,
+    /// For images requiring colour appearance matching (relative to the output device white point), such as logos.
+    RelativeColorimetric = 1,
+    /// For images preferring preservation of saturation at the expense of hue and lightness, such as charts and graphs.
+    Saturation = 2,
+    /// For images requiring preservation of absolute colorimetry, such as previews of images destined for a different output device (proofs).
+    AbsoluteColorimetric = 3,
+}
+
+impl SrgbRenderingIntent {
+    pub(crate) fn into_raw(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(SrgbRenderingIntent::Perceptual),
+            1 => Some(SrgbRenderingIntent::RelativeColorimetric),
+            2 => Some(SrgbRenderingIntent::Saturation),
+            3 => Some(SrgbRenderingIntent::AbsoluteColorimetric),
+            _ => None,
+        }
+    }
+}
+
+/// A single-byte integer that represents the filtering method applied before
+/// compression.
+///
+/// Currently, the only filter method is adaptive filtering with any of the
+/// five filters in [crate::filter::FilterType].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InfoFilterType {
+    Adaptive = 0,
+}
+
 /// PNG info struct
 #[derive(Clone, Debug)]
 pub struct Info {
@@ -453,15 +496,20 @@ pub struct Info {
     pub interlaced: bool,
     pub trns: Option<Vec<u8>>,
     pub pixel_dims: Option<PixelDimensions>,
-    /// Source system's gamma
+    /// Gamma of the source system.
     pub source_gamma: Option<ScaledFloat>,
     pub palette: Option<Vec<u8>>,
     pub frame_control: Option<FrameControl>,
     pub animation_control: Option<AnimationControl>,
     pub compression: Compression,
-    pub filter: filter::FilterType,
+    pub filter: InfoFilterType,
+    /// Chromaticities of the source system.
     pub source_chromaticities: Option<SourceChromaticities>,
     pub time: Option<Time>,
+    /// The rendering intent of an SRGB image.
+    ///
+    /// Presence of this value also indicates that the image conforms to the SRGB color space.
+    pub srgb: Option<SrgbRenderingIntent>,
 }
 
 impl Default for Info {
@@ -481,9 +529,10 @@ impl Default for Info {
             // Default to `deflate::Compresion::Fast` and `filter::FilterType::Sub`
             // to maintain backward compatible output.
             compression: Compression::Fast,
-            filter: filter::FilterType::Sub,
+            filter: InfoFilterType::Adaptive,
             source_chromaticities: None,
             time: <_>::default(),
+            srgb: None,
         }
     }
 }
@@ -628,6 +677,46 @@ bitflags! {
         const GRAY_TO_RGB         = 0x2000; // read only */
         const EXPAND_16           = 0x4000; // read only */
         const SCALE_16            = 0x8000; // read only */
+    }
+}
+
+#[derive(Debug)]
+pub struct ParameterError {
+    inner: ParameterErrorKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum ParameterErrorKind {
+    /// A provided buffer must be have the exact size to hold the image data. Where the buffer can
+    /// be allocated by the caller, they must ensure that it has a minimum size as hinted previously.
+    /// Even though the size is calculated from image data, this does counts as a parameter error
+    /// because they must react to a value produced by this library, which can have been subjected
+    /// to limits.
+    ImageBufferSize { expected: usize, actual: usize },
+    /// A bit like return `None` from an iterator.
+    /// We use it to differentiate between failing to seek to the next image in a sequence and the
+    /// absence of a next image. This is an error of the caller because they should have checked
+    /// the number of images by inspecting the header data returned when opening the image. This
+    /// library will perform the checks necessary to ensure that data was accurate or error with a
+    /// format error otherwise.
+    PolledAfterEndOfImage,
+}
+
+impl From<ParameterErrorKind> for ParameterError {
+    fn from(inner: ParameterErrorKind) -> Self {
+        ParameterError { inner }
+    }
+}
+
+impl fmt::Display for ParameterError {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        use ParameterErrorKind::*;
+        match self.inner {
+            ImageBufferSize { expected, actual } => {
+                write!(fmt, "wrong data size, expected {} got {}", expected, actual)
+            }
+            PolledAfterEndOfImage => write!(fmt, "End of image has been reached"),
+        }
     }
 }
 

@@ -1,8 +1,5 @@
 //! Common types shared between the encoder and decoder
-use crate::chunk;
-
-use io::Write;
-use std::{convert::TryFrom, fmt, io};
+use std::{convert::TryFrom, fmt};
 
 /// Describes the layout of samples in a pixel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,21 +258,6 @@ impl FrameControl {
     pub fn inc_seq_num(&mut self, i: u32) {
         self.sequence_number += i;
     }
-
-    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
-        let mut data = [0u8; 26];
-        data[..4].copy_from_slice(&self.sequence_number.to_be_bytes());
-        data[4..8].copy_from_slice(&self.width.to_be_bytes());
-        data[8..12].copy_from_slice(&self.height.to_be_bytes());
-        data[12..16].copy_from_slice(&self.x_offset.to_be_bytes());
-        data[16..20].copy_from_slice(&self.y_offset.to_be_bytes());
-        data[20..22].copy_from_slice(&self.delay_num.to_be_bytes());
-        data[22..24].copy_from_slice(&self.delay_den.to_be_bytes());
-        data[24] = self.dispose_op as u8;
-        data[25] = self.blend_op as u8;
-
-        chunk::encode_chunk(w, chunk::fcTL, &data)
-    }
 }
 
 /// Animation control information
@@ -285,15 +267,6 @@ pub struct AnimationControl {
     pub num_frames: u32,
     /// Number of times to loop this APNG.  0 indicates infinite looping.
     pub num_plays: u32,
-}
-
-impl AnimationControl {
-    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
-        let mut data = [0; 8];
-        data[..4].copy_from_slice(&self.num_frames.to_be_bytes());
-        data[4..].copy_from_slice(&self.num_plays.to_be_bytes());
-        chunk::encode_chunk(w, chunk::acTL, &data)
-    }
 }
 
 /// The type and strength of applied compression.
@@ -351,22 +324,18 @@ impl ScaledFloat {
     }
 
     /// Fully accurate construction from a value scaled as per specification.
-    pub const fn from_scaled(val: u32) -> Self {
+    pub fn from_scaled(val: u32) -> Self {
         Self { 0: val }
     }
 
     /// Get the accurate encoded value.
-    pub const fn into_scaled(self) -> u32 {
+    pub fn into_scaled(self) -> u32 {
         self.0
     }
 
     /// Get the unscaled value as a floating point.
     pub fn into_value(self) -> f32 {
         Self::reverse(self.0) as f32
-    }
-
-    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
-        chunk::encode_chunk(w, chunk::gAMA, &self.into_scaled().to_be_bytes())
     }
 }
 
@@ -387,59 +356,6 @@ impl SourceChromaticities {
             green: (ScaledFloat::new(green.0), ScaledFloat::new(green.1)),
             blue: (ScaledFloat::new(blue.0), ScaledFloat::new(blue.1)),
         }
-    }
-
-    #[rustfmt::skip]
-    pub fn to_be_bytes(self) -> [u8; 32] {
-        let white_x = self.white.0.into_scaled().to_be_bytes();
-        let white_y = self.white.1.into_scaled().to_be_bytes();
-        let red_x   = self.red.0.into_scaled().to_be_bytes();
-        let red_y   = self.red.1.into_scaled().to_be_bytes();
-        let green_x = self.green.0.into_scaled().to_be_bytes();
-        let green_y = self.green.1.into_scaled().to_be_bytes();
-        let blue_x  = self.blue.0.into_scaled().to_be_bytes();
-        let blue_y  = self.blue.1.into_scaled().to_be_bytes();
-        [
-            white_x[0], white_x[1], white_x[2], white_x[3],
-            white_y[0], white_y[1], white_y[2], white_y[3],
-            red_x[0],   red_x[1],   red_x[2],   red_x[3],
-            red_y[0],   red_y[1],   red_y[2],   red_y[3],
-            green_x[0], green_x[1], green_x[2], green_x[3],
-            green_y[0], green_y[1], green_y[2], green_y[3],
-            blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
-            blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
-        ]
-    }
-
-    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
-        chunk::encode_chunk(w, chunk::cHRM, &self.to_be_bytes())
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Time {
-    pub year: u16,
-    pub month: u8,
-    pub day: u8,
-    pub hour: u8,
-    pub minute: u8,
-    pub second: u8,
-}
-
-impl Time {
-    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
-        // validate data (month < 12 ...)
-        let [y0, y1] = self.year.to_be_bytes();
-        let data = &[
-            y0,
-            y1,
-            self.month,
-            self.day,
-            self.hour,
-            self.minute,
-            self.second,
-        ];
-        chunk::encode_chunk(w, chunk::tIME, data)
     }
 }
 
@@ -473,10 +389,6 @@ impl SrgbRenderingIntent {
             _ => None,
         }
     }
-
-    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
-        chunk::encode_chunk(w, chunk::sRGB, &[self.into_raw()])
-    }
 }
 
 /// A single-byte integer that represents the filtering method applied before
@@ -509,7 +421,6 @@ pub struct Info {
     pub filter: InfoFilterType,
     /// Chromaticities of the source system.
     pub source_chromaticities: Option<SourceChromaticities>,
-    pub time: Option<Time>,
     /// The rendering intent of an SRGB image.
     ///
     /// Presence of this value also indicates that the image conforms to the SRGB color space.
@@ -535,7 +446,6 @@ impl Default for Info {
             compression: Compression::Fast,
             filter: InfoFilterType::Adaptive,
             source_chromaticities: None,
-            time: <_>::default(),
             srgb: None,
         }
     }
@@ -612,41 +522,6 @@ impl Info {
     pub fn raw_row_length_from_width(&self, width: u32) -> usize {
         self.color_type
             .raw_row_length_from_width(self.bit_depth, width)
-    }
-
-    pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        chunk::IHDR_encode(
-            w,
-            self.width,
-            self.height,
-            self.bit_depth,
-            self.color_type,
-            self.interlaced,
-        )?;
-
-        if let Some(p) = &self.palette {
-            chunk::encode_chunk(w, chunk::PLTE, p)?;
-        };
-
-        if let Some(t) = &self.trns {
-            chunk::encode_chunk(w, chunk::tRNS, t)?;
-        }
-        self.time.map_or(Ok(()), |v| v.encode(w))?;
-
-        // If specified, the sRGB information overrides the source gamma and chromaticities.
-        if let Some(srgb) = &self.srgb {
-            let gamma = crate::srgb::substitute_gamma();
-            let chromaticities = crate::srgb::substitute_chromaticities();
-            srgb.encode(w)?;
-            gamma.encode(w)?;
-            chromaticities.encode(w)?;
-        } else {
-            self.source_gamma.map_or(Ok(()), |v| v.encode(w))?;
-            self.source_chromaticities.map_or(Ok(()), |v| v.encode(w))?;
-        }
-        self.animation_control.map_or(Ok(()), |v| v.encode(w))?;
-
-        Ok(())
     }
 }
 

@@ -4,7 +4,7 @@ use crate::chunk;
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
     FrameControl, Info, ParameterError, ParameterErrorKind, ScaledFloat, SourceChromaticities,
-    Time,
+    SrgbRenderingIntent,
 };
 use crate::filter::{filter, AdaptiveFilterType, FilterType};
 
@@ -93,13 +93,115 @@ impl fmt::Display for FormatError {
 
 impl From<io::Error> for EncodingError {
     fn from(err: io::Error) -> Self {
-        Self::IoError(err)
+        EncodingError::IoError(err)
     }
 }
 
 impl From<EncodingError> for io::Error {
     fn from(err: EncodingError) -> Self {
-        Self::new(io::ErrorKind::Other, err)
+        io::Error::new(io::ErrorKind::Other, err)
+    }
+}
+
+impl FrameControl {
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        let mut data = [0u8; 26];
+        data[..4].copy_from_slice(&self.sequence_number.to_be_bytes());
+        data[4..8].copy_from_slice(&self.width.to_be_bytes());
+        data[8..12].copy_from_slice(&self.height.to_be_bytes());
+        data[12..16].copy_from_slice(&self.x_offset.to_be_bytes());
+        data[16..20].copy_from_slice(&self.y_offset.to_be_bytes());
+        data[20..22].copy_from_slice(&self.delay_num.to_be_bytes());
+        data[22..24].copy_from_slice(&self.delay_den.to_be_bytes());
+        data[24] = self.dispose_op as u8;
+        data[25] = self.blend_op as u8;
+
+        chunk::encode_chunk(w, chunk::fcTL, &data)
+    }
+}
+
+impl AnimationControl {
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        let mut data = [0; 8];
+        data[..4].copy_from_slice(&self.num_frames.to_be_bytes());
+        data[4..].copy_from_slice(&self.num_plays.to_be_bytes());
+        chunk::encode_chunk(w, chunk::acTL, &data)
+    }
+}
+
+impl ScaledFloat {
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        chunk::encode_chunk(w, chunk::gAMA, &self.into_scaled().to_be_bytes())
+    }
+}
+
+impl SourceChromaticities {
+    #[rustfmt::skip]
+    pub fn to_be_bytes(self) -> [u8; 32] {
+        let white_x = self.white.0.into_scaled().to_be_bytes();
+        let white_y = self.white.1.into_scaled().to_be_bytes();
+        let red_x   = self.red.0.into_scaled().to_be_bytes();
+        let red_y   = self.red.1.into_scaled().to_be_bytes();
+        let green_x = self.green.0.into_scaled().to_be_bytes();
+        let green_y = self.green.1.into_scaled().to_be_bytes();
+        let blue_x  = self.blue.0.into_scaled().to_be_bytes();
+        let blue_y  = self.blue.1.into_scaled().to_be_bytes();
+        [
+            white_x[0], white_x[1], white_x[2], white_x[3],
+            white_y[0], white_y[1], white_y[2], white_y[3],
+            red_x[0],   red_x[1],   red_x[2],   red_x[3],
+            red_y[0],   red_y[1],   red_y[2],   red_y[3],
+            green_x[0], green_x[1], green_x[2], green_x[3],
+            green_y[0], green_y[1], green_y[2], green_y[3],
+            blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
+            blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
+        ]
+    }
+
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        chunk::encode_chunk(w, chunk::cHRM, &self.to_be_bytes())
+    }
+}
+
+impl SrgbRenderingIntent {
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        chunk::encode_chunk(w, chunk::sRGB, &[self.into_raw()])
+    }
+}
+
+impl Info {
+    pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        chunk::IHDR_encode(
+            w,
+            self.width,
+            self.height,
+            self.bit_depth,
+            self.color_type,
+            self.interlaced,
+        )?;
+
+        if let Some(p) = &self.palette {
+            chunk::encode_chunk(w, chunk::PLTE, p)?;
+        };
+
+        if let Some(t) = &self.trns {
+            chunk::encode_chunk(w, chunk::tRNS, t)?;
+        }
+
+        // If specified, the sRGB information overrides the source gamma and chromaticities.
+        if let Some(srgb) = &self.srgb {
+            let gamma = crate::srgb::substitute_gamma();
+            let chromaticities = crate::srgb::substitute_chromaticities();
+            srgb.encode(w)?;
+            gamma.encode(w)?;
+            chromaticities.encode(w)?;
+        } else {
+            self.source_gamma.map_or(Ok(()), |v| v.encode(w))?;
+            self.source_chromaticities.map_or(Ok(()), |v| v.encode(w))?;
+        }
+        self.animation_control.map_or(Ok(()), |v| v.encode(w))?;
+
+        Ok(())
     }
 }
 
@@ -179,133 +281,12 @@ impl<W: Write> ZlibWriter<W> {
         self.zenc.write_all(&self.curr_buf)
     }
 
-    // /// Returns the number of bytes that haven't been compressed and encoded yet
-    // pub fn buffered(&self) -> usize {
-    //     self.index
-    // }
-
     /// Finishes the compression by writing the chunksum at the end, consumes the zlib writer
     /// and returns the inner one
     pub fn finish(self) -> io::Result<W> {
         self.zenc.finish()
     }
 }
-
-// pub struct ChunkWriter<W: Write> {
-//     w: W,
-//     // chunk: ChunkType,
-//     fdAT: bool,
-//     written: usize,
-//     to_write: usize,
-//     crc: Crc32,
-//     /// chunk on next
-//     con: bool,
-//     pub seq_num: u32,
-// }
-
-// impl<W: Write> ChunkWriter<W> {
-//     // Find a way to make it relative to the chunktype
-//     pub const MAX_BYTES: usize = u32::MAX as usize >> 3;
-
-//     // pub fn new(w: W, chunk: ChunkType, to_write: usize) -> Self {
-//     pub fn new(w: W, fdAT: bool, to_write: usize) -> Self {
-//         Self {
-//             w,
-//             // chunk,
-//             fdAT,
-//             written: 0,
-//             to_write,
-//             crc: Crc32::new(),
-//             con: true,
-//             seq_num: 0,
-//         }
-//     }
-
-//     // pub fn current_chunk(&self) -> &ChunkType {
-//     //     &self.chunk
-//     // }
-
-//     // pub fn reset(&mut self, chunk: ChunkType, to_write: usize) -> Result<()> {
-//     pub fn set_fdAT(&mut self, fdAT: bool) -> Result<()> {
-//         // another chunk could be added:
-//         // if no data was written then it's not an error
-//         if self.to_write == 0 || self.written == 0 {
-//             // self.chunk = chunk;
-//             self.fdAT = fdAT;
-//             Ok(())
-//         } else {
-//             Err(EncodingError::WrongDataSize(self.to_write, 0))
-//         }
-//     }
-
-//     pub fn set_to_write(&mut self, to_write: usize) -> Result<()> {
-//         // another chunk could be added:
-//         // if no data was written then it's not an error
-//         if self.to_write == 0 || self.written == 0 {
-//             // self.chunk = chunk;
-//             self.to_write = to_write;
-//             Ok(())
-//         } else {
-//             Err(EncodingError::WrongDataSize(self.to_write, 0))
-//         }
-//     }
-
-//     pub fn into_inner(self) -> W {
-//         // Maybe this should return a Result
-//         self.w
-//     }
-// }
-
-// impl<W: Write> Write for ChunkWriter<W> {
-//     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-//         if self.to_write == 0 {
-//             Ok(0) // should this be err?
-//         } else {
-//             if self.con {
-//                 self.con = false;
-//                 let bytes = Self::MAX_BYTES.min(self.to_write).to_be_bytes();
-//                 self.w.write_all(&bytes)?;
-//                 self.crc.update(&bytes);
-
-//                 // self.w.write_all(&self.chunk.0)?;
-//                 if self.fdAT {
-//                     self.w.write_all(&chunk::fdAT.0)?;
-//                     self.w.write_all(&self.seq_num.to_be_bytes())?;
-//                     self.seq_num += 1;
-//                     self.crc.update(&chunk::fdAT.0);
-//                     self.crc.update(&self.seq_num.to_be_bytes());
-//                 } else {
-//                     self.w.write_all(&chunk::IDAT.0)?;
-//                     self.crc.update(&chunk::IDAT.0);
-//                 }
-//             }
-//             let write = buf
-//                 .len()
-//                 .min(Self::MAX_BYTES - self.written)
-//                 .min(self.to_write);
-
-//             let written = self.w.write(&buf[..write])?;
-//             self.written += written;
-//             self.to_write -= written;
-
-//             self.crc.update(&buf[..written]);
-
-//             if self.written % Self::MAX_BYTES == 0 || self.to_write == 0 {
-//                 let mut crc = Crc32::new();
-//                 std::mem::swap(&mut crc, &mut self.crc);
-
-//                 self.w.write_all(&crc.finalize().to_be_bytes())?;
-//                 self.con = true;
-//             }
-//             Ok(written)
-//         }
-//     }
-
-//     fn flush(&mut self) -> io::Result<()> {
-//         // should flush write the chunk ???
-//         Ok(())
-//     }
-// }
 
 struct ChunkWriter<W: Write> {
     w: W,
@@ -392,10 +373,6 @@ impl<W: Write> Encoder<W> {
             });
             Ok(())
         }
-    }
-
-    pub fn set_time(&mut self, time: Time) {
-        self.info.time = Some(time);
     }
 
     pub fn set_palette(&mut self, palette: Vec<u8>) -> Result<()> {
@@ -521,7 +498,7 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    pub fn write_header(mut self) -> Result<FrameEncoder<W>> {
+    pub fn write_header(mut self) -> Result<Controller<W>> {
         let info = self.info;
 
         if info.width == 0 {
@@ -546,7 +523,7 @@ impl<W: Write> Encoder<W> {
 
         info.encode(&mut self.w)?;
 
-        Ok(FrameEncoder::new(
+        Ok(Controller::new(
             self.w,
             info,
             self.sep_def_img,
@@ -561,7 +538,8 @@ struct AnimationData {
     sep_def: bool,
 }
 
-pub struct FrameEncoder<W: Write> {
+// TODO: find a better name
+pub struct Controller<W: Write> {
     w: Option<io::BufWriter<ChunkWriter<W>>>,
     // here the FrameControl is used for costomized data
     info: Info,
@@ -572,7 +550,7 @@ pub struct FrameEncoder<W: Write> {
     adaptive: AdaptiveFilterType,
 }
 
-impl<W: Write> FrameEncoder<W> {
+impl<W: Write> Controller<W> {
     fn new(
         w: W,
         info: Info,
@@ -592,7 +570,7 @@ impl<W: Write> FrameEncoder<W> {
 
         Self {
             w: Some(io::BufWriter::with_capacity(
-                u32::MAX as usize >> 3,
+                std::u32::MAX as usize >> 3,
                 ChunkWriter::new(w),
             )),
             info,
@@ -658,7 +636,7 @@ impl<W: Write> FrameEncoder<W> {
         self.total - self.written
     }
 
-    pub fn write_frame_header<'a>(&'a mut self) -> Result<Writer<'a, W>> {
+    pub fn write_header<'a>(&'a mut self) -> Result<Writer<'a, W>> {
         if let Some(ref mut w) = self.w {
             if self.written == self.total {
                 Err(EncodingError::Parameter(
@@ -729,7 +707,7 @@ impl<W: Write> FrameEncoder<W> {
     }
 }
 
-impl<W: Write> Drop for FrameEncoder<W> {
+impl<W: Write> Drop for Controller<W> {
     fn drop(&mut self) {
         self.finish().ok();
     }
@@ -894,7 +872,7 @@ impl<'a, T> std::ops::Deref for Exclusive<'a, T> {
 
     fn deref(&self) -> &Self::Target {
         match *self {
-            Self::MutRef(&mut ref v) | Self::Owned(ref v) => v,
+            Exclusive::MutRef(&mut ref v) | Exclusive::Owned(ref v) => v,
         }
     }
 }
@@ -902,8 +880,8 @@ impl<'a, T> std::ops::Deref for Exclusive<'a, T> {
 impl<'a, T> std::ops::DerefMut for Exclusive<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            Self::MutRef(v) => v,
-            Self::Owned(v) => v,
+            Exclusive::MutRef(v) => v,
+            Exclusive::Owned(v) => v,
         }
     }
 }
@@ -934,51 +912,6 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use std::{cmp, io};
-
-    // #[test]
-    // fn test() {
-    //     let file = File::create("a.png").unwrap();
-    //     let mut enc = Encoder::new(file, 11, 11);
-    //     enc.set_color(ColorType::RGB);
-    //     enc.set_depth(BitDepth::Eight);
-    //     let mut ctrl = enc.write_header().unwrap();
-    //     {
-    //         let mut wrt = ctrl.write_frame_header().unwrap();
-    //         wrt.write_image_data(
-    //             &[0, 255, 127, 255, 0]
-    //                 .iter()
-    //                 .copied()
-    //                 .cycle()
-    //                 .take(11 * 11 * 3)
-    //                 .collect::<Vec<u8>>(),
-    //         )
-    //         .unwrap();
-    //         wrt.finish().unwrap();
-    //     }
-    //     ctrl.finish().unwrap();
-    // }
-
-    // #[test]
-    // fn test_2() {
-    //     let file = File::create("b.png").unwrap();
-    //     let mut enc = Encoder::new(file, 11, 11);
-    //     enc.set_color(ColorType::RGB);
-    //     enc.set_depth(BitDepth::Eight);
-    //     enc.animated(10, 0).unwrap();
-    //     let mut ctrl = enc.write_header().unwrap();
-    //     let data = &[0, 255, 127, 255, 0]
-    //         .iter()
-    //         .copied()
-    //         .cycle()
-    //         .take(11 * 11 * 3 * 10)
-    //         .collect::<Vec<u8>>();
-    //     let mut iter = data.chunks_exact(11 * 11 * 3);
-    //     while let Ok(mut wrt) = ctrl.write_frame_header() {
-    //         wrt.write_image_data(iter.next().unwrap()).unwrap();
-    //         wrt.finish().unwrap();
-    //     }
-    //     ctrl.finish().unwrap();
-    // }
 
     #[test]
     fn roundtrip() {
@@ -1015,7 +948,7 @@ mod tests {
                         .write_header()
                         .unwrap();
                     encoder
-                        .write_frame_header()
+                        .write_header()
                         .unwrap()
                         .write_image_data(&buf)
                         .unwrap();
@@ -1064,7 +997,7 @@ mod tests {
                         .write_header()
                         .unwrap();
 
-                    let mut img_wrt = encoder.write_frame_header().unwrap();
+                    let mut img_wrt = encoder.write_header().unwrap();
                     let mut stream_writer = img_wrt.stream_writer();
 
                     let mut outer_wrapper = RandomChunkWriter {
@@ -1135,7 +1068,7 @@ mod tests {
 
                 let mut writer = encoder.write_header().unwrap();
                 writer
-                    .write_frame_header()
+                    .write_header()
                     .unwrap()
                     .write_image_data(&indexed_data)
                     .unwrap();
@@ -1169,7 +1102,7 @@ mod tests {
         let correct_image_size = width * height * 3;
         let image = vec![0u8; correct_image_size + 1];
         let result = png_writer
-            .write_frame_header()
+            .write_header()
             .unwrap()
             .write_image_data(image.as_ref());
 
@@ -1358,7 +1291,7 @@ mod tests {
             encoder.set_default_filter(filter);
             encoder
                 .write_header()?
-                .write_frame_header()
+                .write_header()
                 .unwrap()
                 .write_image_data(&pixel)?;
 
@@ -1397,7 +1330,7 @@ mod tests {
             }
             encoder
                 .write_header()?
-                .write_frame_header()
+                .write_header()
                 .unwrap()
                 .write_image_data(&pixel)?;
 

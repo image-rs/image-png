@@ -88,9 +88,7 @@ impl fmt::Debug for ChunkType {
     }
 }
 
-use crate::{
-    AnimationControl, BitDepth, ColorType, FrameControl, ScaledFloat, SourceChromaticities, Time,
-};
+use crate::{BitDepth, ColorType};
 use io::Write;
 use std::io;
 
@@ -120,73 +118,6 @@ pub fn IHDR_encode<W: Write>(
     data[9] = color_type as u8;
     data[12] = interlaced as u8;
     encode_chunk(w, IHDR, &data)
-}
-
-#[rustfmt::skip]
-fn chromaticities_to_be_bytes(c: SourceChromaticities) -> [u8; 32] {
-    let white_x = c.white.0.into_scaled().to_be_bytes();
-    let white_y = c.white.1.into_scaled().to_be_bytes();
-    let red_x   = c.red.0.into_scaled().to_be_bytes();
-    let red_y   = c.red.1.into_scaled().to_be_bytes();
-    let green_x = c.green.0.into_scaled().to_be_bytes();
-    let green_y = c.green.1.into_scaled().to_be_bytes();
-    let blue_x  = c.blue.0.into_scaled().to_be_bytes();
-    let blue_y  = c.blue.1.into_scaled().to_be_bytes();
-    [
-        white_x[0], white_x[1], white_x[2], white_x[3],
-        white_y[0], white_y[1], white_y[2], white_y[3],
-        red_x[0],   red_x[1],   red_x[2],   red_x[3],
-        red_y[0],   red_y[1],   red_y[2],   red_y[3],
-        green_x[0], green_x[1], green_x[2], green_x[3],
-        green_y[0], green_y[1], green_y[2], green_y[3],
-        blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
-        blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
-    ]
-}
-
-pub fn cHRM_encode<W: Write>(w: &mut W, c: SourceChromaticities) -> io::Result<()> {
-    encode_chunk(w, cHRM, &chromaticities_to_be_bytes(c))
-}
-
-pub fn PLTE_encode<W: Write>(w: &mut W, palette: &[u8]) -> io::Result<()> {
-    let len = palette.len() - palette.len() % 3;
-    encode_chunk(w, PLTE, &palette[..len])
-}
-
-pub fn gAMA_encode<W: Write>(w: &mut W, g: ScaledFloat) -> io::Result<()> {
-    encode_chunk(w, gAMA, &g.into_scaled().to_be_bytes())
-}
-
-pub fn tIME_encode<W: Write>(w: &mut W, t: Time) -> io::Result<()> {
-    // validate data (month < 12 ...)
-    let [y0, y1] = t.year.to_be_bytes();
-    encode_chunk(
-        w,
-        tIME,
-        &[y0, y1, t.month, t.day, t.hour, t.minute, t.second],
-    )
-}
-
-pub fn fcTL_encode<W: Write>(w: &mut W, fc: FrameControl) -> io::Result<()> {
-    let mut data = [0u8; 26];
-    data[..4].copy_from_slice(&fc.sequence_number.to_be_bytes());
-    data[4..8].copy_from_slice(&fc.width.to_be_bytes());
-    data[8..12].copy_from_slice(&fc.height.to_be_bytes());
-    data[12..16].copy_from_slice(&fc.x_offset.to_be_bytes());
-    data[16..20].copy_from_slice(&fc.y_offset.to_be_bytes());
-    data[20..22].copy_from_slice(&fc.delay_num.to_be_bytes());
-    data[22..24].copy_from_slice(&fc.delay_den.to_be_bytes());
-    data[24] = fc.dispose_op as u8;
-    data[25] = fc.blend_op as u8;
-
-    encode_chunk(w, fcTL, &data)
-}
-
-pub fn acTL_encode<W: Write>(w: &mut W, ac: AnimationControl) -> io::Result<()> {
-    let mut data = [0; 8];
-    data[..4].copy_from_slice(&ac.num_frames.to_be_bytes());
-    data[4..].copy_from_slice(&ac.num_plays.to_be_bytes());
-    encode_chunk(w, acTL, &data)
 }
 
 pub fn fdAT_encode<W: Write>(w: &mut W, seq_num: u32, data: &[u8]) -> io::Result<()> {

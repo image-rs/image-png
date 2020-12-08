@@ -261,6 +261,21 @@ impl FrameControl {
     pub fn inc_seq_num(&mut self, i: u32) {
         self.sequence_number += i;
     }
+
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        let mut data = [0u8; 26];
+        data[..4].copy_from_slice(&self.sequence_number.to_be_bytes());
+        data[4..8].copy_from_slice(&self.width.to_be_bytes());
+        data[8..12].copy_from_slice(&self.height.to_be_bytes());
+        data[12..16].copy_from_slice(&self.x_offset.to_be_bytes());
+        data[16..20].copy_from_slice(&self.y_offset.to_be_bytes());
+        data[20..22].copy_from_slice(&self.delay_num.to_be_bytes());
+        data[22..24].copy_from_slice(&self.delay_den.to_be_bytes());
+        data[24] = self.dispose_op as u8;
+        data[25] = self.blend_op as u8;
+
+        chunk::encode_chunk(w, chunk::fcTL, &data)
+    }
 }
 
 /// Animation control information
@@ -270,6 +285,15 @@ pub struct AnimationControl {
     pub num_frames: u32,
     /// Number of times to loop this APNG.  0 indicates infinite looping.
     pub num_plays: u32,
+}
+
+impl AnimationControl {
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        let mut data = [0; 8];
+        data[..4].copy_from_slice(&self.num_frames.to_be_bytes());
+        data[4..].copy_from_slice(&self.num_plays.to_be_bytes());
+        chunk::encode_chunk(w, chunk::acTL, &data)
+    }
 }
 
 /// The type and strength of applied compression.
@@ -340,6 +364,10 @@ impl ScaledFloat {
     pub fn into_value(self) -> f32 {
         Self::reverse(self.0) as f32
     }
+
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        chunk::encode_chunk(w, chunk::gAMA, &self.into_scaled().to_be_bytes())
+    }
 }
 
 /// Chromaticities of the color space primaries
@@ -360,6 +388,32 @@ impl SourceChromaticities {
             blue: (ScaledFloat::new(blue.0), ScaledFloat::new(blue.1)),
         }
     }
+
+    #[rustfmt::skip]
+    pub fn to_be_bytes(self) -> [u8; 32] {
+        let white_x = self.white.0.into_scaled().to_be_bytes();
+        let white_y = self.white.1.into_scaled().to_be_bytes();
+        let red_x   = self.red.0.into_scaled().to_be_bytes();
+        let red_y   = self.red.1.into_scaled().to_be_bytes();
+        let green_x = self.green.0.into_scaled().to_be_bytes();
+        let green_y = self.green.1.into_scaled().to_be_bytes();
+        let blue_x  = self.blue.0.into_scaled().to_be_bytes();
+        let blue_y  = self.blue.1.into_scaled().to_be_bytes();
+        [
+            white_x[0], white_x[1], white_x[2], white_x[3],
+            white_y[0], white_y[1], white_y[2], white_y[3],
+            red_x[0],   red_x[1],   red_x[2],   red_x[3],
+            red_y[0],   red_y[1],   red_y[2],   red_y[3],
+            green_x[0], green_x[1], green_x[2], green_x[3],
+            green_y[0], green_y[1], green_y[2], green_y[3],
+            blue_x[0],  blue_x[1],  blue_x[2],  blue_x[3],
+            blue_y[0],  blue_y[1],  blue_y[2],  blue_y[3],
+        ]
+    }
+
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        chunk::encode_chunk(w, chunk::cHRM, &self.to_be_bytes())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -370,6 +424,23 @@ pub struct Time {
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
+}
+
+impl Time {
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        // validate data (month < 12 ...)
+        let [y0, y1] = self.year.to_be_bytes();
+        let data = &[
+            y0,
+            y1,
+            self.month,
+            self.day,
+            self.hour,
+            self.minute,
+            self.second,
+        ];
+        chunk::encode_chunk(w, chunk::tIME, data)
+    }
 }
 
 /// PNG info struct
@@ -501,28 +572,16 @@ impl Info {
         )?;
 
         if let Some(p) = &self.palette {
-            chunk::PLTE_encode(w, p)?;
+            chunk::encode_chunk(w, chunk::PLTE, p)?;
         };
 
         if let Some(t) = &self.trns {
             chunk::encode_chunk(w, chunk::tRNS, t)?;
         }
-
-        if let Some(t) = self.time {
-            chunk::tIME_encode(w, t)?;
-        };
-
-        if let Some(g) = self.source_gamma {
-            chunk::gAMA_encode(w, g)?;
-        }
-
-        if let Some(c) = self.source_chromaticities {
-            chunk::cHRM_encode(w, c)?;
-        }
-
-        if let Some(animation_ctl) = self.animation_control {
-            chunk::acTL_encode(w, animation_ctl)?;
-        }
+        self.time.map_or(Ok(()), |v| v.encode(w))?;
+        self.source_gamma.map_or(Ok(()), |v| v.encode(w))?;
+        self.source_chromaticities.map_or(Ok(()), |v| v.encode(w))?;
+        self.animation_control.map_or(Ok(()), |v| v.encode(w))?;
 
         Ok(())
     }

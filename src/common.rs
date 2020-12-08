@@ -473,6 +473,10 @@ impl SrgbRenderingIntent {
             _ => None,
         }
     }
+
+    pub fn encode<W: Write>(self, w: &mut W) -> io::Result<()> {
+        chunk::encode_chunk(w, chunk::sRGB, &[self.into_raw()])
+    }
 }
 
 /// A single-byte integer that represents the filtering method applied before
@@ -628,8 +632,18 @@ impl Info {
             chunk::encode_chunk(w, chunk::tRNS, t)?;
         }
         self.time.map_or(Ok(()), |v| v.encode(w))?;
-        self.source_gamma.map_or(Ok(()), |v| v.encode(w))?;
-        self.source_chromaticities.map_or(Ok(()), |v| v.encode(w))?;
+
+        // If specified, the sRGB information overrides the source gamma and chromaticities.
+        if let Some(srgb) = &self.srgb {
+            let gamma = crate::srgb::substitute_gamma();
+            let chromaticities = crate::srgb::substitute_chromaticities();
+            srgb.encode(w)?;
+            gamma.encode(w)?;
+            chromaticities.encode(w)?;
+        } else {
+            self.source_gamma.map_or(Ok(()), |v| v.encode(w))?;
+            self.source_chromaticities.map_or(Ok(()), |v| v.encode(w))?;
+        }
         self.animation_control.map_or(Ok(()), |v| v.encode(w))?;
 
         Ok(())

@@ -411,18 +411,23 @@ impl<W: Write> Encoder<W> {
     }
 }
 
+// This enum is used to generalize what to write on each image/frame
 #[derive(Clone, Copy)]
 enum ChunkData {
     IDAT,
-    fdAT { fctl: FrameControl, sep_def: bool },
+    fdAT {
+        fctl: FrameControl,
+        sep_def: bool,
+        first: bool,
+    },
 }
 
 impl ChunkData {
     pub fn max_chunk_data(&self) -> usize {
+        use ChunkData::*;
         (match self {
-            ChunkData::fdAT { sep_def: true, .. } => u32::MAX,
-            ChunkData::fdAT { .. } => u32::MAX - 4,
-            ChunkData::IDAT { .. } => u32::MAX,
+            IDAT | fdAT { sep_def: true, .. } | fdAT { first: true, .. } => std::u32::MAX,
+            fdAT { .. } => std::u32::MAX - 4,
         }) as usize
     }
 
@@ -431,6 +436,7 @@ impl ChunkData {
             ChunkData::fdAT {
                 ref mut fctl,
                 sep_def: false,
+                ..
             } => {
                 fctl.encode(w)?;
                 fctl.sequence_number += 1;
@@ -443,7 +449,9 @@ impl ChunkData {
     pub fn encode<W: Write>(&mut self, w: &mut W, data: &[u8]) -> io::Result<()> {
         use ChunkData::*;
         match self {
-            IDAT | fdAT { sep_def: true, .. } => chunk::encode_chunk(w, chunk::IDAT, data),
+            IDAT | fdAT { sep_def: true, .. } | fdAT { first: true, .. } => {
+                chunk::encode_chunk(w, chunk::IDAT, data)
+            }
             fdAT { ref mut fctl, .. } => {
                 chunk::fdAT_encode(w, fctl.sequence_number, data)?;
                 fctl.sequence_number += 1;
@@ -453,11 +461,14 @@ impl ChunkData {
     }
 
     pub fn finish(&mut self) {
-        match self {
-            ChunkData::fdAT {
-                ref mut sep_def, ..
-            } if *sep_def => *sep_def = false,
-            _ => (),
+        if let ChunkData::fdAT {
+            ref mut sep_def,
+            ref mut first,
+            ..
+        } = self
+        {
+            *sep_def = false;
+            *first = false;
         }
     }
 }
@@ -489,7 +500,11 @@ impl<W: Write> Controller<W> {
 
         let data = info
             .frame_control
-            .map(|fctl| ChunkData::fdAT { fctl, sep_def })
+            .map(|fctl| ChunkData::fdAT {
+                fctl,
+                sep_def,
+                first: true,
+            })
             .unwrap_or(ChunkData::IDAT);
 
         Self {

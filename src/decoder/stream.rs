@@ -214,6 +214,13 @@ impl StreamingDecoder {
         Ok((len - buf.len(), Decoded::Nothing))
     }
 
+    /// Get information on the image.
+    ///
+    /// The structure will change as new frames of an animated image are decoded.
+    pub fn info(&self) -> Option<&Info> {
+        self.info.as_ref()
+    }
+
     fn next_state<'a>(
         &'a mut self,
         buf: &[u8],

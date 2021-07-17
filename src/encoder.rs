@@ -362,7 +362,7 @@ impl<'a, W: Write> Encoder<'a, W> {
 
 /// PNG writer
 pub struct Writer<W: Write> {
-    w: W,
+    w: Option<W>,  // Only none between call to .into_inner() and drop().
     info: PartialInfo,
     filter: FilterType,
     adaptive_filter: AdaptiveFilterType,
@@ -448,7 +448,7 @@ impl<W: Write> Writer<W> {
         sep_def_img: bool,
     ) -> Writer<W> {
         Writer {
-            w,
+            w: Some(w),
             info,
             filter,
             adaptive_filter,
@@ -477,14 +477,14 @@ impl<W: Write> Writer<W> {
             ));
         }
 
-        self.w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?; // PNG signature
-        info.encode(&mut self.w)?;
+        self.w.as_mut().unwrap().write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?; // PNG signature
+        info.encode(&mut self.w.as_mut().unwrap())?;
 
         Ok(self)
     }
 
     pub fn write_chunk(&mut self, name: ChunkType, data: &[u8]) -> Result<()> {
-        write_chunk(&mut self.w, name, data)
+        write_chunk(&mut self.w.as_mut().unwrap(), name, data)
     }
 
     fn max_frames(&self) -> u64 {
@@ -556,7 +556,7 @@ impl<W: Write> Writer<W> {
                 self.write_chunk(chunk::IDAT, &chunk)?;
             }
         } else if let Some(ref mut fctl) = self.info.frame_control {
-            fctl.encode(&mut self.w)?;
+            fctl.encode(&mut self.w.as_mut().unwrap())?;
             fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
 
             if self.written == 0 {
@@ -569,7 +569,7 @@ impl<W: Write> Writer<W> {
                 for chunk in zlib_encoded.chunks(MAX_fdAT_CHUNK_LEN as usize) {
                     alldata[..4].copy_from_slice(&fctl.sequence_number.to_be_bytes());
                     alldata[4..][..chunk.len()].copy_from_slice(chunk);
-                    write_chunk(&mut self.w, chunk::fdAT, &alldata[..4 + chunk.len()])?;
+                    write_chunk(&mut self.w.as_mut().unwrap(), chunk::fdAT, &alldata[..4 + chunk.len()])?;
                     fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
                 }
             }
@@ -801,11 +801,24 @@ impl<W: Write> Writer<W> {
     pub fn into_stream_writer_with_size(self, size: usize) -> Result<StreamWriter<'static, W>> {
         StreamWriter::new(ChunkOutput::Owned(self), size)
     }
+
+    /// Turn this into a its inner Write.
+    pub fn into_inner(mut self) -> W {
+        self.write_end();
+        self.w.take().unwrap()
+    }
+
+    /// Write the final IEND chunk.
+    fn write_end(&mut self) {
+        let _ = self.write_chunk(chunk::IEND, &[]);
+    }
 }
 
 impl<W: Write> Drop for Writer<W> {
     fn drop(&mut self) {
-        let _ = self.write_chunk(chunk::IEND, &[]);
+        if self.w.is_some() {
+            self.write_end();
+        }
     }
 }
 
@@ -915,7 +928,7 @@ impl<'a, W: Write> ChunkWriter<'a, W> {
             _ if wrt.sep_def_img => chunk::IDAT,
             None => chunk::IDAT,
             Some(ref mut fctl) => {
-                fctl.encode(&mut wrt.w)?;
+                fctl.encode(&mut wrt.w.as_mut().unwrap())?;
                 fctl.sequence_number += 1;
                 match wrt.written {
                     0 => chunk::IDAT,
@@ -947,7 +960,7 @@ impl<'a, W: Write> ChunkWriter<'a, W> {
         if self.index > 0 {
             // flush the chunk and reset everything
             write_chunk(
-                &mut self.writer.w,
+                &mut self.writer.w.as_mut().unwrap(),
                 self.curr_chunk,
                 &self.buffer[..self.index],
             )?;

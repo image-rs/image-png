@@ -12,10 +12,13 @@
 //! ### Using the decoder
 //! ```
 //! use std::fs::File;
+//! # use std::path::PathBuf;
+//! # let mut path = PathBuf::from("tests/pngsuite/basi0g01.png");
+//! # xtest_data::setup!().filter([xtest_data::FsItem::File(&mut path)]).build();
 //! // The decoder is a build for reader and can be used to set various decoding options
 //! // via `Transformations`. The default output transformation is `Transformations::EXPAND
 //! // | Transformations::STRIP_ALPHA`.
-//! let decoder = png::Decoder::new(File::open("tests/pngsuite/basi0g01.png").unwrap());
+//! let decoder = png::Decoder::new(File::open(path).unwrap());
 //! let mut reader = decoder.read_info().unwrap();
 //! // Allocate the output buffer.
 //! let mut buf = vec![0; reader.output_buffer_size()];

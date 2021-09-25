@@ -9,8 +9,8 @@ use std::io::BufReader;
 use std::path::{Component, Path, PathBuf};
 
 use crc32fast::Hasher as Crc32;
+use xtest_data::FsItem;
 
-const BASE_PATH: [&'static str; 2] = [".", "tests"];
 const TEST_SUITES: [&'static str; 3] = ["pngsuite", "pngsuite-extra", "bugfixes"];
 const APNG_SUITES: [&'static str; 1] = ["animated"];
 
@@ -18,35 +18,49 @@ fn process_images<F>(results_path: &str, test_suites: &[&'static str], func: F)
 where
     F: Fn(PathBuf) -> Result<u32, png::DecodingError>,
 {
-    let base: PathBuf = BASE_PATH.iter().collect();
+    let base = PathBuf::from("tests");
+
+    let mut results_path = base.join(results_path);
+    let mut suite_paths: Vec<PathBuf> = test_suites
+        .into_iter()
+        .map(|suite| base.join(suite))
+        .collect();
+    xtest_data::setup!()
+        .filter([FsItem::File(&mut results_path)])
+        .filter(suite_paths.iter_mut().map(FsItem::Tree))
+        .build();
+
     let mut results = BTreeMap::new();
     let mut expected_failures = vec![];
-    for suite in test_suites {
-        let mut path = base.clone();
-        path.push(suite);
-        path.push("*.png");
 
-        let pattern = &*format!("{}", path.display());
-        for path in glob::glob(pattern).unwrap().filter_map(Result::ok) {
+    for (suite_name, suite) in test_suites.iter().zip(suite_paths) {
+        let mut test_name_path = base.clone();
+        test_name_path.push(suite_name);
+
+        let pattern = suite.join("*.png").display().to_string();
+
+        for path in glob::glob(&pattern).unwrap().filter_map(Result::ok) {
+            let filename = path.file_name().unwrap();
+            let testname = test_name_path.join(filename);
+
             print!("{}: ", path.display());
             match func(path.clone()) {
                 Ok(crc) => {
-                    results.insert(format!("{}", path.display()), format!("{}", crc));
+                    results.insert(testname.display().to_string(), crc.to_string());
                     println!("{}", crc)
                 }
-                Err(_) if path.file_name().unwrap().to_str().unwrap().starts_with("x") => {
-                    expected_failures.push(format!("{}", path.display()));
+                Err(_) if filename.to_str().unwrap().starts_with("x") => {
+                    expected_failures.push(testname.display().to_string());
                     println!("Expected failure")
                 }
                 err => panic!("{:?}", err),
             }
         }
     }
-    let mut path = base.clone();
-    path.push(results_path);
+
     let mut ref_results = BTreeMap::new();
     let mut failures = vec![];
-    for line in BufReader::new(File::open(path).unwrap()).lines() {
+    for line in BufReader::new(File::open(results_path).unwrap()).lines() {
         let line = line.unwrap();
         let parts: Vec<_> = line.split(": ").collect();
         if parts.is_empty() {

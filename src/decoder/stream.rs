@@ -1062,12 +1062,11 @@ mod tests {
     use crate::Decoder;
 
     use std::{fs::File, path::PathBuf};
-    use xtest_data::{setup, FsItem::Tree};
 
     #[test]
     fn image_gamma() -> Result<(), ()> {
         let mut pngsuite = PathBuf::from("tests/pngsuite");
-        setup!().filter([Tree(&mut pngsuite)]).build();
+        xtest_data::setup!().rewrite([&mut pngsuite]).build();
 
         let trial = |path: &str, expected: Option<ScaledFloat>| {
             let path = pngsuite.join(path);
@@ -1113,7 +1112,7 @@ mod tests {
     #[test]
     fn image_source_chromaticities() -> Result<(), ()> {
         let mut pngsuite = PathBuf::from("tests/pngsuite");
-        setup!().filter([Tree(&mut pngsuite)]).build();
+        xtest_data::setup!().rewrite([&mut pngsuite]).build();
 
         let trial = |path: &str, expected: Option<SourceChromaticities>| {
             let path = pngsuite.join(path);

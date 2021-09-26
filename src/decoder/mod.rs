@@ -155,7 +155,7 @@ impl<R: Read> Decoder<R> {
     /// // This image is 32×32, 1bit per pixel. The reader buffers one row which requires 4 bytes.
     /// let path = PathBuf::from("tests/pngsuite/basi0g01.png");
     /// # let mut path = path;
-    /// # xtest_data::setup!().filter([xtest_data::FsItem::File(&mut path)]).build();
+    /// # xtest_data::setup!().rewrite([&mut path]).build();
     /// let mut limits = Limits::default();
     /// limits.bytes = 3;
     /// let mut decoder = Decoder::new_with_limits(File::open(path).unwrap(), limits);
@@ -164,7 +164,7 @@ impl<R: Read> Decoder<R> {
     /// // This image is 32x32 pixels, so the decoder will allocate less than 10Kib
     /// let path = PathBuf::from("tests/pngsuite/basi0g01.png");
     /// # let mut path = path;
-    /// # xtest_data::setup!().filter([xtest_data::FsItem::File(&mut path)]).build();
+    /// # xtest_data::setup!().rewrite([&mut path]).build();
     /// let mut limits = Limits::default();
     /// limits.bytes = 10*1024;
     /// let mut decoder = Decoder::new_with_limits(File::open(path).unwrap(), limits);
@@ -927,8 +927,6 @@ mod tests {
     use std::io::{BufRead, Read, Result};
     use std::mem::discriminant;
 
-    use xtest_data::{setup, FsItem::File};
-
     /// A reader that reads at most `n` bytes.
     struct SmalBuf<R: BufRead> {
         inner: R,
@@ -964,7 +962,7 @@ mod tests {
     #[test]
     fn no_data_dup_on_finish() {
         let mut path = std::path::PathBuf::from("tests/bugfixes/x_issue#214.png");
-        setup!().filter([File(&mut path)]).build();
+        xtest_data::setup!().rewrite([&mut path]).build();
         let img: Vec<u8> = std::fs::read(path).expect("reading issue file data");
         let img = img.as_slice();
 

@@ -1415,11 +1415,9 @@ mod tests {
     use std::io::Write;
     use std::{cmp, io};
 
-    use xtest_data::FsItem::Tree;
-
     fn setup_pngsuite() -> impl std::ops::Deref<Target = std::path::Path> {
         let mut path = std::path::PathBuf::from("tests/pngsuite");
-        xtest_data::setup!().filter([Tree(&mut path)]).build();
+        xtest_data::setup!().rewrite([&mut path]).build();
         path
     }
 
@@ -1434,7 +1432,7 @@ mod tests {
                     // x* files are expected to fail to decode
                     continue;
                 }
-                eprintln!("{}", path.display());
+                // eprintln!("{}", path.display());
                 // Decode image
                 let decoder = Decoder::new(File::open(path).unwrap());
                 let mut reader = decoder.read_info().unwrap();
@@ -1523,6 +1521,7 @@ mod tests {
     fn image_palette() -> Result<()> {
         let pngsuite = setup_pngsuite();
         for &bit_depth in &[1u8, 2, 4, 8] {
+            eprintln!("Trying to palette encode {:?}", bit_depth);
             // Do a reference decoding, choose a fitting palette image from pngsuite
             let path = pngsuite.join(&format!("basn3p0{}.png", bit_depth));
             let decoder = Decoder::new(File::open(&path).unwrap());

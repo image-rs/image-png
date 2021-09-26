@@ -2,11 +2,10 @@ use std::{fs, path::PathBuf};
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use png::Decoder;
-use xtest_data::{setup, FsItem};
 
 fn load_all(c: &mut Criterion) {
     let mut benches = PathBuf::from("tests/benches");
-    setup!().filter([FsItem::Tree(&mut benches)]).build();
+    xtest_data::setup!().rewrite([&mut benches]).build();
     for file in fs::read_dir(benches).unwrap() {
         if let Ok(entry) = file {
             match entry.path().extension() {

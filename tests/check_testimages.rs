@@ -9,7 +9,6 @@ use std::io::BufReader;
 use std::path::{Component, Path, PathBuf};
 
 use crc32fast::Hasher as Crc32;
-use xtest_data::FsItem;
 
 const TEST_SUITES: [&'static str; 3] = ["pngsuite", "pngsuite-extra", "bugfixes"];
 const APNG_SUITES: [&'static str; 1] = ["animated"];
@@ -26,8 +25,8 @@ where
         .map(|suite| base.join(suite))
         .collect();
     xtest_data::setup!()
-        .filter([FsItem::File(&mut results_path)])
-        .filter(suite_paths.iter_mut().map(FsItem::Tree))
+        .rewrite([&mut results_path])
+        .rewrite(suite_paths.iter_mut())
         .build();
 
     let mut results = BTreeMap::new();

@@ -14,7 +14,7 @@
 //! use std::fs::File;
 //! # use std::path::PathBuf;
 //! # let mut path = PathBuf::from("tests/pngsuite/basi0g01.png");
-//! # xtest_data::setup!().filter([xtest_data::FsItem::File(&mut path)]).build();
+//! # xtest_data::setup!().rewrite([&mut path]).build();
 //! // The decoder is a build for reader and can be used to set various decoding options
 //! // via `Transformations`. The default output transformation is `Transformations::EXPAND
 //! // | Transformations::STRIP_ALPHA`.

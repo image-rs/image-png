@@ -73,9 +73,16 @@
 //!  writer.write_image_data(&data).unwrap(); // Save
 //!
 //!  // We can add a tEXt/zTXt/iTXt at any point before the encoder is dropped from scope. These chunks will be at the end of the png file.
-//!  let tail_ztxt_chunk = ZTXtChunk::new("Comment".to_string(), "A zTXt chunk after the image data.".to_string());
+//!  let tail_ztxt_chunk = ZTXtChunk::new(
+//!     "Comment".to_string(),
+//!     "A zTXt chunk after the image data. It can contain only valid ISO-8859-1 characters such as 'É' or '¡'".to_string());
 //!  writer.write_text_chunk(&tail_ztxt_chunk).unwrap();
 //!
+//!  writer.write_text_chunk(&ZTXtChunk::new(
+//!         "Comment".to_string(),
+//!         "Trying to write unicode characters such as '❤️' in a zTXT chunk will fail.".to_string()
+//!  )).unwrap_err();
+//! 
 //!  // The fields of the text chunk are public, so they can be mutated before being written to the file.
 //!  let mut tail_itxt_chunk = ITXtChunk::new("Author".to_string(), "सायंतन खान".to_string());
 //!  tail_itxt_chunk.compressed = true;
@@ -89,8 +96,6 @@
 use crate::{chunk, encoder, DecodingError, EncodingError};
 use deflate::write::ZlibEncoder;
 use deflate::Compression;
-use encoding::all::{ASCII, ISO_8859_1};
-use encoding::{DecoderTrap, EncoderTrap, Encoding};
 use miniz_oxide::inflate::{decompress_to_vec_zlib, decompress_to_vec_zlib_with_limit};
 use std::io::Write;
 
@@ -165,12 +170,8 @@ impl TEXtChunk {
         }
 
         Ok(Self {
-            keyword: ISO_8859_1
-                .decode(keyword_slice, DecoderTrap::Strict)
-                .map_err(|_| TextDecodingError::Unrepresentable)?,
-            text: ISO_8859_1
-                .decode(text_slice, DecoderTrap::Strict)
-                .map_err(|_| TextDecodingError::Unrepresentable)?,
+            keyword: iso_8859_1::decode(keyword_slice),
+            text: iso_8859_1::decode(text_slice),
         })
     }
 }
@@ -178,20 +179,15 @@ impl TEXtChunk {
 impl EncodableTextChunk for TEXtChunk {
     /// Encodes TEXtChunk to a Writer. The keyword and text are separated by a byte of zeroes.
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
-        let mut data = ISO_8859_1
-            .encode(&self.keyword, EncoderTrap::Strict)
-            .map_err(|_| EncodingError::from(TextEncodingError::Unrepresentable))?;
+        let mut data = Vec::new();
+        iso_8859_1::encode(&self.keyword, &mut data)?;
 
         if data.is_empty() || data.len() > 79 {
             return Err(TextEncodingError::InvalidKeywordSize.into());
         }
 
         data.push(0);
-
-        ISO_8859_1
-            .encode_to(&self.text, EncoderTrap::Strict, &mut data)
-            .map_err(|_| EncodingError::from(TextEncodingError::Unrepresentable))?;
-
+        iso_8859_1::encode(&self.text, &mut data)?;
         encoder::write_chunk(w, chunk::tEXt, &data)
     }
 }
@@ -237,9 +233,7 @@ impl ZTXtChunk {
         }
 
         Ok(Self {
-            keyword: ISO_8859_1
-                .decode(keyword_slice, DecoderTrap::Strict)
-                .map_err(|_| TextDecodingError::Unrepresentable)?,
+            keyword: iso_8859_1::decode(keyword_slice),
             text: OptCompressed::Compressed(text_slice.iter().cloned().collect()),
         })
     }
@@ -264,11 +258,7 @@ impl ZTXtChunk {
                         return Err(DecodingError::from(TextDecodingError::InflationError));
                     }
                 };
-                self.text = OptCompressed::Uncompressed(
-                    ISO_8859_1
-                        .decode(&uncompressed_raw, DecoderTrap::Strict)
-                        .map_err(|_| DecodingError::from(TextDecodingError::Unrepresentable))?,
-                );
+                self.text = OptCompressed::Uncompressed(iso_8859_1::decode(&uncompressed_raw));
             }
             OptCompressed::Uncompressed(_) => {}
         };
@@ -282,9 +272,7 @@ impl ZTXtChunk {
             OptCompressed::Compressed(v) => {
                 let uncompressed_raw = decompress_to_vec_zlib(&v[..])
                     .map_err(|_| DecodingError::from(TextDecodingError::InflationError))?;
-                ISO_8859_1
-                    .decode(&uncompressed_raw, DecoderTrap::Strict)
-                    .map_err(|_| DecodingError::from(TextDecodingError::Unrepresentable))
+                Ok(iso_8859_1::decode(&uncompressed_raw))
             }
             OptCompressed::Uncompressed(s) => Ok(s.clone()),
         }
@@ -294,9 +282,8 @@ impl ZTXtChunk {
     pub fn compress_text(&mut self) -> Result<(), EncodingError> {
         match &self.text {
             OptCompressed::Uncompressed(s) => {
-                let uncompressed_raw = ISO_8859_1
-                    .encode(s, EncoderTrap::Strict)
-                    .map_err(|_| EncodingError::from(TextEncodingError::Unrepresentable))?;
+                let mut uncompressed_raw = Vec::with_capacity(s.len());
+                iso_8859_1::encode(&s, &mut uncompressed_raw)?;
                 let mut encoder = ZlibEncoder::new(Vec::new(), Compression::Fast);
                 encoder
                     .write_all(&uncompressed_raw)
@@ -316,9 +303,8 @@ impl ZTXtChunk {
 
 impl EncodableTextChunk for ZTXtChunk {
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
-        let mut data = ISO_8859_1
-            .encode(&self.keyword, EncoderTrap::Strict)
-            .map_err(|_| EncodingError::from(TextEncodingError::Unrepresentable))?;
+        let mut data = Vec::with_capacity(self.keyword.len());
+        iso_8859_1::encode(&self.keyword, &mut data)?;
 
         if data.is_empty() || data.len() > 79 {
             return Err(TextEncodingError::InvalidKeywordSize.into());
@@ -336,9 +322,8 @@ impl EncodableTextChunk for ZTXtChunk {
             }
             OptCompressed::Uncompressed(s) => {
                 // This code may have a bug. Check for correctness.
-                let uncompressed_raw = ISO_8859_1
-                    .encode(s, EncoderTrap::Strict)
-                    .map_err(|_| EncodingError::from(TextEncodingError::Unrepresentable))?;
+                let mut uncompressed_raw = Vec::with_capacity(s.len());
+                iso_8859_1::encode(s, &mut uncompressed_raw)?;
                 let mut encoder = ZlibEncoder::new(data, Compression::Fast);
                 encoder
                     .write_all(&uncompressed_raw)
@@ -391,10 +376,7 @@ impl ITXtChunk {
         if keyword_slice.is_empty() || keyword_slice.len() > 79 {
             return Err(TextDecodingError::InvalidKeywordSize);
         }
-        let keyword = ISO_8859_1
-            .decode(keyword_slice, DecoderTrap::Strict)
-            .map_err(|_| TextDecodingError::Unrepresentable)?;
-
+        let keyword = iso_8859_1::decode(keyword_slice);
         let compressed = match compression_flag {
             0 => false,
             1 => true,
@@ -405,10 +387,14 @@ impl ITXtChunk {
             return Err(TextDecodingError::InvalidCompressionMethod);
         }
 
-        let language_tag = ASCII
-            .decode(language_tag_slice, DecoderTrap::Strict)
-            .map_err(|_| TextDecodingError::Unrepresentable)?;
+        let language_tag = std::str::from_utf8(language_tag_slice)
+            .map_err(|_| TextDecodingError::Unrepresentable)?
+            .to_string();
 
+        if !language_tag.is_ascii() {
+            return Err(TextDecodingError::Unrepresentable);
+        }
+        
         let translated_keyword = std::str::from_utf8(translated_keyword_slice)
             .map_err(|_| TextDecodingError::Unrepresentable)?
             .to_string();
@@ -499,9 +485,8 @@ impl ITXtChunk {
 impl EncodableTextChunk for ITXtChunk {
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
         // Keyword
-        let mut data = ISO_8859_1
-            .encode(&self.keyword, EncoderTrap::Strict)
-            .map_err(|_| EncodingError::from(TextEncodingError::Unrepresentable))?;
+        let mut data = Vec::with_capacity(self.keyword.len());
+        iso_8859_1::encode(&self.keyword, &mut data)?;
 
         if data.is_empty() || data.len() > 79 {
             return Err(TextEncodingError::InvalidKeywordSize.into());
@@ -521,9 +506,10 @@ impl EncodableTextChunk for ITXtChunk {
         data.push(0);
 
         // Language tag
-        ASCII
-            .encode_to(&self.language_tag, EncoderTrap::Strict, &mut data)
-            .map_err(|_| EncodingError::from(TextEncodingError::Unrepresentable))?;
+        if !self.language_tag.is_ascii() {
+            return Err(TextEncodingError::Unrepresentable.into());
+        }
+        data.extend_from_slice(self.language_tag.as_bytes());
 
         // Null separator
         data.push(0);
@@ -565,5 +551,60 @@ impl EncodableTextChunk for ITXtChunk {
         }
 
         encoder::write_chunk(w, chunk::iTXt, &data)
+    }
+}
+
+mod iso_8859_1 {
+    use super::*;
+    use std::collections::HashMap;
+    use std::convert::TryInto;
+
+    // The index in the array is the iso encoding minus 128, and the value is the unicode character code
+    const MAPPING: [u32; 128] = [
+        0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+        0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178, 0x00A0,
+        0x00A1, 0x00A2, 0x00A3, 0x00A4, 0x00A5, 0x00A6, 0x00A7, 0x00A8, 0x00A9, 0x00AA, 0x00AB,
+        0x00AC, 0x00AD, 0x00AE, 0x00AF, 0x00B0, 0x00B1, 0x00B2, 0x00B3, 0x00B4, 0x00B5, 0x00B6,
+        0x00B7, 0x00B8, 0x00B9, 0x00BA, 0x00BB, 0x00BC, 0x00BD, 0x00BE, 0x00BF, 0x00C0, 0x00C1,
+        0x00C2, 0x00C3, 0x00C4, 0x00C5, 0x00C6, 0x00C7, 0x00C8, 0x00C9, 0x00CA, 0x00CB, 0x00CC,
+        0x00CD, 0x00CE, 0x00CF, 0x00D0, 0x00D1, 0x00D2, 0x00D3, 0x00D4, 0x00D5, 0x00D6, 0x00D7,
+        0x00D8, 0x00D9, 0x00DA, 0x00DB, 0x00DC, 0x00DD, 0x00DE, 0x00DF, 0x00E0, 0x00E1, 0x00E2,
+        0x00E3, 0x00E4, 0x00E5, 0x00E6, 0x00E7, 0x00E8, 0x00E9, 0x00EA, 0x00EB, 0x00EC, 0x00ED,
+        0x00EE, 0x00EF, 0x00F0, 0x00F1, 0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0x00F7, 0x00F8,
+        0x00F9, 0x00FA, 0x00FB, 0x00FC, 0x00FD, 0x00FE, 0x00FF,
+    ];
+
+    pub(super) fn decode(data: &[u8]) -> String {
+        data.iter()
+            .map(|&codepoint| {
+                if codepoint < 128 {
+                    codepoint as char
+                } else {
+                    // The unwrap is safe because we know that the mapping only contains valid codepoints
+                    MAPPING[codepoint as usize - 128].try_into().unwrap()
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn encode(data: &str, w: &mut Vec<u8>) -> Result<(), TextEncodingError> {
+        let map: HashMap<char, u8> = MAPPING
+            .iter()
+            .enumerate()
+            .map(|(i, &codepoint)| (codepoint.try_into().unwrap(), i as u8 + 128))
+            .collect();
+        for c in data.chars() {
+            if (c as u16) < 128 {
+                w.push(c as u8);
+            } else {
+                if let Some(&codepoint) = map.get(&c) {
+                    w.push(codepoint);
+                } else {
+                    return Err(TextEncodingError::Unrepresentable);
+                }
+            }
+        }
+        Ok(())
     }
 }

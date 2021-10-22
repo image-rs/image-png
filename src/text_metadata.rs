@@ -82,7 +82,7 @@
 //!         "Comment".to_string(),
 //!         "Trying to write unicode characters such as '❤️' in a zTXT chunk will fail.".to_string()
 //!  )).unwrap_err();
-//! 
+//!
 //!  // The fields of the text chunk are public, so they can be mutated before being written to the file.
 //!  let mut tail_itxt_chunk = ITXtChunk::new("Author".to_string(), "सायंतन खान".to_string());
 //!  tail_itxt_chunk.compressed = true;
@@ -394,7 +394,7 @@ impl ITXtChunk {
         if !language_tag.is_ascii() {
             return Err(TextDecodingError::Unrepresentable);
         }
-        
+
         let translated_keyword = std::str::from_utf8(translated_keyword_slice)
             .map_err(|_| TextDecodingError::Unrepresentable)?
             .to_string();

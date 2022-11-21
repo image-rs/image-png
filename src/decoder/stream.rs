@@ -1031,11 +1031,11 @@ impl StreamingDecoder {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::iCCP }.into(),
             ))
-        } else if info.icc_profile.is_some() {
-            return Err(DecodingError::Format(
-                FormatErrorInner::DuplicateChunk { kind: chunk::iCCP }.into(),
-            ));
         } else {
+            if info.icc_profile.is_some() {
+                log::warn!("iCCP chunks must appear at most once");
+            }
+
             let mut buf = &self.current_chunk.raw_bytes[..];
 
             // read profile name

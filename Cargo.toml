@@ -25,6 +25,7 @@ crc32fast = "1.2.0"
 fdeflate = "0.2.0"
 flate2 = "1.0"
 miniz_oxide = "0.6.0"
+multiversion = "0.7.1"
 
 [dev-dependencies]
 criterion = "0.3.1"

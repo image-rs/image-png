@@ -54,6 +54,15 @@ impl Default for AdaptiveFilterType {
     }
 }
 
+fn filter_sub(a: u8, _: u8, _: u8) -> u8 {
+    a
+}
+fn filter_up(_: u8, b: u8, _: u8) -> u8 {
+    b
+}
+fn filter_avg(a: u8, b: u8, _: u8) -> u8 {
+    ((u16::from(a) + u16::from(b)) / 2) as u8
+}
 fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     // This is an optimized version of the paeth filter from the PNG specification, proposed by
     // Luca Versari for [FPNGE](https://www.lucaversari.it/FJXL_and_FPNGE.pdf). It operates
@@ -225,190 +234,119 @@ pub(crate) fn unfilter(
     }
 }
 
-fn filter_internal(
-    method: FilterType,
+#[inline(always)]
+fn run_filter(
     bpp: usize,
-    len: usize,
     previous: &[u8],
     current: &[u8],
     output: &mut [u8],
-) -> FilterType {
-    use self::FilterType::*;
-
+    mut f: impl FnMut(&mut u8, u8, u8, u8, u8),
+) {
     // This value was chosen experimentally based on what acheived the best performance. The
     // Rust compiler does auto-vectorization, and 32-bytes per loop iteration seems to enable
     // the fastest code when doing so.
     const CHUNK_SIZE: usize = 32;
 
-    match method {
-        NoFilter => {
-            output.copy_from_slice(current);
-            NoFilter
+    let len = current.len();
+
+    let mut out_chunks = output[bpp..].chunks_exact_mut(CHUNK_SIZE);
+    let mut cur_chunks = current[bpp..].chunks_exact(CHUNK_SIZE);
+    let mut a_chunks = current[..len - bpp].chunks_exact(CHUNK_SIZE);
+    let mut b_chunks = previous[bpp..].chunks_exact(CHUNK_SIZE);
+    let mut c_chunks = previous[..len - bpp].chunks_exact(CHUNK_SIZE);
+
+    for ((((out, cur), a), b), c) in (&mut out_chunks)
+        .zip(&mut cur_chunks)
+        .zip(&mut a_chunks)
+        .zip(&mut b_chunks)
+        .zip(&mut c_chunks)
+    {
+        for i in 0..CHUNK_SIZE {
+            f(&mut out[i], cur[i], a[i], b[i], c[i]);
         }
-        Sub => {
-            let mut out_chunks = output[bpp..].chunks_exact_mut(CHUNK_SIZE);
-            let mut cur_chunks = current[bpp..].chunks_exact(CHUNK_SIZE);
-            let mut prev_chunks = current[..len - bpp].chunks_exact(CHUNK_SIZE);
+    }
 
-            for ((out, cur), prev) in (&mut out_chunks).zip(&mut cur_chunks).zip(&mut prev_chunks) {
-                for i in 0..CHUNK_SIZE {
-                    out[i] = cur[i].wrapping_sub(prev[i]);
-                }
-            }
+    for ((((out, cur), &a), &b), &c) in out_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(cur_chunks.remainder())
+        .zip(a_chunks.remainder())
+        .zip(b_chunks.remainder())
+        .zip(c_chunks.remainder())
+    {
+        f(out, *cur, a, b, c);
+    }
 
-            for ((out, cur), &prev) in out_chunks
-                .into_remainder()
-                .iter_mut()
-                .zip(cur_chunks.remainder())
-                .zip(prev_chunks.remainder())
-            {
-                *out = cur.wrapping_sub(prev);
-            }
+    for i in 0..bpp {
+        f(&mut output[i], current[i], 0, previous[i], 0);
+    }
+}
 
-            output[..bpp].copy_from_slice(&current[..bpp]);
-            Sub
-        }
-        Up => {
-            let mut out_chunks = output.chunks_exact_mut(CHUNK_SIZE);
-            let mut cur_chunks = current.chunks_exact(CHUNK_SIZE);
-            let mut prev_chunks = previous.chunks_exact(CHUNK_SIZE);
+// On x86, this function performs several *times* faster when compiled with AVX2 support, so use
+// the multiversion macro to detect support at runtime.
+#[multiversion::multiversion(targets("x86_64+avx2"))]
+fn select_filter(bpp: usize, previous: &[u8], current: &[u8], output: &mut [u8]) -> FilterType {
+    let mut sub_sum = 0u64;
+    let mut up_sum = 0u64;
+    let mut avg_sum = 0u64;
+    let mut paeth_sum = 0u64;
 
-            for ((out, cur), prev) in (&mut out_chunks).zip(&mut cur_chunks).zip(&mut prev_chunks) {
-                for i in 0..CHUNK_SIZE {
-                    out[i] = cur[i].wrapping_sub(prev[i]);
-                }
-            }
+    // Sanity check to make sure weights won't overflow even though we use wrapping adds
+    // below. The optimizer seems to handle `wrapping_add` better than `saturating_add` even
+    // though the latter is the more natural choice. This condition should always hold because
+    // PNG rows are at most 2^32 - 1 pixels.
+    assert!((current.len() as u64) < (1 << 56));
 
-            for ((out, cur), &prev) in out_chunks
-                .into_remainder()
-                .into_iter()
-                .zip(cur_chunks.remainder())
-                .zip(prev_chunks.remainder())
-            {
-                *out = cur.wrapping_sub(prev);
-            }
-            Up
-        }
-        Avg => {
-            let mut out_chunks = output[bpp..].chunks_exact_mut(CHUNK_SIZE);
-            let mut cur_chunks = current[bpp..].chunks_exact(CHUNK_SIZE);
-            let mut cur_minus_bpp_chunks = current[..len - bpp].chunks_exact(CHUNK_SIZE);
-            let mut prev_chunks = previous[bpp..].chunks_exact(CHUNK_SIZE);
+    // Compute hueristic weights for each filter. The "none" filter isn't considered because
+    // experiments showed that including it tended to make the compression worse.
+    let weight = |x| i64::from(x as i8).abs() as u64;
+    let update_sums = |_: &mut u8, cur: u8, a, b, c| {
+        sub_sum = sub_sum.wrapping_add(weight(cur.wrapping_sub(filter_sub(a, b, c))));
+        up_sum = up_sum.wrapping_add(weight(cur.wrapping_sub(filter_up(a, b, c))));
+        avg_sum = avg_sum.wrapping_add(weight(cur.wrapping_sub(filter_avg(a, b, c))));
+        paeth_sum = paeth_sum.wrapping_add(weight(cur.wrapping_sub(filter_paeth(a, b, c))));
+    };
+    run_filter(bpp, previous, current, output, update_sums);
 
-            for (((out, cur), cur_minus_bpp), prev) in (&mut out_chunks)
-                .zip(&mut cur_chunks)
-                .zip(&mut cur_minus_bpp_chunks)
-                .zip(&mut prev_chunks)
-            {
-                for i in 0..CHUNK_SIZE {
-                    out[i] = cur[i].wrapping_sub(
-                        ((u16::from(cur_minus_bpp[i]) + u16::from(prev[i])) / 2) as u8,
-                    );
-                }
-            }
-
-            for (((out, cur), &cur_minus_bpp), &prev) in out_chunks
-                .into_remainder()
-                .into_iter()
-                .zip(cur_chunks.remainder())
-                .zip(cur_minus_bpp_chunks.remainder())
-                .zip(prev_chunks.remainder())
-            {
-                *out = cur.wrapping_sub(((u16::from(cur_minus_bpp) + u16::from(prev)) / 2) as u8);
-            }
-
-            for i in 0..bpp {
-                output[i] = current[i].wrapping_sub(previous[i] / 2);
-            }
-            Avg
-        }
-        Paeth => {
-            let mut out_chunks = output[bpp..].chunks_exact_mut(CHUNK_SIZE);
-            let mut cur_chunks = current[bpp..].chunks_exact(CHUNK_SIZE);
-            let mut a_chunks = current[..len - bpp].chunks_exact(CHUNK_SIZE);
-            let mut b_chunks = previous[bpp..].chunks_exact(CHUNK_SIZE);
-            let mut c_chunks = previous[..len - bpp].chunks_exact(CHUNK_SIZE);
-
-            for ((((out, cur), a), b), c) in (&mut out_chunks)
-                .zip(&mut cur_chunks)
-                .zip(&mut a_chunks)
-                .zip(&mut b_chunks)
-                .zip(&mut c_chunks)
-            {
-                for i in 0..CHUNK_SIZE {
-                    out[i] = cur[i].wrapping_sub(filter_paeth(a[i], b[i], c[i]));
-                }
-            }
-
-            for ((((out, cur), &a), &b), &c) in out_chunks
-                .into_remainder()
-                .iter_mut()
-                .zip(cur_chunks.remainder())
-                .zip(a_chunks.remainder())
-                .zip(b_chunks.remainder())
-                .zip(c_chunks.remainder())
-            {
-                *out = cur.wrapping_sub(filter_paeth(a, b, c));
-            }
-
-            for i in 0..bpp {
-                output[i] = current[i].wrapping_sub(filter_paeth(0, previous[i], 0));
-            }
-            Paeth
-        }
+    // The filter with the lowest sum is the best filter. If two filters have the same sum, pick
+    // the one that is cheaper to decode.
+    let min_sum = sub_sum.min(up_sum).min(avg_sum).min(paeth_sum);
+    if up_sum == min_sum {
+        FilterType::Up
+    } else if sub_sum == min_sum {
+        FilterType::Sub
+    } else if avg_sum == min_sum {
+        FilterType::Avg
+    } else {
+        FilterType::Paeth
     }
 }
 
 pub(crate) fn filter(
-    method: FilterType,
+    mut method: FilterType,
     adaptive: AdaptiveFilterType,
     bpp: BytesPerPixel,
     previous: &[u8],
     current: &[u8],
     output: &mut [u8],
 ) -> FilterType {
-    use FilterType::*;
     let bpp = bpp.into_usize();
-    let len = current.len();
-
-    match adaptive {
-        AdaptiveFilterType::NonAdaptive => {
-            filter_internal(method, bpp, len, previous, current, output)
-        }
-        AdaptiveFilterType::Adaptive => {
-            // Filter the current buffer with each filter type. Sum the absolute
-            // values of each filtered buffer treating the bytes as signed
-            // integers. Choose the filter with the smallest sum.
-            let mut filtered_buffer = vec![0; len];
-            filtered_buffer.copy_from_slice(current);
-            let mut scratch = vec![0; len];
-
-            // Initialize min_sum with the NoFilter buffer sum
-            let mut min_sum: usize = sum_buffer(&filtered_buffer);
-            let mut filter_choice = FilterType::NoFilter;
-
-            for &filter in [Sub, Up, Avg, Paeth].iter() {
-                filter_internal(filter, bpp, len, previous, current, &mut scratch);
-                let sum = sum_buffer(&scratch);
-                if sum < min_sum {
-                    min_sum = sum;
-                    filter_choice = filter;
-                    core::mem::swap(&mut filtered_buffer, &mut scratch);
-                }
-            }
-
-            output.copy_from_slice(&filtered_buffer);
-
-            filter_choice
-        }
+    if let AdaptiveFilterType::Adaptive = adaptive {
+        method = select_filter(bpp, previous, current, output);
     }
-}
 
-// Helper function for Adaptive filter buffer summation
-fn sum_buffer(buf: &[u8]) -> usize {
-    buf.iter().fold(0, |acc, &x| {
-        acc.saturating_add(i16::from(x as i8).abs() as usize)
-    })
+    fn apply_filter(f: impl Fn(u8, u8, u8) -> u8) -> impl FnMut(&mut u8, u8, u8, u8, u8) {
+        move |out, cur, a, b, c| *out = cur.wrapping_sub(f(a, b, c))
+    }
+    match method {
+        FilterType::NoFilter => output.copy_from_slice(current),
+        FilterType::Sub => run_filter(bpp, previous, current, output, apply_filter(filter_sub)),
+        FilterType::Up => run_filter(bpp, previous, current, output, apply_filter(filter_up)),
+        FilterType::Avg => run_filter(bpp, previous, current, output, apply_filter(filter_avg)),
+        FilterType::Paeth => run_filter(bpp, previous, current, output, apply_filter(filter_paeth)),
+    }
+
+    method
 }
 
 #[cfg(test)]
@@ -502,17 +440,5 @@ mod test {
                 roundtrip(filter, bpp);
             }
         }
-    }
-
-    #[test]
-    // This tests that converting u8 to i8 doesn't overflow when taking the
-    // absolute value for adaptive filtering: -128_i8.abs() will panic in debug
-    // or produce garbage in release mode. The sum of 0..=255u8 should equal the
-    // sum of the absolute values of -128_i8..=127, or abs(-128..=0) + 1..=127.
-    fn sum_buffer_test() {
-        let sum = (0..=128).sum::<usize>() + (1..=127).sum::<usize>();
-        let buf: Vec<u8> = (0_u8..=255).collect();
-
-        assert_eq!(sum, crate::filter::sum_buffer(&buf));
     }
 }

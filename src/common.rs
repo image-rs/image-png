@@ -95,7 +95,7 @@ pub enum BitDepth {
 /// This is used for filtering which never uses sub-byte units. This essentially reduces the number
 /// of possible byte chunk lengths to a very small set of values appropriate to be defined as an
 /// enum.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum BytesPerPixel {
     One = 1,

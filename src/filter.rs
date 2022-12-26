@@ -225,6 +225,105 @@ pub(crate) fn unfilter(
     }
 }
 
+pub(crate) fn unfilter_paeth_strip(tbpp: BytesPerPixel, row_bytes: usize, strip: &mut [u8]) {
+    const FULL_STRIP_HEIGHT: usize = 9;
+    const STRIP_HEIGHT: usize = FULL_STRIP_HEIGHT - 1;
+
+    let bpp = tbpp.into_usize();
+    let prefix_bytes = (FULL_STRIP_HEIGHT + 1) * bpp;
+    let mut rows: Vec<&mut [u8]> = strip.chunks_exact_mut(row_bytes).collect();
+
+    assert_eq!(rows.len(), FULL_STRIP_HEIGHT);
+    assert!(bpp == 3 || bpp == 4);
+    assert!(prefix_bytes < row_bytes);
+
+    for i in 1..=STRIP_HEIGHT {
+        for k in 0..bpp {
+            rows[i][k] = rows[i][k].wrapping_add(filter_paeth(0, rows[i - 1][k], 0));
+        }
+        for j in bpp..(prefix_bytes - bpp * i) {
+            rows[i][j] = rows[i][j].wrapping_add(filter_paeth(
+                rows[i][j - bpp],
+                rows[i - 1][j],
+                rows[i - 1][j - bpp],
+            ));
+        }
+    }
+
+    let inner_bytes = row_bytes + 2 * bpp - prefix_bytes;
+    let mut inner_rows: Vec<&mut [u8]> = rows
+        .iter_mut()
+        .enumerate()
+        .map(|(i, row)| &mut row[bpp * (STRIP_HEIGHT - i)..][..inner_bytes])
+        .collect();
+
+    if bpp == 3 {
+        let mut a = [0u8; STRIP_HEIGHT * 3];
+        let mut c = [0u8; STRIP_HEIGHT * 3];
+        for j in 0..STRIP_HEIGHT {
+            c[j * 3..][..3].copy_from_slice(&inner_rows[j][0..3]);
+            a[j * 3..][..3].copy_from_slice(&inner_rows[j + 1][3..6]);
+        }
+
+        for i in (6..inner_bytes).step_by(3) {
+            let mut b = [0u8; STRIP_HEIGHT * 3];
+            let mut cur = [0u8; STRIP_HEIGHT * 3];
+            for j in 0..STRIP_HEIGHT {
+                b[j * 3..][..3].copy_from_slice(&inner_rows[j][i - 3..][..3]);
+                cur[j * 3..][..3].copy_from_slice(&inner_rows[j + 1][i..][..3]);
+            }
+
+            let mut out = [0u8; STRIP_HEIGHT * 3];
+            for j in 0..STRIP_HEIGHT * 3 {
+                out[j] = cur[j].wrapping_add(filter_paeth(a[j], b[j], c[j]));
+            }
+
+            for j in 0..STRIP_HEIGHT {
+                inner_rows[j + 1][i..][..3].copy_from_slice(&out[j * 3..][..3]);
+            }
+            a = out;
+            c = b;
+        }
+    } else if bpp == 4 {
+        let mut a = [0u8; STRIP_HEIGHT * 4];
+        let mut c = [0u8; STRIP_HEIGHT * 4];
+        for j in 0..STRIP_HEIGHT {
+            c[j * 4..][..4].copy_from_slice(&inner_rows[j][0..4]);
+            a[j * 4..][..4].copy_from_slice(&inner_rows[j + 1][4..8]);
+        }
+
+        for i in (8..inner_bytes).step_by(4) {
+            let mut b = [0u8; STRIP_HEIGHT * 4];
+            let mut cur = [0u8; STRIP_HEIGHT * 4];
+            for j in 0..STRIP_HEIGHT {
+                b[j * 4..][..4].copy_from_slice(&inner_rows[j][i - 4..][..4]);
+                cur[j * 4..][..4].copy_from_slice(&inner_rows[j + 1][i..][..4]);
+            }
+
+            let mut out = [0u8; STRIP_HEIGHT * 4];
+            for j in 0..STRIP_HEIGHT * 4 {
+                out[j] = cur[j].wrapping_add(filter_paeth(a[j], b[j], c[j]));
+            }
+
+            for j in 0..STRIP_HEIGHT {
+                inner_rows[j + 1][i..][..4].copy_from_slice(&out[j * 4..][..4]);
+            }
+            a = out;
+            c = b;
+        }
+    }
+
+    for i in 1..FULL_STRIP_HEIGHT {
+        for j in (prefix_bytes - i * bpp + inner_bytes - 2 * bpp)..row_bytes {
+            rows[i][j] = rows[i][j].wrapping_add(filter_paeth(
+                rows[i][j - bpp],
+                rows[i - 1][j],
+                rows[i - 1][j - bpp],
+            ));
+        }
+    }
+}
+
 fn filter_internal(
     method: FilterType,
     bpp: usize,

@@ -12,7 +12,7 @@ use crate::chunk;
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
-use crate::filter::{unfilter, FilterType};
+use crate::filter::{unfilter, unfilter_paeth_strip, FilterType};
 use crate::utils;
 
 /*
@@ -526,12 +526,77 @@ impl<R: Read> Reader<R> {
                 let samples = color_type.samples() as u8;
                 utils::expand_pass(buf, width, row, pass, line, samples * (bit_depth as u8));
             }
+        } else if self.transform == Transformations::IDENTITY
+            && width >= 10
+            && (self.bpp == BytesPerPixel::Three || self.bpp == BytesPerPixel::Four)
+        {
+            let height = self.info().height as usize;
+            let row_bytes = self.output_line_size(width);
+
+            if let Some(Row { data, .. }) = self.next_row()? {
+                buf[..row_bytes].copy_from_slice(data);
+            }
+
+            let mut paeth_rows = 0;
+            const STRIP_HEIGHT: usize = 8;
+            for strip_y in 1..height {
+                let (InterlacedRow { data, .. }, filter) =
+                    self.next_raw_interlaced_row(true)?.unwrap();
+                assert_eq!(data.len(), row_bytes);
+                buf[strip_y * row_bytes..][..row_bytes].copy_from_slice(&data);
+
+                if filter == FilterType::Paeth {
+                    paeth_rows += 1;
+                } else {
+                    for y in (strip_y - paeth_rows)..=strip_y {
+                        let (prev, current) = buf.split_at_mut(y * row_bytes);
+                        if let Err(message) = unfilter(
+                            if y == strip_y {
+                                filter
+                            } else {
+                                FilterType::Paeth
+                            },
+                            self.bpp,
+                            &prev[(y - 1) * row_bytes..],
+                            &mut current[..row_bytes],
+                        ) {
+                            return Err(DecodingError::Format(
+                                FormatErrorInner::BadFilter(message).into(),
+                            ));
+                        }
+                    }
+                    paeth_rows = 0;
+                }
+                if paeth_rows == STRIP_HEIGHT {
+                    unfilter_paeth_strip(
+                        self.bpp,
+                        row_bytes,
+                        &mut buf[(strip_y - STRIP_HEIGHT) * row_bytes..]
+                            [..row_bytes * (STRIP_HEIGHT + 1)],
+                    );
+                    paeth_rows = 0;
+                }
+            }
+            for y in (height - paeth_rows)..height {
+                let (prev, current) = buf.split_at_mut(y * row_bytes);
+                if let Err(message) = unfilter(
+                    FilterType::Paeth,
+                    self.bpp,
+                    &prev[(y - 1) * row_bytes..],
+                    &mut current[..row_bytes],
+                ) {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::BadFilter(message).into(),
+                    ));
+                }
+            }
         } else {
             let mut len = 0;
             while let Some(Row { data: row, .. }) = self.next_row()? {
                 len += (&mut buf[len..]).write(row)?;
             }
         }
+
         // Advance over the rest of data for this (sub-)frame.
         if !self.subframe.consumed_and_flushed {
             self.decoder.finished_decoding()?;
@@ -550,11 +615,7 @@ impl<R: Read> Reader<R> {
 
     /// Returns the next processed row of the image
     pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow>, DecodingError> {
-        match self.next_interlaced_row_impl() {
-            Err(err) => Err(err),
-            Ok(None) => Ok(None),
-            Ok(s) => Ok(s),
-        }
+        self.next_interlaced_row_impl()
     }
 
     /// Fetch the next interlaced row and filter it according to our own transformations.
@@ -563,12 +624,12 @@ impl<R: Read> Reader<R> {
         let transform = self.transform;
 
         if transform == Transformations::IDENTITY {
-            return self.next_raw_interlaced_row();
+            return self.next_raw_interlaced_row(false).map(|a| a.map(|b| b.0));
         }
 
         // swap buffer to circumvent borrow issues
         let mut buffer = mem::take(&mut self.processed);
-        let (got_next, adam7) = if let Some(row) = self.next_raw_interlaced_row()? {
+        let (got_next, adam7) = if let Some((row, _)) = self.next_raw_interlaced_row(false)? {
             (&mut buffer[..]).write_all(row.data)?;
             (true, row.interlace)
         } else {
@@ -754,7 +815,10 @@ impl<R: Read> Reader<R> {
 
     /// Returns the next raw scanline of the image interlace pass.
     /// The scanline is filtered against the previous scanline according to the specification.
-    fn next_raw_interlaced_row(&mut self) -> Result<Option<InterlacedRow<'_>>, DecodingError> {
+    fn next_raw_interlaced_row(
+        &mut self,
+        skip_unfilter: bool,
+    ) -> Result<Option<(InterlacedRow<'_>, FilterType)>, DecodingError> {
         let bpp = self.bpp;
         let (rowlen, passdata) = match self.next_pass() {
             Some((rowlen, passdata)) => (rowlen, passdata),
@@ -773,21 +837,26 @@ impl<R: Read> Reader<R> {
                     Some(filter) => filter,
                 };
 
-                if let Err(message) =
-                    unfilter(filter, bpp, &self.prev[1..rowlen], &mut row[1..rowlen])
-                {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::BadFilter(message).into(),
-                    ));
+                if !skip_unfilter {
+                    if let Err(message) =
+                        unfilter(filter, bpp, &self.prev[1..rowlen], &mut row[1..rowlen])
+                    {
+                        return Err(DecodingError::Format(
+                            FormatErrorInner::BadFilter(message).into(),
+                        ));
+                    }
                 }
 
                 self.prev[..rowlen].copy_from_slice(&row[..rowlen]);
                 self.scan_start += rowlen;
 
-                return Ok(Some(InterlacedRow {
-                    data: &self.prev[1..rowlen],
-                    interlace: passdata,
-                }));
+                return Ok(Some((
+                    InterlacedRow {
+                        data: &self.prev[1..rowlen],
+                        interlace: passdata,
+                    },
+                    filter,
+                )));
             } else {
                 if self.subframe.consumed_and_flushed {
                     return Err(DecodingError::Format(

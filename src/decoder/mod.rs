@@ -556,15 +556,6 @@ impl<R: Read> Reader<R> {
 
     /// Returns the next processed row of the image
     pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow>, DecodingError> {
-        match self.next_interlaced_row_impl() {
-            Err(err) => Err(err),
-            Ok(None) => Ok(None),
-            Ok(s) => Ok(s),
-        }
-    }
-
-    /// Fetch the next interlaced row and filter it according to our own transformations.
-    fn next_interlaced_row_impl(&mut self) -> Result<Option<InterlacedRow>, DecodingError> {
         use crate::common::ColorType::*;
         let transform = self.transform;
 

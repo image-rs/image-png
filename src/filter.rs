@@ -2,6 +2,87 @@ use core::convert::TryInto;
 
 use crate::common::BytesPerPixel;
 
+/// SIMD helpers for `fn unfilter`
+///
+/// TODO(https://github.com/rust-lang/rust/issues/86656): Stop gating this module behind the
+/// "unstable" feature of the `png` crate.  This should be possible once the "portable_simd"
+/// feature of Rust gets stabilized.
+#[cfg(feature = "unstable")]
+mod simd {
+    use std::simd::{i16x4, u8x4, SimdInt, SimdOrd, SimdPartialEq, SimdUint};
+
+    /// This is an equivalent of the `PaethPredictor` function from
+    /// [the spec](http://www.libpng.org/pub/png/spec/1.2/PNG-Filters.html#Filter-type-4-Paeth)
+    /// except that it simultaenously calculates the predictor for all SIMD lanes.
+    /// Mapping between parameter names and pixel positions can be found in
+    /// [a diagram here](https://www.w3.org/TR/png/#filter-byte-positions).
+    ///
+    /// Examples of how different pixel types may be represented as multiple SIMD lanes:
+    /// - RGBA => 4 lanes of `i16x4` contain R, G, B, A
+    /// - RGB  => 4 lanes of `i16x4` contain R, G, B, and a ignored 4th value
+    ///
+    /// The SIMD algorithm below is based on [`libpng`](https://github.com/glennrp/libpng/blob/f8e5fa92b0e37ab597616f554bee254157998227/intel/filter_sse2_intrinsics.c#L261-L280).
+    fn paeth_predictor(a: i16x4, b: i16x4, c: i16x4) -> i16x4 {
+        let pa = b - c; // (p-a) == (a+b-c - a) == (b-c)
+        let pb = a - c; // (p-b) == (a+b-c - b) == (a-c)
+        let pc = pa + pb; // (p-c) == (a+b-c - c) == (a+b-c-c) == (b-c)+(a-c)
+
+        let pa = pa.abs();
+        let pb = pb.abs();
+        let pc = pc.abs();
+
+        let smallest = pc.simd_min(pa.simd_min(pb));
+
+        // Paeth algorithm breaks ties favoring a over b over c, so we execute the following
+        // lane-wise selection:
+        //
+        //     if smalest == pa
+        //         then select a
+        //         else select (if smallest == pb then select b else select c)
+        smallest
+            .simd_eq(pa)
+            .select(a, smallest.simd_eq(pb).select(b, c))
+    }
+
+    fn load3(src: &[u8]) -> u8x4 {
+        u8x4::from_array([src[0], src[1], src[2], 0])
+    }
+
+    fn store3(src: u8x4, dest: &mut [u8]) {
+        dest[0..3].copy_from_slice(&src.to_array()[0..3])
+    }
+
+    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Three`.
+    pub fn unfilter_paeth3(prev_row: &[u8], curr_row: &mut [u8]) {
+        debug_assert_eq!(prev_row.len(), curr_row.len());
+        debug_assert_eq!(prev_row.len() % 3, 0);
+
+        // Paeth tries to predict pixel x using the pixel to the left of it, a,
+        // and two pixels from the previous row, b and c:
+        //
+        //     prev_row: c b
+        //     curr_row: a x
+        //
+        // The first pixel has no left context, and so uses an Up filter, p = b.
+        // This works naturally with our main loop's p = a+b-c if we force a and c
+        // to zero.
+        let mut a = i16x4::default();
+        let mut c = i16x4::default();
+
+        for (prev, curr) in prev_row.chunks_exact(3).zip(curr_row.chunks_exact_mut(3)) {
+            let b = load3(prev).cast::<i16>();
+            let mut x = load3(curr);
+
+            let predictor = paeth_predictor(a, b, c);
+            x += predictor.cast::<u8>();
+            store3(x, curr);
+
+            c = b;
+            a = x.cast::<i16>();
+        }
+    }
+}
+
 /// The byte level filter applied to scanlines to prepare them for compression.
 ///
 /// Compression in general benefits from repetitive data. The filter is a content-aware method of
@@ -401,21 +482,31 @@ pub(crate) fn unfilter(
                     }
                 }
                 BytesPerPixel::Three => {
-                    let mut a_bpp = [0; 3];
-                    let mut c_bpp = [0; 3];
-                    for (chunk, b_bpp) in current.chunks_exact_mut(3).zip(previous.chunks_exact(3))
+                    #[cfg(feature = "unstable")]
+                    simd::unfilter_paeth3(previous, current);
+
+                    #[cfg(not(feature = "unstable"))]
                     {
-                        let new_chunk = [
-                            chunk[0]
-                                .wrapping_add(filter_paeth_decode(a_bpp[0], b_bpp[0], c_bpp[0])),
-                            chunk[1]
-                                .wrapping_add(filter_paeth_decode(a_bpp[1], b_bpp[1], c_bpp[1])),
-                            chunk[2]
-                                .wrapping_add(filter_paeth_decode(a_bpp[2], b_bpp[2], c_bpp[2])),
-                        ];
-                        *TryInto::<&mut [u8; 3]>::try_into(chunk).unwrap() = new_chunk;
-                        a_bpp = new_chunk;
-                        c_bpp = b_bpp.try_into().unwrap();
+                        let mut a_bpp = [0; 3];
+                        let mut c_bpp = [0; 3];
+                        for (chunk, b_bpp) in
+                            current.chunks_exact_mut(3).zip(previous.chunks_exact(3))
+                        {
+                            let new_chunk = [
+                                chunk[0].wrapping_add(filter_paeth_decode(
+                                    a_bpp[0], b_bpp[0], c_bpp[0],
+                                )),
+                                chunk[1].wrapping_add(filter_paeth_decode(
+                                    a_bpp[1], b_bpp[1], c_bpp[1],
+                                )),
+                                chunk[2].wrapping_add(filter_paeth_decode(
+                                    a_bpp[2], b_bpp[2], c_bpp[2],
+                                )),
+                            ];
+                            *TryInto::<&mut [u8; 3]>::try_into(chunk).unwrap() = new_chunk;
+                            a_bpp = new_chunk;
+                            c_bpp = b_bpp.try_into().unwrap();
+                        }
                     }
                 }
                 BytesPerPixel::Four => {

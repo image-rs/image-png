@@ -9,7 +9,10 @@ use crate::common::BytesPerPixel;
 /// feature of Rust gets stabilized.
 #[cfg(feature = "unstable")]
 mod simd {
-    use std::simd::{i16x4, u8x4, SimdInt, SimdOrd, SimdPartialEq, SimdUint};
+    use std::simd::{
+        i16x4, i16x8, u8x4, u8x8, LaneCount, Simd, SimdInt, SimdOrd, SimdPartialEq, SimdUint,
+        SupportedLaneCount,
+    };
 
     /// This is an equivalent of the `PaethPredictor` function from
     /// [the spec](http://www.libpng.org/pub/png/spec/1.2/PNG-Filters.html#Filter-type-4-Paeth)
@@ -22,7 +25,14 @@ mod simd {
     /// - RGB  => 4 lanes of `i16x4` contain R, G, B, and a ignored 4th value
     ///
     /// The SIMD algorithm below is based on [`libpng`](https://github.com/glennrp/libpng/blob/f8e5fa92b0e37ab597616f554bee254157998227/intel/filter_sse2_intrinsics.c#L261-L280).
-    fn paeth_predictor(a: i16x4, b: i16x4, c: i16x4) -> i16x4 {
+    fn paeth_predictor<const N: usize>(
+        a: Simd<i16, N>,
+        b: Simd<i16, N>,
+        c: Simd<i16, N>,
+    ) -> Simd<i16, N>
+    where
+        LaneCount<N>: SupportedLaneCount,
+    {
         let pa = b - c; // (p-a) == (a+b-c - a) == (b-c)
         let pb = a - c; // (p-b) == (a+b-c - b) == (a-c)
         let pc = pa + pb; // (p-c) == (a+b-c - c) == (a+b-c-c) == (b-c)+(a-c)
@@ -76,6 +86,44 @@ mod simd {
             let predictor = paeth_predictor(a, b, c);
             x += predictor.cast::<u8>();
             store3(x, curr);
+
+            c = b;
+            a = x.cast::<i16>();
+        }
+    }
+
+    fn load6(src: &[u8]) -> u8x8 {
+        u8x8::from_array([src[0], src[1], src[2], src[3], src[4], src[5], 0, 0])
+    }
+
+    fn store6(src: u8x8, dest: &mut [u8]) {
+        dest[0..6].copy_from_slice(&src.to_array()[0..6])
+    }
+
+    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Six`.
+    pub fn unfilter_paeth6(prev_row: &[u8], curr_row: &mut [u8]) {
+        debug_assert_eq!(prev_row.len(), curr_row.len());
+        debug_assert_eq!(prev_row.len() % 6, 0);
+
+        // Paeth tries to predict pixel x using the pixel to the left of it, a,
+        // and two pixels from the previous row, b and c:
+        //
+        //     prev_row: c b
+        //     curr_row: a x
+        //
+        // The first pixel has no left context, and so uses an Up filter, p = b.
+        // This works naturally with our main loop's p = a+b-c if we force a and c
+        // to zero.
+        let mut a = i16x8::default();
+        let mut c = i16x8::default();
+
+        for (prev, curr) in prev_row.chunks_exact(6).zip(curr_row.chunks_exact_mut(6)) {
+            let b = load6(prev).cast::<i16>();
+            let mut x = load6(curr);
+
+            let predictor = paeth_predictor(a, b, c);
+            x += predictor.cast::<u8>();
+            store6(x, curr);
 
             c = b;
             a = x.cast::<i16>();
@@ -530,27 +578,40 @@ pub(crate) fn unfilter(
                     }
                 }
                 BytesPerPixel::Six => {
-                    let mut a_bpp = [0; 6];
-                    let mut c_bpp = [0; 6];
-                    for (chunk, b_bpp) in current.chunks_exact_mut(6).zip(previous.chunks_exact(6))
+                    #[cfg(feature = "unstable")]
+                    simd::unfilter_paeth6(previous, current);
+
+                    #[cfg(not(feature = "unstable"))]
                     {
-                        let new_chunk = [
-                            chunk[0]
-                                .wrapping_add(filter_paeth_decode(a_bpp[0], b_bpp[0], c_bpp[0])),
-                            chunk[1]
-                                .wrapping_add(filter_paeth_decode(a_bpp[1], b_bpp[1], c_bpp[1])),
-                            chunk[2]
-                                .wrapping_add(filter_paeth_decode(a_bpp[2], b_bpp[2], c_bpp[2])),
-                            chunk[3]
-                                .wrapping_add(filter_paeth_decode(a_bpp[3], b_bpp[3], c_bpp[3])),
-                            chunk[4]
-                                .wrapping_add(filter_paeth_decode(a_bpp[4], b_bpp[4], c_bpp[4])),
-                            chunk[5]
-                                .wrapping_add(filter_paeth_decode(a_bpp[5], b_bpp[5], c_bpp[5])),
-                        ];
-                        *TryInto::<&mut [u8; 6]>::try_into(chunk).unwrap() = new_chunk;
-                        a_bpp = new_chunk;
-                        c_bpp = b_bpp.try_into().unwrap();
+                        let mut a_bpp = [0; 6];
+                        let mut c_bpp = [0; 6];
+                        for (chunk, b_bpp) in
+                            current.chunks_exact_mut(6).zip(previous.chunks_exact(6))
+                        {
+                            let new_chunk = [
+                                chunk[0].wrapping_add(filter_paeth_decode(
+                                    a_bpp[0], b_bpp[0], c_bpp[0],
+                                )),
+                                chunk[1].wrapping_add(filter_paeth_decode(
+                                    a_bpp[1], b_bpp[1], c_bpp[1],
+                                )),
+                                chunk[2].wrapping_add(filter_paeth_decode(
+                                    a_bpp[2], b_bpp[2], c_bpp[2],
+                                )),
+                                chunk[3].wrapping_add(filter_paeth_decode(
+                                    a_bpp[3], b_bpp[3], c_bpp[3],
+                                )),
+                                chunk[4].wrapping_add(filter_paeth_decode(
+                                    a_bpp[4], b_bpp[4], c_bpp[4],
+                                )),
+                                chunk[5].wrapping_add(filter_paeth_decode(
+                                    a_bpp[5], b_bpp[5], c_bpp[5],
+                                )),
+                            ];
+                            *TryInto::<&mut [u8; 6]>::try_into(chunk).unwrap() = new_chunk;
+                            a_bpp = new_chunk;
+                            c_bpp = b_bpp.try_into().unwrap();
+                        }
                     }
                 }
                 BytesPerPixel::Eight => {

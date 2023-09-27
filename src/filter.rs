@@ -96,17 +96,34 @@ mod simd {
     }
 
     /// Undoes `FilterType::Paeth` for `BytesPerPixel::Three`.
-    pub fn unfilter_paeth3(prev_row: &[u8], curr_row: &mut [u8]) {
+    pub fn unfilter_paeth3(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 3, 0);
 
         let mut state = PaethState::<4>::default();
-        for (prev, curr) in prev_row.chunks_exact(3).zip(curr_row.chunks_exact_mut(3)) {
-            let b = load3(prev);
-            let mut x = load3(curr);
+        while prev_row.len() >= 4 {
+            // `u8x4` requires working with `[u8;4]`, but we can just load and ignore the first
+            // byte from the next triple.  This optimization technique mimics the algorithm found
+            // in
+            // https://github.com/glennrp/libpng/blob/f8e5fa92b0e37ab597616f554bee254157998227/intel/filter_sse2_intrinsics.c#L130-L131
+            let b = u8x4::from_slice(prev_row);
+            let mut x = u8x4::from_slice(curr_row);
+
             paeth_step(&mut state, b, &mut x);
-            store3(x, curr);
+
+            // We can speculate that writing 4 bytes might be more efficient (just as with using
+            // `u8x4::from_slice` above), but we can't use that here, because we can't clobber the
+            // first byte of the next pixel in the `curr_row`.
+            store3(x, curr_row);
+
+            prev_row = &prev_row[3..];
+            curr_row = &mut curr_row[3..];
         }
+        // Can't use `u8x4::from_slice` for the last `[u8;3]`.
+        let b = load3(prev_row);
+        let mut x = load3(curr_row);
+        paeth_step(&mut state, b, &mut x);
+        store3(x, curr_row);
     }
 
     fn load6(src: &[u8]) -> u8x8 {
@@ -118,17 +135,34 @@ mod simd {
     }
 
     /// Undoes `FilterType::Paeth` for `BytesPerPixel::Six`.
-    pub fn unfilter_paeth6(prev_row: &[u8], curr_row: &mut [u8]) {
+    pub fn unfilter_paeth6(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 6, 0);
 
         let mut state = PaethState::<8>::default();
-        for (prev, curr) in prev_row.chunks_exact(6).zip(curr_row.chunks_exact_mut(6)) {
-            let b = load6(prev);
-            let mut x = load6(curr);
+        while prev_row.len() >= 8 {
+            // `u8x8` requires working with `[u8;8]`, but we can just load and ignore the first two
+            // bytes from the next pixel.  This optimization technique mimics the algorithm found
+            // in
+            // https://github.com/glennrp/libpng/blob/f8e5fa92b0e37ab597616f554bee254157998227/intel/filter_sse2_intrinsics.c#L130-L131
+            let b = u8x8::from_slice(prev_row);
+            let mut x = u8x8::from_slice(curr_row);
+
             paeth_step(&mut state, b, &mut x);
-            store6(x, curr);
+
+            // We can speculate that writing 8 bytes might be more efficient (just as with using
+            // `u8x8::from_slice` above), but we can't use that here, because we can't clobber the
+            // first bytes of the next pixel in the `curr_row`.
+            store6(x, curr_row);
+
+            prev_row = &prev_row[6..];
+            curr_row = &mut curr_row[6..];
         }
+        // Can't use `u8x8::from_slice` for the last `[u8;6]`.
+        let b = load6(prev_row);
+        let mut x = load6(curr_row);
+        paeth_step(&mut state, b, &mut x);
+        store6(x, curr_row);
     }
 }
 

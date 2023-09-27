@@ -10,8 +10,7 @@ use crate::common::BytesPerPixel;
 #[cfg(feature = "unstable")]
 mod simd {
     use std::simd::{
-        i16x4, i16x8, u8x4, u8x8, LaneCount, Simd, SimdInt, SimdOrd, SimdPartialEq, SimdUint,
-        SupportedLaneCount,
+        u8x4, u8x8, LaneCount, Simd, SimdInt, SimdOrd, SimdPartialEq, SimdUint, SupportedLaneCount,
     };
 
     /// This is an equivalent of the `PaethPredictor` function from
@@ -54,6 +53,40 @@ mod simd {
             .select(a, smallest.simd_eq(pb).select(b, c))
     }
 
+    /// Memory of previous pixels (as needed to unfilter `FilterType::Paeth`).
+    /// See also https://www.w3.org/TR/png/#filter-byte-positions
+    #[derive(Default)]
+    struct PaethState<const N: usize>
+    where
+        LaneCount<N>: SupportedLaneCount,
+    {
+        /// Previous pixel in the previous row.
+        c: Simd<i16, N>,
+
+        /// Previous pixel in the current row.
+        a: Simd<i16, N>,
+    }
+
+    /// Mutates `x` as needed to unfilter `FilterType::Paeth`.
+    ///
+    /// `b` is the current pixel in the previous row.  `x` is the current pixel in the current row.
+    /// See also https://www.w3.org/TR/png/#filter-byte-positions
+    fn paeth_step<const N: usize>(state: &mut PaethState<N>, b: Simd<u8, N>, x: &mut Simd<u8, N>)
+    where
+        LaneCount<N>: SupportedLaneCount,
+    {
+        // Storing the inputs.
+        let b = b.cast::<i16>();
+
+        // Calculating the new value of the current pixel.
+        let predictor = paeth_predictor(state.a, b, state.c);
+        *x += predictor.cast::<u8>();
+
+        // Preparing for the next step.
+        state.c = b;
+        state.a = x.cast::<i16>();
+    }
+
     fn load3(src: &[u8]) -> u8x4 {
         u8x4::from_array([src[0], src[1], src[2], 0])
     }
@@ -67,28 +100,12 @@ mod simd {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 3, 0);
 
-        // Paeth tries to predict pixel x using the pixel to the left of it, a,
-        // and two pixels from the previous row, b and c:
-        //
-        //     prev_row: c b
-        //     curr_row: a x
-        //
-        // The first pixel has no left context, and so uses an Up filter, p = b.
-        // This works naturally with our main loop's p = a+b-c if we force a and c
-        // to zero.
-        let mut a = i16x4::default();
-        let mut c = i16x4::default();
-
+        let mut state = PaethState::<4>::default();
         for (prev, curr) in prev_row.chunks_exact(3).zip(curr_row.chunks_exact_mut(3)) {
-            let b = load3(prev).cast::<i16>();
+            let b = load3(prev);
             let mut x = load3(curr);
-
-            let predictor = paeth_predictor(a, b, c);
-            x += predictor.cast::<u8>();
+            paeth_step(&mut state, b, &mut x);
             store3(x, curr);
-
-            c = b;
-            a = x.cast::<i16>();
         }
     }
 
@@ -105,28 +122,12 @@ mod simd {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 6, 0);
 
-        // Paeth tries to predict pixel x using the pixel to the left of it, a,
-        // and two pixels from the previous row, b and c:
-        //
-        //     prev_row: c b
-        //     curr_row: a x
-        //
-        // The first pixel has no left context, and so uses an Up filter, p = b.
-        // This works naturally with our main loop's p = a+b-c if we force a and c
-        // to zero.
-        let mut a = i16x8::default();
-        let mut c = i16x8::default();
-
+        let mut state = PaethState::<8>::default();
         for (prev, curr) in prev_row.chunks_exact(6).zip(curr_row.chunks_exact_mut(6)) {
-            let b = load6(prev).cast::<i16>();
+            let b = load6(prev);
             let mut x = load6(curr);
-
-            let predictor = paeth_predictor(a, b, c);
-            x += predictor.cast::<u8>();
+            paeth_step(&mut state, b, &mut x);
             store6(x, curr);
-
-            c = b;
-            a = x.cast::<i16>();
         }
     }
 }

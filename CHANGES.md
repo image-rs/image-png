@@ -1,4 +1,10 @@
-## Unreleased
+## Unreleased (TODO: breaking changes require increasing semver to 0.18.x)
+
+* Performance improvements.
+* Breaking API changes (required by the performance-related work):
+  - Removing the `Row` and `InterlacedRow` structs
+  - Removing the `Reader::next_interlaced_row` method
+  - Changing the signature of the `Reader::next_row` method
 
 ## 0.17.10
 

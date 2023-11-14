@@ -106,12 +106,7 @@ impl ZlibStream {
 
             let (in_consumed, out_consumed) = self
                 .state
-                .read(
-                    &[],
-                    self.out_buffer.as_mut_slice(),
-                    self.out_pos,
-                    true,
-                )
+                .read(&[], self.out_buffer.as_mut_slice(), self.out_pos, true)
                 .map_err(|err| {
                     DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
                 })?;

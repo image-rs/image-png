@@ -1,6 +1,6 @@
 extern crate crc32fast;
 
-use std::convert::From;
+use std::convert::{From, TryInto};
 use std::default::Default;
 use std::error;
 use std::fmt;
@@ -49,7 +49,7 @@ enum State {
     Signature(u8, [u8; 7]),
     /// In this state we are reading a u32 value from external input.  We start with
     /// `accumulated_count` set to `0`. After reading or accumulating the required 4 bytes we will
-    /// handle the u32 and move to the next state.
+    /// call `parse_32` which will then move onto the next state.
     U32 {
         kind: U32ValueKind,
         bytes: [u8; 4],
@@ -632,120 +632,9 @@ impl StreamingDecoder {
                 accumulated_count,
             } => {
                 debug_assert_eq!(accumulated_count, 4);
-                let val = u32::from_be_bytes(bytes);
-                match kind {
-                    U32ValueKind::Length => {
-                        self.state = Some(State::new_u32(U32ValueKind::Type { length: val }));
-                        Ok((0, Decoded::Nothing))
-                    }
-                    U32ValueKind::Type { length } => {
-                        let type_str = ChunkType(bytes);
-                        if type_str != self.current_chunk.type_
-                            && (self.current_chunk.type_ == IDAT
-                                || self.current_chunk.type_ == chunk::fdAT)
-                        {
-                            self.current_chunk.type_ = type_str;
-                            self.inflater.finish_compressed_chunks(image_data)?;
-                            self.inflater.reset();
-                            self.state = Some(State::U32 {
-                                kind,
-                                bytes,
-                                accumulated_count,
-                            });
-                            return Ok((0, Decoded::ImageDataFlushed));
-                        }
-                        self.current_chunk.type_ = type_str;
-                        if !self.decode_options.ignore_crc {
-                            self.current_chunk.crc.reset();
-                            self.current_chunk.crc.update(&type_str.0);
-                        }
-                        self.current_chunk.remaining = length;
-                        self.current_chunk.raw_bytes.clear();
-                        self.state = match type_str {
-                            chunk::fdAT => {
-                                if length < 4 {
-                                    return Err(DecodingError::Format(
-                                        FormatErrorInner::FdatShorterThanFourBytes.into(),
-                                    ));
-                                }
-                                Some(State::new_u32(U32ValueKind::ApngSequenceNumber))
-                            }
-                            IDAT => {
-                                self.have_idat = true;
-                                Some(ImageData(type_str))
-                            }
-                            _ => Some(ReadChunkData(type_str)),
-                        };
-                        Ok((0, Decoded::ChunkBegin(length, type_str)))
-                    }
-                    U32ValueKind::Crc(type_str) => {
-                        // If ignore_crc is set, do not calculate CRC. We set
-                        // sum=val so that it short-circuits to true in the next
-                        // if-statement block
-                        let sum = if self.decode_options.ignore_crc {
-                            val
-                        } else {
-                            self.current_chunk.crc.clone().finalize()
-                        };
-
-                        if val == sum || CHECKSUM_DISABLED {
-                            self.state = Some(State::new_u32(U32ValueKind::Length));
-                            if type_str == IEND {
-                                Ok((0, Decoded::ImageEnd))
-                            } else {
-                                Ok((0, Decoded::ChunkComplete(val, type_str)))
-                            }
-                        } else if self.decode_options.skip_ancillary_crc_failures
-                            && !chunk::is_critical(type_str)
-                        {
-                            // Ignore ancillary chunk with invalid CRC
-                            self.state = Some(State::U32(U32ValueKind::Length));
-                            Ok((1, Decoded::Nothing))
-                        } else {
-                            Err(DecodingError::Format(
-                                FormatErrorInner::CrcMismatch {
-                                    crc_val: val,
-                                    crc_sum: sum,
-                                    chunk: type_str,
-                                }
-                                .into(),
-                            ))
-                        }
-                    }
-                    U32ValueKind::ApngSequenceNumber => {
-                        debug_assert_eq!(self.current_chunk.type_, chunk::fdAT);
-                        let next_seq_no = val;
-
-                        // Should be verified by the FdatShorterThanFourBytes check earlier.
-                        debug_assert!(self.current_chunk.remaining >= 4);
-                        self.current_chunk.remaining -= 4;
-
-                        if let Some(seq_no) = self.current_seq_no {
-                            if next_seq_no != seq_no + 1 {
-                                return Err(DecodingError::Format(
-                                    FormatErrorInner::ApngOrder {
-                                        present: next_seq_no,
-                                        expected: seq_no + 1,
-                                    }
-                                    .into(),
-                                ));
-                            }
-                            self.current_seq_no = Some(next_seq_no);
-                        } else {
-                            return Err(DecodingError::Format(
-                                FormatErrorInner::MissingFctl.into(),
-                            ));
-                        }
-
-                        if !self.decode_options.ignore_crc {
-                            let data = next_seq_no.to_be_bytes();
-                            self.current_chunk.crc.update(&data);
-                        }
-
-                        self.state = Some(ImageData(chunk::fdAT));
-                        Ok((0, Decoded::PartialChunk(chunk::fdAT)))
-                    }
-                }
+                const CONSUMED_BYTES: usize = 0;
+                self.parse_u32(kind, &bytes, image_data)
+                    .map(|decoded| (CONSUMED_BYTES, decoded))
             }
             ParseChunkData(type_str) => {
                 debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
@@ -810,6 +699,128 @@ impl StreamingDecoder {
                     self.state = Some(ImageData(type_str));
                 }
                 Ok((consumed, Decoded::ImageData))
+            }
+        }
+    }
+
+    fn parse_u32(
+        &mut self,
+        kind: U32ValueKind,
+        u32_be_bytes: &[u8],
+        image_data: &mut Vec<u8>,
+    ) -> Result<Decoded, DecodingError> {
+        debug_assert_eq!(u32_be_bytes.len(), 4);
+        let bytes = u32_be_bytes.try_into().unwrap();
+        let val = u32::from_be_bytes(bytes);
+
+        match kind {
+            U32ValueKind::Length => {
+                self.state = Some(State::new_u32(U32ValueKind::Type { length: val }));
+                Ok(Decoded::Nothing)
+            }
+            U32ValueKind::Type { length } => {
+                let type_str = ChunkType(bytes);
+                if type_str != self.current_chunk.type_
+                    && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
+                {
+                    self.current_chunk.type_ = type_str;
+                    self.inflater.finish_compressed_chunks(image_data)?;
+                    self.inflater.reset();
+                    self.state = Some(State::U32 {
+                        kind,
+                        bytes,
+                        accumulated_count: 4,
+                    });
+                    return Ok(Decoded::ImageDataFlushed);
+                }
+                self.current_chunk.type_ = type_str;
+                if !self.decode_options.ignore_crc {
+                    self.current_chunk.crc.reset();
+                    self.current_chunk.crc.update(&type_str.0);
+                }
+                self.current_chunk.remaining = length;
+                self.current_chunk.raw_bytes.clear();
+                self.state = match type_str {
+                    chunk::fdAT => {
+                        if length < 4 {
+                            return Err(DecodingError::Format(
+                                FormatErrorInner::FdatShorterThanFourBytes.into(),
+                            ));
+                        }
+                        Some(State::new_u32(U32ValueKind::ApngSequenceNumber))
+                    }
+                    IDAT => {
+                        self.have_idat = true;
+                        Some(State::ImageData(type_str))
+                    }
+                    _ => Some(State::ReadChunkData(type_str)),
+                };
+                Ok(Decoded::ChunkBegin(length, type_str))
+            }
+            U32ValueKind::Crc(type_str) => {
+                // If ignore_crc is set, do not calculate CRC. We set
+                // sum=val so that it short-circuits to true in the next
+                // if-statement block
+                let sum = if self.decode_options.ignore_crc {
+                    val
+                } else {
+                    self.current_chunk.crc.clone().finalize()
+                };
+
+                if val == sum || CHECKSUM_DISABLED {
+                    self.state = Some(State::new_u32(U32ValueKind::Length));
+                    if type_str == IEND {
+                        Ok(Decoded::ImageEnd)
+                    } else {
+                        Ok(Decoded::ChunkComplete(val, type_str))
+                    }
+                } else if self.decode_options.skip_ancillary_crc_failures
+                    && !chunk::is_critical(type_str)
+                {
+                    // Ignore ancillary chunk with invalid CRC
+                    self.state = Some(State::new_u32(U32ValueKind::Length));
+                    Ok(Decoded::Nothing)
+                } else {
+                    Err(DecodingError::Format(
+                        FormatErrorInner::CrcMismatch {
+                            crc_val: val,
+                            crc_sum: sum,
+                            chunk: type_str,
+                        }
+                        .into(),
+                    ))
+                }
+            }
+            U32ValueKind::ApngSequenceNumber => {
+                debug_assert_eq!(self.current_chunk.type_, chunk::fdAT);
+                let next_seq_no = val;
+
+                // Should be verified by the FdatShorterThanFourBytes check earlier.
+                debug_assert!(self.current_chunk.remaining >= 4);
+                self.current_chunk.remaining -= 4;
+
+                if let Some(seq_no) = self.current_seq_no {
+                    if next_seq_no != seq_no + 1 {
+                        return Err(DecodingError::Format(
+                            FormatErrorInner::ApngOrder {
+                                present: next_seq_no,
+                                expected: seq_no + 1,
+                            }
+                            .into(),
+                        ));
+                    }
+                    self.current_seq_no = Some(next_seq_no);
+                } else {
+                    return Err(DecodingError::Format(FormatErrorInner::MissingFctl.into()));
+                }
+
+                if !self.decode_options.ignore_crc {
+                    let data = next_seq_no.to_be_bytes();
+                    self.current_chunk.crc.update(&data);
+                }
+
+                self.state = Some(State::ImageData(chunk::fdAT));
+                Ok(Decoded::PartialChunk(chunk::fdAT))
             }
         }
     }

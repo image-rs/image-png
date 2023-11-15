@@ -62,6 +62,12 @@ enum State {
     ImageData(ChunkType),
 }
 
+impl State {
+    fn new_u32(kind: U32ValueKind) -> Self {
+        Self::U32(kind)
+    }
+}
+
 #[derive(Debug)]
 /// Result of the decoding process
 pub enum Decoded {
@@ -592,7 +598,7 @@ impl StreamingDecoder {
             Signature(_, signature)
                 if signature == [137, 80, 78, 71, 13, 10, 26] && current_byte == 10 =>
             {
-                self.state = Some(U32(U32ValueKind::Length));
+                self.state = Some(State::new_u32(U32ValueKind::Length));
                 Ok((1, Decoded::Nothing))
             }
             Signature(..) => Err(DecodingError::Format(
@@ -603,7 +609,7 @@ impl StreamingDecoder {
                 val |= u32::from(current_byte);
                 match type_ {
                     Length => {
-                        self.state = Some(U32(Type { length: val }));
+                        self.state = Some(State::new_u32(U32ValueKind::Type { length: val }));
                         Ok((1, Decoded::Nothing))
                     }
                     Type { length } => {
@@ -637,7 +643,7 @@ impl StreamingDecoder {
                                         FormatErrorInner::FdatShorterThanFourBytes.into(),
                                     ));
                                 }
-                                Some(U32(ApngSequenceNumber))
+                                Some(State::new_u32(U32ValueKind::ApngSequenceNumber))
                             }
                             IDAT => {
                                 self.have_idat = true;
@@ -658,7 +664,7 @@ impl StreamingDecoder {
                         };
 
                         if val == sum || CHECKSUM_DISABLED {
-                            self.state = Some(State::U32(U32ValueKind::Length));
+                            self.state = Some(State::new_u32(U32ValueKind::Length));
                             if type_str == IEND {
                                 Ok((1, Decoded::ImageEnd))
                             } else {
@@ -745,7 +751,7 @@ impl StreamingDecoder {
             ReadChunkData(type_str) => {
                 debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
                 if self.current_chunk.remaining == 0 {
-                    self.state = Some(U32(U32ValueKind::Crc(type_str)));
+                    self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
                     Ok((0, Decoded::Nothing))
                 } else {
                     let ChunkState {
@@ -786,7 +792,7 @@ impl StreamingDecoder {
                 self.current_chunk.crc.update(&buf[..consumed]);
                 self.current_chunk.remaining -= consumed as u32;
                 if self.current_chunk.remaining == 0 {
-                    self.state = Some(U32(U32ValueKind::Crc(type_str)));
+                    self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
                 } else {
                     self.state = Some(ImageData(type_str));
                 }
@@ -812,7 +818,7 @@ impl StreamingDecoder {
     }
 
     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
-        self.state = Some(State::U32(U32ValueKind::Crc(type_str)));
+        self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
         if self.info.is_none() && type_str != IHDR {
             return Err(DecodingError::Format(
                 FormatErrorInner::ChunkBeforeIhdr { kind: type_str }.into(),

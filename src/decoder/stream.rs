@@ -616,25 +616,40 @@ impl StreamingDecoder {
                 kind,
                 mut bytes,
                 mut accumulated_count,
-            } if accumulated_count < 4 => {
-                bytes[accumulated_count] = current_byte;
-                accumulated_count += 1;
-                self.state = Some(State::U32 {
-                    kind,
-                    bytes,
-                    accumulated_count,
-                });
-                Ok((1, Decoded::Nothing))
-            }
-            U32 {
-                kind,
-                bytes,
-                accumulated_count,
             } => {
-                debug_assert_eq!(accumulated_count, 4);
-                const CONSUMED_BYTES: usize = 0;
-                self.parse_u32(kind, &bytes, image_data)
-                    .map(|decoded| (CONSUMED_BYTES, decoded))
+                debug_assert!(accumulated_count <= 4);
+                if accumulated_count == 0 && buf.len() >= 4 {
+                    // Handling these `accumulated_count` and `buf.len()` values in a separate `if`
+                    // branch is not strictly necessary - the `else` statement below is already
+                    // capable of handling these values.  The main reason for special-casing these
+                    // values is that they occur fairly frequently and special-casing them results
+                    // in performance gains.
+                    const CONSUMED_BYTES: usize = 4;
+                    self.parse_u32(kind, &buf[0..4], image_data)
+                        .map(|decoded| (CONSUMED_BYTES, decoded))
+                } else {
+                    let remaining_count = 4 - accumulated_count;
+                    let consumed_bytes = {
+                        let available_count = min(remaining_count, buf.len());
+                        bytes[accumulated_count..accumulated_count + available_count]
+                            .copy_from_slice(&buf[0..available_count]);
+                        accumulated_count += available_count;
+                        available_count
+                    };
+
+                    if accumulated_count < 4 {
+                        self.state = Some(U32 {
+                            kind,
+                            bytes,
+                            accumulated_count,
+                        });
+                        Ok((consumed_bytes, Decoded::Nothing))
+                    } else {
+                        debug_assert_eq!(accumulated_count, 4);
+                        self.parse_u32(kind, &bytes, image_data)
+                            .map(|decoded| (consumed_bytes, decoded))
+                    }
+                }
             }
             ParseChunkData(type_str) => {
                 debug_assert!(type_str != IDAT && type_str != chunk::fdAT);

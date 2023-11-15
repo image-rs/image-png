@@ -30,6 +30,12 @@ const CHECKSUM_DISABLED: bool = cfg!(fuzzing);
 /// Kind of `u32` value that is being read via `State::U32`.
 #[derive(Debug)]
 enum U32ValueKind {
+    /// First 4 bytes of the PNG signature - see
+    /// http://www.libpng.org/pub/png/spec/1.2/PNG-Structure.html#PNG-file-signature
+    Signature1stU32,
+    /// Second 4 bytes of the PNG signature - see
+    /// http://www.libpng.org/pub/png/spec/1.2/PNG-Structure.html#PNG-file-signature
+    Signature2ndU32,
     /// Chunk length - see
     /// http://www.libpng.org/pub/png/spec/1.2/PNG-Structure.html#Chunk-layout
     Length,
@@ -46,7 +52,6 @@ enum U32ValueKind {
 
 #[derive(Debug)]
 enum State {
-    Signature(u8, [u8; 7]),
     /// In this state we are reading a u32 value from external input.  We start with
     /// `accumulated_count` set to `0`. After reading or accumulating the required 4 bytes we will
     /// call `parse_32` which will then move onto the next state.
@@ -498,7 +503,7 @@ impl StreamingDecoder {
         inflater.set_ignore_adler32(decode_options.ignore_adler32);
 
         StreamingDecoder {
-            state: Some(State::Signature(0, [0; 7])),
+            state: Some(State::new_u32(U32ValueKind::Signature1stU32)),
             current_chunk: ChunkState::default(),
             inflater,
             info: None,
@@ -510,7 +515,7 @@ impl StreamingDecoder {
 
     /// Resets the StreamingDecoder
     pub fn reset(&mut self) {
-        self.state = Some(State::Signature(0, [0; 7]));
+        self.state = Some(State::new_u32(U32ValueKind::Signature1stU32));
         self.current_chunk.crc = Crc32::new();
         self.current_chunk.remaining = 0;
         self.current_chunk.raw_bytes.clear();
@@ -592,26 +597,10 @@ impl StreamingDecoder {
     ) -> Result<(usize, Decoded), DecodingError> {
         use self::State::*;
 
-        let current_byte = buf[0];
-
         // Driver should ensure that state is never None
         let state = self.state.take().unwrap();
 
         match state {
-            Signature(i, mut signature) if i < 7 => {
-                signature[i as usize] = current_byte;
-                self.state = Some(Signature(i + 1, signature));
-                Ok((1, Decoded::Nothing))
-            }
-            Signature(_, signature)
-                if signature == [137, 80, 78, 71, 13, 10, 26] && current_byte == 10 =>
-            {
-                self.state = Some(State::new_u32(U32ValueKind::Length));
-                Ok((1, Decoded::Nothing))
-            }
-            Signature(..) => Err(DecodingError::Format(
-                FormatErrorInner::InvalidSignature.into(),
-            )),
             U32 {
                 kind,
                 mut bytes,
@@ -729,6 +718,26 @@ impl StreamingDecoder {
         let val = u32::from_be_bytes(bytes);
 
         match kind {
+            U32ValueKind::Signature1stU32 => {
+                if bytes == [137, 80, 78, 71] {
+                    self.state = Some(State::new_u32(U32ValueKind::Signature2ndU32));
+                    Ok(Decoded::Nothing)
+                } else {
+                    Err(DecodingError::Format(
+                        FormatErrorInner::InvalidSignature.into(),
+                    ))
+                }
+            }
+            U32ValueKind::Signature2ndU32 => {
+                if bytes == [13, 10, 26, 10] {
+                    self.state = Some(State::new_u32(U32ValueKind::Length));
+                    Ok(Decoded::Nothing)
+                } else {
+                    Err(DecodingError::Format(
+                        FormatErrorInner::InvalidSignature.into(),
+                    ))
+                }
+            }
             U32ValueKind::Length => {
                 self.state = Some(State::new_u32(U32ValueKind::Type { length: val }));
                 Ok(Decoded::Nothing)

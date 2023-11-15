@@ -27,7 +27,7 @@ pub const CHUNCK_BUFFER_SIZE: usize = 32 * 1024;
 /// be used to detect that build.
 const CHECKSUM_DISABLED: bool = cfg!(fuzzing);
 
-/// Kind of `u32` value that is being read via `State::U32Byte...`.
+/// Kind of `u32` value that is being read via `State::U32`.
 #[derive(Debug)]
 enum U32ValueKind {
     /// Chunk length - see
@@ -47,10 +47,14 @@ enum U32ValueKind {
 #[derive(Debug)]
 enum State {
     Signature(u8, [u8; 7]),
-    U32Byte3(U32ValueKind, u32),
-    U32Byte2(U32ValueKind, u32),
-    U32Byte1(U32ValueKind, u32),
-    U32(U32ValueKind),
+    /// In this state we are reading a u32 value from external input.  We start with
+    /// `accumulated_count` set to `0`. After reading or accumulating the required 4 bytes we will
+    /// handle the u32 and move to the next state.
+    U32 {
+        kind: U32ValueKind,
+        bytes: [u8; 4],
+        accumulated_count: usize,
+    },
     /// In this state we are reading chunk data from external input, and appending it to
     /// `ChunkState::raw_bytes`.
     ReadChunkData(ChunkType),
@@ -64,7 +68,11 @@ enum State {
 
 impl State {
     fn new_u32(kind: U32ValueKind) -> Self {
-        Self::U32(kind)
+        Self::U32 {
+            kind,
+            bytes: [0; 4],
+            accumulated_count: 0,
+        }
     }
 }
 
@@ -604,21 +612,34 @@ impl StreamingDecoder {
             Signature(..) => Err(DecodingError::Format(
                 FormatErrorInner::InvalidSignature.into(),
             )),
-            U32Byte3(type_, mut val) => {
-                use self::U32ValueKind::*;
-                val |= u32::from(current_byte);
-                match type_ {
-                    Length => {
+            U32 {
+                kind,
+                mut bytes,
+                mut accumulated_count,
+            } if accumulated_count < 4 => {
+                bytes[accumulated_count] = current_byte;
+                accumulated_count += 1;
+                self.state = Some(State::U32 {
+                    kind,
+                    bytes,
+                    accumulated_count,
+                });
+                Ok((1, Decoded::Nothing))
+            }
+            U32 {
+                kind,
+                bytes,
+                accumulated_count,
+            } => {
+                debug_assert_eq!(accumulated_count, 4);
+                let val = u32::from_be_bytes(bytes);
+                match kind {
+                    U32ValueKind::Length => {
                         self.state = Some(State::new_u32(U32ValueKind::Type { length: val }));
-                        Ok((1, Decoded::Nothing))
+                        Ok((0, Decoded::Nothing))
                     }
-                    Type { length } => {
-                        let type_str = ChunkType([
-                            (val >> 24) as u8,
-                            (val >> 16) as u8,
-                            (val >> 8) as u8,
-                            val as u8,
-                        ]);
+                    U32ValueKind::Type { length } => {
+                        let type_str = ChunkType(bytes);
                         if type_str != self.current_chunk.type_
                             && (self.current_chunk.type_ == IDAT
                                 || self.current_chunk.type_ == chunk::fdAT)
@@ -626,7 +647,11 @@ impl StreamingDecoder {
                             self.current_chunk.type_ = type_str;
                             self.inflater.finish_compressed_chunks(image_data)?;
                             self.inflater.reset();
-                            self.state = Some(U32Byte3(Type { length }, val & !0xff));
+                            self.state = Some(State::U32 {
+                                kind,
+                                bytes,
+                                accumulated_count,
+                            });
                             return Ok((0, Decoded::ImageDataFlushed));
                         }
                         self.current_chunk.type_ = type_str;
@@ -651,9 +676,9 @@ impl StreamingDecoder {
                             }
                             _ => Some(ReadChunkData(type_str)),
                         };
-                        Ok((1, Decoded::ChunkBegin(length, type_str)))
+                        Ok((0, Decoded::ChunkBegin(length, type_str)))
                     }
-                    Crc(type_str) => {
+                    U32ValueKind::Crc(type_str) => {
                         // If ignore_crc is set, do not calculate CRC. We set
                         // sum=val so that it short-circuits to true in the next
                         // if-statement block
@@ -666,9 +691,9 @@ impl StreamingDecoder {
                         if val == sum || CHECKSUM_DISABLED {
                             self.state = Some(State::new_u32(U32ValueKind::Length));
                             if type_str == IEND {
-                                Ok((1, Decoded::ImageEnd))
+                                Ok((0, Decoded::ImageEnd))
                             } else {
-                                Ok((1, Decoded::ChunkComplete(val, type_str)))
+                                Ok((0, Decoded::ChunkComplete(val, type_str)))
                             }
                         } else if self.decode_options.skip_ancillary_crc_failures
                             && !chunk::is_critical(type_str)
@@ -687,7 +712,7 @@ impl StreamingDecoder {
                             ))
                         }
                     }
-                    ApngSequenceNumber => {
+                    U32ValueKind::ApngSequenceNumber => {
                         debug_assert_eq!(self.current_chunk.type_, chunk::fdAT);
                         let next_seq_no = val;
 
@@ -718,21 +743,9 @@ impl StreamingDecoder {
                         }
 
                         self.state = Some(ImageData(chunk::fdAT));
-                        Ok((1, Decoded::PartialChunk(chunk::fdAT)))
+                        Ok((0, Decoded::PartialChunk(chunk::fdAT)))
                     }
                 }
-            }
-            U32Byte2(type_, val) => {
-                self.state = Some(U32Byte3(type_, val | u32::from(current_byte) << 8));
-                Ok((1, Decoded::Nothing))
-            }
-            U32Byte1(type_, val) => {
-                self.state = Some(U32Byte2(type_, val | u32::from(current_byte) << 16));
-                Ok((1, Decoded::Nothing))
-            }
-            U32(type_) => {
-                self.state = Some(U32Byte1(type_, u32::from(current_byte) << 24));
-                Ok((1, Decoded::Nothing))
             }
             ParseChunkData(type_str) => {
                 debug_assert!(type_str != IDAT && type_str != chunk::fdAT);

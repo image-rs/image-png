@@ -1716,7 +1716,7 @@ mod tests {
             ..Default::default()
         };
         write_fctl(w, &fctl);
-        write_rgba8_idat_with_width(w, width);
+        write_rgba8_idats(w, width, 0x7fffffff);
 
         fctl.sequence_number += 1;
         write_fctl(w, &fctl);

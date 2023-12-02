@@ -11,48 +11,40 @@ pub type BoxResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn main() -> BoxResult<()> {
     // # Decode
-    // Read image called test.png in the target folder of the library
-    let path = Path::new(r"./target/test.png");
+    // Read test image from pngsuite
+    let path_in = Path::new(r"./tests/pngsuite/basi0g01.png");
     // The decoder is a build for reader and can be used to set various decoding options
     // via `Transformations`. The default output transformation is `Transformations::IDENTITY`.
-    let decoder = png::Decoder::new(File::open(path)?);
+    let decoder = png::Decoder::new(File::open(path_in)?);
     let mut reader = decoder.read_info()?;
     // Allocate the output buffer.
-    let mut buf = vec![0; reader.output_buffer_size()];
     let png_info = reader.info();
+    let mut buf = vec![0; png_info.bytes_per_pixel()  * (png_info.width*png_info.height) as usize];
     dbg!(png_info);
 
     // # Encode
-    let path = Path::new(r"./target/test_modified.png");
-    let file = File::create(path)?;
+    let path_out = Path::new(r"./target/test_modified.png");
+    let file = File::create(path_out)?;
     let ref mut w = BufWriter::new(file);
     // With previous info
-    let mut encoder = png::Encoder::new_with_info(w, png_info.clone());
+    let mut info_out = png_info.clone();
+    let info_default = png::Info::default();
+    
+    info_out.interlaced = info_default.interlaced;
+    let mut encoder = png::Encoder::new_with_info(w,info_out);
+    encoder.set_depth(png_info.bit_depth);
     // Edit some attribute
     encoder.add_text_chunk(
         "Testing tEXt".to_string(),
         "This is a tEXt chunk that will appear before the IDAT chunks.".to_string(),
     )?;
-    //encoder.set_color(png::ColorType::Rgba);
-    //encoder.set_depth(png::BitDepth::Eight);
-    //// 1.0 / 2.2, scaled by 100000
-    //encoder.set_source_gamma(png::ScaledFloat::from_scaled(45455));
-    //// 1.0 / 2.2, unscaled, but rounded
-    //encoder.set_source_gamma(png::ScaledFloat::new(1.0 / 2.2));
-    //// Using unscaled instantiation here
-    //let source_chromaticities = png::SourceChromaticities::new(
-    //(0.31270, 0.32900),
-    //(0.64000, 0.33000),
-    //(0.30000, 0.60000),
-    //(0.15000, 0.06000)
-    //);
-    //encoder.set_source_chromaticities(source_chromaticities);
 
     // Save picture with changed info
     let mut writer = encoder.write_header()?;
     let mut counter = 0u8;
     while let Ok(info) = reader.next_frame(&mut buf) {
         let bytes = &buf[..info.buffer_size()];
+        println!("{} {}",info.buffer_size(),reader.output_buffer_size());
         writer.write_image_data(&bytes)?;
         counter += 1;
         println!("Written frame: {}", counter);

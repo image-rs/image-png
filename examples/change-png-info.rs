@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2023 Lukas Schattenhofer <lukas.schattenhofer@ose-germany.de>
-// SPDX-License-Identifier: MIT OR Apache-2.0
-
 /// Tests "editing"/re-encoding of an image:
 /// decoding, editing, re-encoding
 use std::fs::File;
@@ -32,7 +29,7 @@ fn main() -> BoxResult<()> {
 
     // Edit previous info
     info_out.interlaced = info_default.interlaced;
-    let mut encoder = png::Encoder::new_with_info(w, info_out);
+    let mut encoder = png::Encoder::with_info(w, info_out);
     encoder.set_depth(png_info.bit_depth);
 
     // Edit some attribute

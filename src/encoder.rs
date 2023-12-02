@@ -169,7 +169,7 @@ impl<'a, W: Write> Encoder<'a, W> {
         }
     }
 
-    pub fn new_with_info(w: W, info: Info<'a>) -> Encoder<'a, W> {
+    pub fn with_info(w: W, info: Info<'a>) -> Encoder<'a, W> {
         Encoder {
             w,
             info,

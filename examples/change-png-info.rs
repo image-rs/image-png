@@ -3,7 +3,6 @@
 
 /// Tests "editing"/re-encoding of an image:
 /// decoding, editing, re-encoding
-
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
@@ -19,20 +18,23 @@ fn main() -> BoxResult<()> {
     let mut reader = decoder.read_info()?;
     // Allocate the output buffer.
     let png_info = reader.info();
-    let mut buf = vec![0; png_info.bytes_per_pixel()  * (png_info.width*png_info.height) as usize];
+    let mut buf = vec![0; reader.output_buffer_size()];
     dbg!(png_info);
 
     // # Encode
     let path_out = Path::new(r"./target/test_modified.png");
     let file = File::create(path_out)?;
     let ref mut w = BufWriter::new(file);
-    // With previous info
+
+    // Get defaults for interlaced parameter.
     let mut info_out = png_info.clone();
     let info_default = png::Info::default();
-    
+
+    // Edit previous info
     info_out.interlaced = info_default.interlaced;
-    let mut encoder = png::Encoder::new_with_info(w,info_out);
+    let mut encoder = png::Encoder::new_with_info(w, info_out);
     encoder.set_depth(png_info.bit_depth);
+
     // Edit some attribute
     encoder.add_text_chunk(
         "Testing tEXt".to_string(),
@@ -44,7 +46,7 @@ fn main() -> BoxResult<()> {
     let mut counter = 0u8;
     while let Ok(info) = reader.next_frame(&mut buf) {
         let bytes = &buf[..info.buffer_size()];
-        println!("{} {}",info.buffer_size(),reader.output_buffer_size());
+        println!("{} {}", info.buffer_size(), reader.output_buffer_size());
         writer.write_image_data(&bytes)?;
         counter += 1;
         println!("Written frame: {}", counter);

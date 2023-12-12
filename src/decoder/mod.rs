@@ -5,7 +5,6 @@ pub use self::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
 use self::stream::{FormatErrorInner, CHUNCK_BUFFER_SIZE};
 
 use std::io::{BufRead, BufReader, Read};
-use std::mem;
 use std::ops::Range;
 
 use crate::chunk;
@@ -76,25 +75,8 @@ pub struct Decoder<R: Read> {
     limits: Limits,
 }
 
-/// A row of data with interlace information attached.
-#[derive(Clone, Copy, Debug)]
-pub struct InterlacedRow<'data> {
-    data: &'data [u8],
-    interlace: InterlaceInfo,
-}
-
-impl<'data> InterlacedRow<'data> {
-    pub fn data(&self) -> &'data [u8] {
-        self.data
-    }
-
-    pub fn interlace(&self) -> InterlaceInfo {
-        self.interlace
-    }
-}
-
 /// PNG (2003) specifies two interlace modes, but reserves future extensions.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterlaceInfo {
     /// the null method means no interlacing
     Null,
@@ -110,18 +92,6 @@ pub enum InterlaceInfo {
     /// 5 6 5 6 5 6 5 6
     /// 7 7 7 7 7 7 7 7
     Adam7 { pass: u8, line: u32, width: u32 },
-}
-
-/// A row of data without interlace information.
-#[derive(Clone, Copy, Debug)]
-pub struct Row<'data> {
-    data: &'data [u8],
-}
-
-impl<'data> Row<'data> {
-    pub fn data(&self) -> &'data [u8] {
-        self.data
-    }
 }
 
 impl<R: Read> Decoder<R> {
@@ -214,7 +184,6 @@ impl<R: Read> Decoder<R> {
             prev_start: 0,
             current_start: 0,
             transform: self.transform,
-            scratch_buffer: Vec::new(),
             limits: self.limits,
         };
 
@@ -355,10 +324,6 @@ pub struct Reader<R: Read> {
     current_start: usize,
     /// Output transformations
     transform: Transformations,
-    /// This buffer is only used so that `next_row` and `next_interlaced_row` can return reference
-    /// to a byte slice. In a future version of this library, this buffer will be removed and
-    /// `next_row` and `next_interlaced_row` will write directly into a user provided output buffer.
-    scratch_buffer: Vec<u8>,
     /// How resources we can spend (for example, on allocation).
     limits: Limits,
 }
@@ -508,25 +473,21 @@ impl<R: Read> Reader<R> {
         self.prev_start = 0;
         let width = self.info().width;
         if self.info().interlaced {
-            while let Some(InterlacedRow {
-                data: row,
-                interlace,
-                ..
-            }) = self.next_interlaced_row()?
-            {
+            let mut row = vec![0; self.output_line_size(width)];
+            while let Some(interlace) = self.next_row(&mut row)? {
                 let (line, pass) = match interlace {
                     InterlaceInfo::Adam7 { line, pass, .. } => (line, pass),
                     InterlaceInfo::Null => unreachable!("expected interlace information"),
                 };
                 let samples = color_type.samples() as u8;
-                utils::expand_pass(buf, width, row, pass, line, samples * (bit_depth as u8));
+                utils::expand_pass(buf, width, &row, pass, line, samples * (bit_depth as u8));
             }
         } else {
             for row in buf
                 .chunks_exact_mut(output_info.line_size)
                 .take(self.subframe.height as usize)
             {
-                self.next_interlaced_row_impl(self.subframe.rowlen, row)?;
+                self.next_row_impl(self.subframe.rowlen, row)?;
             }
         }
 
@@ -556,14 +517,12 @@ impl<R: Read> Reader<R> {
         Ok(output_info)
     }
 
-    /// Returns the next processed row of the image
-    pub fn next_row(&mut self) -> Result<Option<Row>, DecodingError> {
-        self.next_interlaced_row()
-            .map(|v| v.map(|v| Row { data: v.data }))
-    }
-
-    /// Returns the next processed row of the image
-    pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow>, DecodingError> {
+    /// Returns the next processed row of the image.
+    ///
+    /// A `ParameterError` will be returned if `row` doesn't have enough space.  For initial
+    /// interlaced rows a smaller buffer may work, but providing a buffer that can hold
+    /// `self.output_line_size(self.info().width` bytes should always avoid that error.
+    pub fn next_row(&mut self, row: &mut [u8]) -> Result<Option<InterlaceInfo>, DecodingError> {
         let (rowlen, interlace) = match self.next_pass() {
             Some((rowlen, interlace)) => (rowlen, interlace),
             None => return Ok(None),
@@ -575,28 +534,27 @@ impl<R: Read> Reader<R> {
             self.subframe.width
         };
         let output_line_size = self.output_line_size(width);
+        if row.len() < output_line_size {
+            return Err(DecodingError::Parameter(
+                ParameterErrorKind::ImageBufferSize {
+                    expected: output_line_size,
+                    actual: row.len(),
+                }
+                .into(),
+            ));
+        }
 
-        // TODO: change the interface of `next_interlaced_row` to take an output buffer instead of
-        // making us return a reference to a buffer that we own.
-        let mut output_buffer = mem::take(&mut self.scratch_buffer);
-        output_buffer.resize(output_line_size, 0u8);
-        let ret = self.next_interlaced_row_impl(rowlen, &mut output_buffer);
-        self.scratch_buffer = output_buffer;
-        ret?;
-
-        Ok(Some(InterlacedRow {
-            data: &self.scratch_buffer[..output_line_size],
-            interlace,
-        }))
+        self.next_row_impl(rowlen, &mut row[..output_line_size])?;
+        Ok(Some(interlace))
     }
 
     /// Fetch the next interlaced row and filter it according to our own transformations.
-    fn next_interlaced_row_impl(
+    fn next_row_impl(
         &mut self,
         rowlen: usize,
         output_buffer: &mut [u8],
     ) -> Result<(), DecodingError> {
-        self.next_raw_interlaced_row(rowlen)?;
+        self.next_raw_row(rowlen)?;
         assert_eq!(self.current_start - self.prev_start, rowlen - 1);
         let row = &self.data_stream[self.prev_start..self.current_start];
 
@@ -721,7 +679,7 @@ impl<R: Read> Reader<R> {
     /// Write the next raw interlaced row into `self.prev`.
     ///
     /// The scanline is filtered against the previous scanline according to the specification.
-    fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
+    fn next_raw_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
         // Read image data until we have at least one full row (but possibly more than one).
         while self.data_stream.len() - self.current_start < rowlen {
             if self.subframe.consumed_and_flushed {
@@ -908,7 +866,7 @@ fn expand_gray_u8(row: &[u8], buffer: &mut [u8], info: &Info, trns: Option<Optio
 
 #[cfg(test)]
 mod tests {
-    use super::Decoder;
+    use super::{Decoder, InterlaceInfo};
     use std::io::{BufRead, Read, Result};
     use std::mem::discriminant;
 
@@ -963,5 +921,87 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(discriminant(&normal), discriminant(&smal));
+    }
+
+    #[test]
+    fn next_row_when_no_interlacing() {
+        const IMG: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/pngsuite/basn0g08.png"
+        ));
+
+        let mut reader = Decoder::new(IMG).read_info().unwrap();
+        assert_eq!(reader.info().height, 32);
+        assert_eq!(reader.info().width, 32);
+        let rowlen = reader.output_line_size(32);
+        let mut frame = vec![0; rowlen * reader.info().height as usize];
+
+        for row in frame.chunks_exact_mut(rowlen) {
+            let interlace_info = reader.next_row(row).unwrap();
+            assert_eq!(interlace_info, Some(InterlaceInfo::Null));
+        }
+        assert_eq!(2018200142, crc32fast::hash(&frame));
+
+        // No more rows expected:
+        assert!(reader.next_row(&mut frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn next_row_when_interlacing() {
+        const IMG: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/pngsuite/basi0g08.png"
+        ));
+
+        let mut reader = Decoder::new(IMG).read_info().unwrap();
+        assert_eq!(reader.info().height, 32);
+        assert_eq!(reader.info().width, 32);
+
+        let mut row = vec![0; reader.output_line_size(4)];
+        let interlace_info = reader.next_row(&mut row).unwrap();
+        assert_eq!(
+            interlace_info,
+            Some(InterlaceInfo::Adam7 {
+                pass: 1,
+                line: 0,
+                width: 4,
+            })
+        );
+        assert_eq!(1996031139, crc32fast::hash(&row));
+    }
+
+    #[test]
+    fn next_row_when_buffer_too_small() {
+        const IMG: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/pngsuite/basi0g08.png"
+        ));
+
+        let mut reader = Decoder::new(IMG).read_info().unwrap();
+        assert_eq!(reader.info().height, 32);
+        assert_eq!(reader.info().width, 32);
+
+        // Pass 1 of Adam7 interlacing (for this particular image dimensions) has 4 pixels per row.
+        // Since we pass 1 less than the `output_line_size`, we expect to get an error back.
+        let mut row = vec![0; reader.output_line_size(4) - 1];
+        let err = reader.next_row(&mut row);
+        assert!(err.is_err());
+
+        // Let's also verify the error message has the expected contents.
+        let msg = format!("{err:?}");
+        let expected_substrings = [
+            "ParameterError",
+            "ImageBufferSize",
+            "expected: 4",
+            "actual: 3",
+        ];
+        for substr in expected_substrings.iter() {
+            assert!(
+                msg.contains(substr),
+                "missing substr = {}, err msg = {}",
+                substr,
+                msg
+            );
+        }
     }
 }

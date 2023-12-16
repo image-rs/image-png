@@ -989,7 +989,8 @@ impl StreamingDecoder {
                 FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
             ))
         } else {
-            self.limits.reserve_bytes(self.current_chunk.raw_bytes.len())?;
+            self.limits
+                .reserve_bytes(self.current_chunk.raw_bytes.len())?;
             info.palette = Some(Cow::Owned(self.current_chunk.raw_bytes.clone()));
             Ok(Decoded::Nothing)
         }
@@ -1003,7 +1004,8 @@ impl StreamingDecoder {
             ));
         }
         let (color_type, bit_depth) = { (info.color_type, info.bit_depth as u8) };
-        self.limits.reserve_bytes(self.current_chunk.raw_bytes.len())?;
+        self.limits
+            .reserve_bytes(self.current_chunk.raw_bytes.len())?;
         let mut vec = self.current_chunk.raw_bytes.clone();
         let len = vec.len();
         match color_type {

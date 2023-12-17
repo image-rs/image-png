@@ -5,16 +5,18 @@
 //! ## The decoder
 //!
 //! The most important types for decoding purposes are [`Decoder`](struct.Decoder.html) and
-//! [`Reader`](struct.Reader.html). They both wrap a `std::io::Read`.
-//! `Decoder` serves as a builder for `Reader`. Calling `Decoder::read_info` reads from the `Read` until the
-//! image data is reached.
+//! [`Reader`](struct.Reader.html). They both wrap a `std::io::BufRead`.
+//! `Decoder` serves as a builder for `Reader`. Calling `Decoder::read_info` reads from the
+//! `BufRead` until the image data is reached.
 //!
 //! ### Using the decoder
 //! ```
 //! use std::fs::File;
+//! use std::io::BufReader;
 //! // The decoder is a build for reader and can be used to set various decoding options
 //! // via `Transformations`. The default output transformation is `Transformations::IDENTITY`.
-//! let decoder = png::Decoder::new(File::open("tests/pngsuite/basi0g01.png").unwrap());
+//! let reader = BufReader::new(File::open("tests/pngsuite/basi0g01.png").unwrap());
+//! let decoder = png::Decoder::new(reader);
 //! let mut reader = decoder.read_info().unwrap();
 //! // Allocate the output buffer.
 //! let mut buf = vec![0; reader.output_buffer_size()];

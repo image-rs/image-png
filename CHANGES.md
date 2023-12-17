@@ -1,4 +1,9 @@
-## Unreleased
+## Unreleased (TODO: breaking changes require increasing semver to 0.18.x)
+
+* Performance improvements.
+* Breaking API changes (required by the performance-related work):
+  - Changed the generic constraints of `png::Decoder<R>` and `png::Reader<R>`
+    to require `R: BufRead` (instead of just `R: Read`).
 
 ## 0.17.10
 

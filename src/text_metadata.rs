@@ -24,17 +24,18 @@
 //!
 //!  ```
 //!  use std::fs::File;
+//!  use std::io::BufReader;
 //!  use std::iter::FromIterator;
 //!  use std::path::PathBuf;
 //!
 //!  // Opening a png file that has a zTXt chunk
-//!  let decoder = png::Decoder::new(
-//!      File::open(PathBuf::from_iter([
+//!  let decoder = png::Decoder::new(BufReader::new(
+//!     File::open(PathBuf::from_iter([
 //!          "tests",
 //!          "text_chunk_examples",
 //!          "ztxt_example.png",
 //!      ]))
-//!      .unwrap(),
+//!      .unwrap()),
 //!  );
 //!  let mut reader = decoder.read_info().unwrap();
 //!  // If the text chunk is before the image data frames, `reader.info()` already contains the text.

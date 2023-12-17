@@ -1,6 +1,6 @@
 [package]
 name = "png"
-version = "0.17.10"
+version = "0.17.10" # TODO: Increase semver to account for breaking API changes
 license = "MIT OR Apache-2.0"
 
 description = "PNG decoding and encoding library in pure Rust"

@@ -1717,7 +1717,7 @@ mod tests {
 
     use rand::{thread_rng, Rng};
     use std::fs::File;
-    use std::io::{Cursor, Write};
+    use std::io::{BufReader, Cursor, Write};
     use std::{cmp, io};
 
     #[test]
@@ -1734,7 +1734,7 @@ mod tests {
                 }
                 eprintln!("{}", path.display());
                 // Decode image
-                let decoder = Decoder::new(File::open(path).unwrap());
+                let decoder = Decoder::new(BufReader::new(File::open(path).unwrap()));
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
@@ -1779,7 +1779,7 @@ mod tests {
                     continue;
                 }
                 // Decode image
-                let decoder = Decoder::new(File::open(path).unwrap());
+                let decoder = Decoder::new(BufReader::new(File::open(path).unwrap()));
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
@@ -1823,7 +1823,7 @@ mod tests {
         for &bit_depth in &[1u8, 2, 4, 8] {
             // Do a reference decoding, choose a fitting palette image from pngsuite
             let path = format!("tests/pngsuite/basn3p0{}.png", bit_depth);
-            let decoder = Decoder::new(File::open(&path).unwrap());
+            let decoder = Decoder::new(BufReader::new(File::open(&path).unwrap()));
             let mut reader = decoder.read_info().unwrap();
 
             let mut decoded_pixels = vec![0; reader.output_buffer_size()];

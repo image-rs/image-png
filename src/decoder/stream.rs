@@ -858,8 +858,8 @@ impl StreamingDecoder {
 
         // Double if necessary, but no more than until the limit is reached.
         let reserve_size = max.saturating_sub(buffer.capacity()).min(buffer.len());
-        buffer.reserve_exact(reserve_size);
         self.limits.reserve_bytes(reserve_size)?;
+        buffer.reserve_exact(reserve_size);
 
         if buffer.capacity() == buffer.len() {
             Err(DecodingError::LimitsExceeded)

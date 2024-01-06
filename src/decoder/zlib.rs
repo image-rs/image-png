@@ -2,6 +2,26 @@ use super::{stream::FormatErrorInner, DecodingError};
 
 use fdeflate::Decompressor;
 
+/// [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
+/// "deflate/inflate compression with a sliding window (which is an upper bound on the
+/// distances appearing in the deflate stream) of at most 32768 bytes".
+///
+/// `fdeflate` requires that we keep this many most recently decompressed bytes in the
+/// `out_buffer` - this allows referring back to them when handling "length and distance
+/// codes" in the deflate stream).
+const LOOKBACK_SIZE: usize = 32768;
+
+/// Threshold for postponing compacting `ZlibStream::out_buffers`.  See
+/// `compact_out_buffer_if_needed` for more details.
+///
+/// Higher factors result in higher memory usage, but the compaction cost is lower - factor of 4
+/// means that 1 byte gets copied during compaction for 3 decompressed bytes.)
+///
+/// TODO: The factor of 4 is an ad-hoc heuristic.  Consider measuring and using a different
+/// factor.  (Early experiments seem to indicate that factor of 4 is faster than a factor of
+/// 2 and 4 * `LOOKBACK_SIZE` seems like an acceptable memory trade-off.
+const COMPACTION_THRESHOLD: usize = LOOKBACK_SIZE * 4;
+
 /// Maximum size of the output slice passed to `fdeflate::Decompressor::read`.
 ///
 /// This helps to ensure that the decompressed data fits into L1 cache as the data
@@ -67,6 +87,19 @@ impl ZlibStream {
 
     pub(crate) fn set_max_total_output(&mut self, n: usize) {
         self.max_total_output = n;
+
+        // Allocate `out_buffer` capacity once.  `debug_assert_eq` in `prepare_vec_for_appending`
+        // double-checks that we don't reallocate.
+        const MAX_UNCOMPACTED_SIZE: usize =
+            COMPACTION_THRESHOLD + MAX_INCREMENTAL_DECOMPRESSION_SIZE;
+        let reserved_capacity = if n > MAX_UNCOMPACTED_SIZE {
+            MAX_UNCOMPACTED_SIZE
+        } else {
+            n
+        };
+        self.out_buffer
+            .reserve(reserved_capacity - self.out_buffer.len());
+        debug_assert!(self.out_buffer.capacity() >= reserved_capacity);
     }
 
     /// Set the `ignore_adler32` flag and return `true` if the flag was
@@ -190,7 +223,16 @@ impl ZlibStream {
         let desired_len = desired_len.min(isize::max_value() as usize);
 
         if self.out_buffer.len() < desired_len {
+            #[cfg(debug_assertions)]
+            let old_capacity = self.out_buffer.capacity();
+
             self.out_buffer.resize(desired_len, 0u8);
+
+            #[cfg(debug_assertions)]
+            if self.max_total_output != usize::MAX {
+                let new_capacity = self.out_buffer.capacity();
+                debug_assert_eq!(old_capacity, new_capacity);
+            }
         }
     }
 
@@ -202,24 +244,9 @@ impl ZlibStream {
     }
 
     fn compact_out_buffer_if_needed(&mut self) {
-        // [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
-        // "deflate/inflate compression with a sliding window (which is an upper bound on the
-        // distances appearing in the deflate stream) of at most 32768 bytes".
-        //
-        // `fdeflate` requires that we keep this many most recently decompressed bytes in the
-        // `out_buffer` - this allows referring back to them when handling "length and distance
-        // codes" in the deflate stream).
-        const LOOKBACK_SIZE: usize = 32768;
-
         // Compact `self.out_buffer` when "needed".  Doing this conditionally helps to put an upper
         // bound on the amortized cost of copying the data within `self.out_buffer`.
-        //
-        // TODO: The factor of 4 is an ad-hoc heuristic.  Consider measuring and using a different
-        // factor.  (Early experiments seem to indicate that factor of 4 is faster than a factor of
-        // 2 and 4 * `LOOKBACK_SIZE` seems like an acceptable memory trade-off.  Higher factors
-        // result in higher memory usage, but the compaction cost is lower - factor of 4 means
-        // that 1 byte gets copied during compaction for 3 decompressed bytes.)
-        if self.out_pos > LOOKBACK_SIZE * 4 {
+        if self.out_pos > COMPACTION_THRESHOLD {
             // Only preserve the `lookback_buffer` and "throw away" the earlier prefix.
             let lookback_buffer = self.out_pos.saturating_sub(LOOKBACK_SIZE)..self.out_pos;
             let preserved_len = lookback_buffer.len();

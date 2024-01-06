@@ -1,6 +1,19 @@
-use super::{stream::FormatErrorInner, DecodingError, CHUNCK_BUFFER_SIZE};
+use super::{stream::FormatErrorInner, DecodingError};
 
 use fdeflate::Decompressor;
+
+/// Maximum size of the output slice passed to `fdeflate::Decompressor::read`.
+///
+/// This helps to ensure that the decompressed data fits into L1 cache as the data
+/// gets written into `ZlibStream::out_buffer` and then copied into into `image_data` provided
+/// by the `ZlibStream`'s client.
+///
+/// TODO: Investigate lowering this constant.  In theory a lower constant should help to keep
+/// the entire working set within L1 cache (this incremental chunk of data also needs to
+/// be "unfiltered" and then copied into the `png` crate client's output; we also need to
+/// account for memory pressure from `fdeflate`'s state).  Interestingly, early experiments
+/// show that setting this constant to 8192 regresses the performance in some cases.
+const MAX_INCREMENTAL_DECOMPRESSION_SIZE: usize = 16384;
 
 /// Ergonomics wrapper around `miniz_oxide::inflate::stream` for zlib compressed data.
 pub(super) struct ZlibStream {
@@ -90,9 +103,16 @@ impl ZlibStream {
             self.state.ignore_adler32();
         }
 
+        let incremental_out_buffer = {
+            let end = self
+                .out_pos
+                .saturating_add(MAX_INCREMENTAL_DECOMPRESSION_SIZE)
+                .min(self.out_buffer.len());
+            &mut self.out_buffer[..end]
+        };
         let (in_consumed, out_consumed) = self
             .state
-            .read(data, self.out_buffer.as_mut_slice(), self.out_pos, false)
+            .read(data, incremental_out_buffer, self.out_pos, false)
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
             })?;
@@ -156,34 +176,22 @@ impl ZlibStream {
             self.max_total_output = usize::MAX;
         }
 
-        let current_len = self.out_buffer.len();
         let desired_len = self
             .out_pos
-            .saturating_add(CHUNCK_BUFFER_SIZE)
-            .min(self.max_total_output);
-        if current_len >= desired_len {
-            return;
+            .saturating_add(MAX_INCREMENTAL_DECOMPRESSION_SIZE);
+
+        // Allocate at most `self.max_total_output`.  This avoids unnecessarily allocating and
+        // zeroing-out a bigger `out_buffer` than necessary.
+        let desired_len = desired_len.min(self.max_total_output);
+
+        // Ensure the allocation request is valid.
+        // TODO: maximum allocation limits?
+        const _: () = assert!((isize::max_value() as usize) < u64::max_value() as usize);
+        let desired_len = desired_len.min(isize::max_value() as usize);
+
+        if self.out_buffer.len() < desired_len {
+            self.out_buffer.resize(desired_len, 0u8);
         }
-
-        let buffered_len = self.decoding_size(self.out_buffer.len());
-        debug_assert!(self.out_buffer.len() <= buffered_len);
-        self.out_buffer.resize(buffered_len, 0u8);
-    }
-
-    fn decoding_size(&self, len: usize) -> usize {
-        // Allocate one more chunk size than currently or double the length while ensuring that the
-        // allocation is valid and that any cursor within it will be valid.
-        len
-            // This keeps the buffer size a power-of-two, required by miniz_oxide.
-            .saturating_add(CHUNCK_BUFFER_SIZE.max(len))
-            // Ensure all buffer indices are valid cursor positions.
-            // Note: both cut off and zero extension give correct results.
-            .min(u64::max_value() as usize)
-            // Ensure the allocation request is valid.
-            // TODO: maximum allocation limits?
-            .min(isize::max_value() as usize)
-            // Don't unnecessarily allocate more than `max_total_output`.
-            .min(self.max_total_output)
     }
 
     fn transfer_finished_data(&mut self, image_data: &mut Vec<u8>) -> usize {

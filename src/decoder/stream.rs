@@ -1259,7 +1259,9 @@ impl StreamingDecoder {
         let width = buf.read_be()?;
         let height = buf.read_be()?;
         if width == 0 || height == 0 {
-            return Err(DecodingError::Format(FormatErrorInner::InvalidDimensions.into()))
+            return Err(DecodingError::Format(
+                FormatErrorInner::InvalidDimensions.into(),
+            ));
         }
         let bit_depth = buf.read_be()?;
         let bit_depth = match BitDepth::from_u8(bit_depth) {

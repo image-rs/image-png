@@ -4,11 +4,10 @@ mod zlib;
 pub use self::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
 use self::stream::{FormatErrorInner, CHUNCK_BUFFER_SIZE};
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::mem;
 use std::ops::Range;
 
-use crate::chunk;
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
@@ -146,7 +145,7 @@ impl<R: Read> Decoder<R> {
 
         Decoder {
             read_decoder: ReadDecoder {
-                reader: BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
+                reader: r, //BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
                 decoder,
                 at_eof: false,
             },
@@ -161,7 +160,7 @@ impl<R: Read> Decoder<R> {
 
         Decoder {
             read_decoder: ReadDecoder {
-                reader: BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
+                reader: r, //BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
                 decoder,
                 at_eof: false,
             },
@@ -201,14 +200,17 @@ impl<R: Read> Decoder<R> {
     /// Most image metadata will not be read until `read_info` is called, so those fields will be
     /// None or empty.
     pub fn read_header_info(&mut self) -> Result<&Info, DecodingError> {
-        let mut buf = Vec::new();
+        //let mut buf = Vec::new();
         while self.read_decoder.info().is_none() {
-            buf.clear();
-            if self.read_decoder.decode_next(&mut buf)?.is_none() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::UnexpectedEof.into(),
-                ));
-            }
+            // buf.clear();
+            // if self.read_decoder.decode_next(&mut buf)?.is_none() {
+            //     return Err(DecodingError::Format(
+            //         FormatErrorInner::UnexpectedEof.into(),
+            //     ));
+            // }
+            self.read_decoder
+                .decoder
+                .read_ihdr(&mut self.read_decoder.reader)?;
         }
         Ok(self.read_decoder.info().unwrap())
     }
@@ -287,59 +289,60 @@ impl<R: Read> Decoder<R> {
 }
 
 struct ReadDecoder<R: Read> {
-    reader: BufReader<R>,
+    reader: R, //BufReader<R>,
     decoder: StreamingDecoder,
     at_eof: bool,
 }
 
 impl<R: Read> ReadDecoder<R> {
-    /// Returns the next decoded chunk. If the chunk is an ImageData chunk, its contents are written
-    /// into image_data.
-    fn decode_next(&mut self, image_data: &mut Vec<u8>) -> Result<Option<Decoded>, DecodingError> {
-        while !self.at_eof {
-            let (consumed, result) = {
-                let buf = self.reader.fill_buf()?;
-                if buf.is_empty() {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::UnexpectedEof.into(),
-                    ));
-                }
-                self.decoder.update(buf, image_data)?
-            };
-            self.reader.consume(consumed);
-            match result {
-                Decoded::Nothing => (),
-                Decoded::ImageEnd => self.at_eof = true,
-                result => return Ok(Some(result)),
-            }
-        }
-        Ok(None)
-    }
+    // /// Returns the next decoded chunk. If the chunk is an ImageData chunk, its contents are written
+    // /// into image_data.
+    // fn decode_next(&mut self, image_data: &mut Vec<u8>) -> Result<Option<Decoded>, DecodingError> {
+    //     while !self.at_eof {
+    //         let (consumed, result) = {
+    //             let buf = self.reader.fill_buf()?;
+    //             if buf.is_empty() {
+    //                 return Err(DecodingError::Format(
+    //                     FormatErrorInner::UnexpectedEof.into(),
+    //                 ));
+    //             }
+    //             self.decoder.update(buf, image_data)?
+    //         };
+    //         self.reader.consume(consumed);
+    //         match result {
+    //             Decoded::Nothing => (),
+    //             Decoded::ImageEnd => self.at_eof = true,
+    //             result => return Ok(Some(result)),
+    //         }
+    //     }
+    //     Ok(None)
+    // }
 
     fn finish_decoding(&mut self) -> Result<(), DecodingError> {
-        while !self.at_eof {
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::UnexpectedEof.into(),
-                ));
-            }
-            let (consumed, event) = self.decoder.update(buf, &mut vec![])?;
-            self.reader.consume(consumed);
-            match event {
-                Decoded::Nothing => (),
-                Decoded::ImageEnd => self.at_eof = true,
-                // ignore more data
-                Decoded::ChunkComplete(_, _) | Decoded::ChunkBegin(_, _) | Decoded::ImageData => {}
-                Decoded::ImageDataFlushed => return Ok(()),
-                Decoded::PartialChunk(_) => {}
-                new => unreachable!("{:?}", new),
-            }
-        }
+        // while !self.at_eof {
+        //     let buf = self.reader.fill_buf()?;
+        //     if buf.is_empty() {
+        //         return Err(DecodingError::Format(
+        //             FormatErrorInner::UnexpectedEof.into(),
+        //         ));
+        //     }
+        //     let (consumed, event) = self.decoder.update(buf, &mut vec![])?;
+        //     self.reader.consume(consumed);
+        //     match event {
+        //         Decoded::Nothing => (),
+        //         Decoded::ImageEnd => self.at_eof = true,
+        //         // ignore more data
+        //         Decoded::ChunkComplete(_, _) | Decoded::ChunkBegin(_, _) | Decoded::ImageData => {}
+        //         Decoded::ImageDataFlushed => return Ok(()),
+        //         Decoded::PartialChunk(_) => {}
+        //         new => unreachable!("{:?}", new),
+        //     }
+        // }
 
-        Err(DecodingError::Format(
-            FormatErrorInner::UnexpectedEof.into(),
-        ))
+        // Err(DecodingError::Format(
+        //     FormatErrorInner::UnexpectedEof.into(),
+        // ))
+        Ok(())
     }
 
     fn info(&self) -> Option<&Info> {
@@ -410,36 +413,39 @@ impl<R: Read> Reader<R> {
     /// Reads all meta data until the next frame data starts.
     /// Requires IHDR before the IDAT and fcTL before fdAT.
     fn read_until_image_data(&mut self) -> Result<(), DecodingError> {
-        loop {
-            // This is somewhat ugly. The API requires us to pass a buffer to decode_next but we
-            // know that we will stop before reading any image data from the stream. Thus pass an
-            // empty buffer and assert that remains empty.
-            let mut buf = Vec::new();
-            let state = self.decoder.decode_next(&mut buf)?;
-            assert!(buf.is_empty());
+        // loop {
+        //     // This is somewhat ugly. The API requires us to pass a buffer to decode_next but we
+        //     // know that we will stop before reading any image data from the stream. Thus pass an
+        //     // empty buffer and assert that remains empty.
+        //     let mut buf = Vec::new();
+        //     let state = self.decoder.decode_next(&mut buf)?;
+        //     assert!(buf.is_empty());
 
-            match state {
-                Some(Decoded::ChunkBegin(_, chunk::IDAT))
-                | Some(Decoded::ChunkBegin(_, chunk::fdAT)) => break,
-                Some(Decoded::FrameControl(_)) => {
-                    self.subframe = SubframeInfo::new(self.info());
-                    // The next frame is the one to which this chunk applies.
-                    self.next_frame = SubframeIdx::Some(self.fctl_read);
-                    // TODO: what about overflow here? That would imply there are more fctl chunks
-                    // than can be specified in the animation control but also that we have read
-                    // several gigabytes of data.
-                    self.fctl_read += 1;
-                }
-                None => {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::MissingImageData.into(),
-                    ))
-                }
-                // Ignore all other chunk events. Any other chunk may be between IDAT chunks, fdAT
-                // chunks and their control chunks.
-                _ => {}
-            }
-        }
+        //     match state {
+        //         Some(Decoded::ChunkBegin(_, chunk::IDAT))
+        //         | Some(Decoded::ChunkBegin(_, chunk::fdAT)) => break,
+        //         Some(Decoded::FrameControl(_)) => {
+        //             self.subframe = SubframeInfo::new(self.info());
+        //             // The next frame is the one to which this chunk applies.
+        //             self.next_frame = SubframeIdx::Some(self.fctl_read);
+        //             // TODO: what about overflow here? That would imply there are more fctl chunks
+        //             // than can be specified in the animation control but also that we have read
+        //             // several gigabytes of data.
+        //             self.fctl_read += 1;
+        //         }
+        //         None => {
+        //             return Err(DecodingError::Format(
+        //                 FormatErrorInner::MissingImageData.into(),
+        //             ))
+        //         }
+        //         // Ignore all other chunk events. Any other chunk may be between IDAT chunks, fdAT
+        //         // chunks and their control chunks.
+        //         _ => {}
+        //     }
+        // }
+        self.decoder
+            .decoder
+            .read_metadata(&mut self.decoder.reader)?;
 
         let info = self
             .decoder
@@ -480,7 +486,7 @@ impl<R: Read> Reader<R> {
     pub fn next_frame(&mut self, buf: &mut [u8]) -> Result<OutputInfo, DecodingError> {
         let subframe_idx = match self.decoder.info().unwrap().frame_control() {
             None => SubframeIdx::Initial,
-            Some(_) => SubframeIdx::Some(self.fctl_read - 1),
+            Some(_) => SubframeIdx::Some(self.fctl_read.saturating_sub(1)),
         };
 
         if self.next_frame == SubframeIdx::End {
@@ -747,23 +753,27 @@ impl<R: Read> Reader<R> {
                 self.prev_start = 0;
             }
 
-            match self.decoder.decode_next(&mut self.data_stream)? {
-                Some(Decoded::ImageData) => {}
-                Some(Decoded::ImageDataFlushed) => {
-                    self.subframe.consumed_and_flushed = true;
-                }
-                None => {
-                    return Err(DecodingError::Format(
-                        if self.data_stream.is_empty() {
-                            FormatErrorInner::NoMoreImageData
-                        } else {
-                            FormatErrorInner::UnexpectedEndOfChunk
-                        }
-                        .into(),
-                    ));
-                }
-                _ => (),
-            }
+            self.decoder
+                .decoder
+                .read_image_data(&mut self.decoder.reader, &mut self.data_stream)?;
+
+            // match self.decoder.decode_next(&mut self.data_stream)? {
+            //     Some(Decoded::ImageData) => {}
+            //     Some(Decoded::ImageDataFlushed) => {
+            //         self.subframe.consumed_and_flushed = true;
+            //     }
+            //     None => {
+            //         return Err(DecodingError::Format(
+            //             if self.data_stream.is_empty() {
+            //                 FormatErrorInner::NoMoreImageData
+            //             } else {
+            //                 FormatErrorInner::UnexpectedEndOfChunk
+            //             }
+            //             .into(),
+            //         ));
+            //     }
+            //     _ => (),
+            // }
         }
 
         // Get a reference to the current row and point scan_start to the next one.

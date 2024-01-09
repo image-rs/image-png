@@ -609,12 +609,7 @@ impl<R: Read> Reader<R> {
             let state = self.decoder.decode_next(&mut buf)?;
 
             match state {
-                Some(Decoded::ImageEnd) => break,
-                None => {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::MissingImageData.into(),
-                    ))
-                }
+                None => break,
                 _ => {}
             }
         }

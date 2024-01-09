@@ -598,7 +598,8 @@ impl<R: Read> Reader<R> {
         }))
     }
 
-    /// Read the rest of the image and chunks and finish up, including text chunks or others, will discard the rest of the image data
+    /// Read the rest of the image and chunks and finish up, including text chunks or others
+    /// This will discard the rest of the image if the image is not read already with [`Reader::next_frame`], [`Reader::next_row`] or [`Reader::next_interlaced_row`]
     pub fn finish(&mut self) -> Result<(), DecodingError> {
         self.next_frame = SubframeIdx::End;
         self.data_stream.clear();

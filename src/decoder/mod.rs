@@ -598,6 +598,30 @@ impl<R: Read> Reader<R> {
         }))
     }
 
+    /// Read the rest of the image and chunks and finish up, including text chunks or others, will discard the rest of the image data
+    pub fn finish(&mut self) -> Result<(), DecodingError> {
+        self.next_frame = SubframeIdx::End;
+        self.data_stream.clear();
+        self.current_start = 0;
+        self.prev_start = 0;
+        loop {
+            let mut buf = Vec::new();
+            let state = self.decoder.decode_next(&mut buf)?;
+
+            match state {
+                Some(Decoded::ImageEnd) => break,
+                None => {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::MissingImageData.into(),
+                    ))
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
     /// Fetch the next interlaced row and filter it according to our own transformations.
     fn next_interlaced_row_impl(
         &mut self,

@@ -269,68 +269,6 @@ impl<R: Read> Decoder<R> {
     }
 }
 
-// struct ReadDecoder<R: Read> {
-//     reader: R, //BufReader<R>,
-//     decoder: StreamingDecoder,
-//     at_eof: bool,
-// }
-
-// impl<R: Read> ReadDecoder<R> {
-//     // /// Returns the next decoded chunk. If the chunk is an ImageData chunk, its contents are written
-//     // /// into image_data.
-//     // fn decode_next(&mut self, image_data: &mut Vec<u8>) -> Result<Option<Decoded>, DecodingError> {
-//     //     while !self.at_eof {
-//     //         let (consumed, result) = {
-//     //             let buf = self.reader.fill_buf()?;
-//     //             if buf.is_empty() {
-//     //                 return Err(DecodingError::Format(
-//     //                     FormatErrorInner::UnexpectedEof.into(),
-//     //                 ));
-//     //             }
-//     //             self.decoder.update(buf, image_data)?
-//     //         };
-//     //         self.reader.consume(consumed);
-//     //         match result {
-//     //             Decoded::Nothing => (),
-//     //             Decoded::ImageEnd => self.at_eof = true,
-//     //             result => return Ok(Some(result)),
-//     //         }
-//     //     }
-//     //     Ok(None)
-//     // }
-
-//     fn finish_decoding(&mut self) -> Result<(), DecodingError> {
-//         // while !self.at_eof {
-//         //     let buf = self.reader.fill_buf()?;
-//         //     if buf.is_empty() {
-//         //         return Err(DecodingError::Format(
-//         //             FormatErrorInner::UnexpectedEof.into(),
-//         //         ));
-//         //     }
-//         //     let (consumed, event) = self.decoder.update(buf, &mut vec![])?;
-//         //     self.reader.consume(consumed);
-//         //     match event {
-//         //         Decoded::Nothing => (),
-//         //         Decoded::ImageEnd => self.at_eof = true,
-//         //         // ignore more data
-//         //         Decoded::ChunkComplete(_, _) | Decoded::ChunkBegin(_, _) | Decoded::ImageData => {}
-//         //         Decoded::ImageDataFlushed => return Ok(()),
-//         //         Decoded::PartialChunk(_) => {}
-//         //         new => unreachable!("{:?}", new),
-//         //     }
-//         // }
-
-//         // Err(DecodingError::Format(
-//         //     FormatErrorInner::UnexpectedEof.into(),
-//         // ))
-//         Ok(())
-//     }
-
-//     fn info(&self) -> Option<&Info> {
-//         self.decoder.info.as_ref()
-//     }
-// }
-
 /// PNG reader (mostly high-level interface)
 ///
 /// Provides a high level that iterates over lines or whole images.

@@ -204,7 +204,7 @@ impl<R: Read> Decoder<R> {
         let mut buf = Vec::new();
         while self.read_decoder.info().is_none() {
             buf.clear();
-            if self.read_decoder.decode_next(&mut buf)?.is_none() {
+            if self.read_decoder.decode_next(&mut buf, &mut 0)?.is_none() {
                 return Err(DecodingError::Format(
                     FormatErrorInner::UnexpectedEof.into(),
                 ));
@@ -226,6 +226,8 @@ impl<R: Read> Decoder<R> {
             data_stream: Vec::new(),
             prev_start: 0,
             current_start: 0,
+            lookback_start: 0,
+            write_start: 0,
             transform: self.transform,
             scratch_buffer: Vec::new(),
         };
@@ -295,7 +297,7 @@ struct ReadDecoder<R: Read> {
 impl<R: Read> ReadDecoder<R> {
     /// Returns the next decoded chunk. If the chunk is an ImageData chunk, its contents are written
     /// into image_data.
-    fn decode_next(&mut self, image_data: &mut Vec<u8>) -> Result<Option<Decoded>, DecodingError> {
+    fn decode_next(&mut self, image_data: &mut Vec<u8>, out_pos: &mut usize) -> Result<Option<Decoded>, DecodingError> {
         while !self.at_eof {
             let (consumed, result) = {
                 let buf = self.reader.fill_buf()?;
@@ -304,7 +306,7 @@ impl<R: Read> ReadDecoder<R> {
                         FormatErrorInner::UnexpectedEof.into(),
                     ));
                 }
-                self.decoder.update(buf, image_data)?
+                self.decoder.update(buf, image_data, out_pos)?
             };
             self.reader.consume(consumed);
             match result {
@@ -324,7 +326,7 @@ impl<R: Read> ReadDecoder<R> {
                     FormatErrorInner::UnexpectedEof.into(),
                 ));
             }
-            let (consumed, event) = self.decoder.update(buf, &mut vec![])?;
+            let (consumed, event) = self.decoder.update(buf, &mut vec![], &mut 0)?;
             self.reader.consume(consumed);
             match event {
                 Decoded::Nothing => (),
@@ -365,6 +367,10 @@ pub struct Reader<R: Read> {
     prev_start: usize,
     /// Index in `data_stream` where the current row starts.
     current_start: usize,
+    /// Index in `data_stream` of the first byte still needed by deflate lookback.
+    lookback_start: usize,
+    /// Index in `data_stream` where new data can be written.
+    write_start: usize,
     /// Output transformations
     transform: Transformations,
     /// This buffer is only used so that `next_row` and `next_interlaced_row` can return reference
@@ -415,7 +421,7 @@ impl<R: Read> Reader<R> {
             // know that we will stop before reading any image data from the stream. Thus pass an
             // empty buffer and assert that remains empty.
             let mut buf = Vec::new();
-            let state = self.decoder.decode_next(&mut buf)?;
+            let state = self.decoder.decode_next(&mut buf, &mut 0)?;
             assert!(buf.is_empty());
 
             match state {
@@ -514,6 +520,8 @@ impl<R: Read> Reader<R> {
         self.data_stream.clear();
         self.current_start = 0;
         self.prev_start = 0;
+        self.lookback_start = 0;
+        self.write_start = 0;
         let width = self.info().width;
         if self.info().interlaced {
             while let Some(InterlacedRow {
@@ -607,7 +615,7 @@ impl<R: Read> Reader<R> {
         self.prev_start = 0;
         loop {
             let mut buf = Vec::new();
-            let state = self.decoder.decode_next(&mut buf)?;
+            let state = self.decoder.decode_next(&mut buf, &mut 0)?;
 
             if state.is_none() {
                 break;
@@ -749,44 +757,65 @@ impl<R: Read> Reader<R> {
     ///
     /// The scanline is filtered against the previous scanline according to the specification.
     fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
-        // Read image data until we have at least one full row (but possibly more than one).
-        while self.data_stream.len() - self.current_start < rowlen {
-            if self.subframe.consumed_and_flushed {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::NoMoreImageData.into(),
-                ));
-            }
-
+        // Read image data if we don't yet have enough data for the next row.
+        if self.lookback_start - self.current_start < rowlen {
             // Clear the current buffer before appending more data.
             if self.prev_start > 0 {
                 self.data_stream.copy_within(self.prev_start.., 0);
                 self.data_stream
                     .truncate(self.data_stream.len() - self.prev_start);
+                self.write_start -= self.prev_start;
+                self.lookback_start -= self.prev_start;
                 self.current_start -= self.prev_start;
                 self.prev_start = 0;
             }
 
-            match self.decoder.decode_next(&mut self.data_stream)? {
-                Some(Decoded::ImageData) => {}
-                Some(Decoded::ImageDataFlushed) => {
-                    self.subframe.consumed_and_flushed = true;
-                }
-                None => {
+            let image_bytes = self
+                .subframe
+                .rowlen
+                .saturating_mul(self.subframe.height as usize);
+            let target_bytes = (256 << 10).min(image_bytes);
+
+            self.data_stream.resize(self.data_stream.len().max(target_bytes), 0);
+
+            while self.lookback_start - self.current_start < target_bytes {
+                if self.subframe.consumed_and_flushed {
                     return Err(DecodingError::Format(
-                        if self.data_stream.is_empty() {
-                            FormatErrorInner::NoMoreImageData
-                        } else {
-                            FormatErrorInner::UnexpectedEndOfChunk
-                        }
-                        .into(),
+                        FormatErrorInner::NoMoreImageData.into(),
                     ));
                 }
-                _ => (),
+
+                match self.decoder.decode_next(&mut self.data_stream, &mut self.write_start)? {
+                    Some(Decoded::ImageData) => {
+                        // TODO: interlaced
+                        if self.data_stream.len() >= image_bytes {
+                            self.lookback_start = self.write_start;
+                        } else {
+                            self.lookback_start = self.write_start.saturating_sub(32 << 10);
+                        }
+                    }
+                    Some(Decoded::ImageDataFlushed) => {
+                        self.lookback_start = self.write_start;
+                        self.subframe.consumed_and_flushed = true;
+                        break;
+                    }
+                    None => {
+                        return Err(DecodingError::Format(
+                            if self.data_stream.is_empty() {
+                                FormatErrorInner::NoMoreImageData
+                            } else {
+                                FormatErrorInner::UnexpectedEndOfChunk
+                            }
+                            .into(),
+                        ));
+                    }
+                    _ => (),
+                }
             }
         }
 
         // Get a reference to the current row and point scan_start to the next one.
-        let (prev, row) = self.data_stream.split_at_mut(self.current_start);
+        let (prev, row) = self.data_stream[..self.lookback_start].split_at_mut(self.current_start);
 
         // Unfilter the row.
         let filter = FilterType::from_u8(row[0]).ok_or(DecodingError::Format(

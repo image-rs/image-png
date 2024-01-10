@@ -581,10 +581,11 @@ impl StreamingDecoder {
         &mut self,
         mut buf: &[u8],
         image_data: &mut Vec<u8>,
+        out_pos: &mut usize,
     ) -> Result<(usize, Decoded), DecodingError> {
         let len = buf.len();
         while !buf.is_empty() && self.state.is_some() {
-            match self.next_state(buf, image_data) {
+            match self.next_state(buf, image_data, out_pos) {
                 Ok((bytes, Decoded::Nothing)) => buf = &buf[bytes..],
                 Ok((bytes, result)) => {
                     buf = &buf[bytes..];
@@ -600,6 +601,7 @@ impl StreamingDecoder {
         &mut self,
         buf: &[u8],
         image_data: &mut Vec<u8>,
+        out_pos: &mut usize,
     ) -> Result<(usize, Decoded), DecodingError> {
         use self::State::*;
 
@@ -620,7 +622,7 @@ impl StreamingDecoder {
                     // values is that they occur fairly frequently and special-casing them results
                     // in performance gains.
                     const CONSUMED_BYTES: usize = 4;
-                    self.parse_u32(kind, &buf[0..4], image_data)
+                    self.parse_u32(kind, &buf[0..4], image_data, out_pos)
                         .map(|decoded| (CONSUMED_BYTES, decoded))
                 } else {
                     let remaining_count = 4 - accumulated_count;
@@ -641,7 +643,7 @@ impl StreamingDecoder {
                         Ok((consumed_bytes, Decoded::Nothing))
                     } else {
                         debug_assert_eq!(accumulated_count, 4);
-                        self.parse_u32(kind, &bytes, image_data)
+                        self.parse_u32(kind, &bytes, image_data, out_pos)
                             .map(|decoded| (consumed_bytes, decoded))
                     }
                 }
@@ -700,7 +702,7 @@ impl StreamingDecoder {
                 debug_assert!(type_str == IDAT || type_str == chunk::fdAT);
                 let len = std::cmp::min(buf.len(), self.current_chunk.remaining as usize);
                 let buf = &buf[..len];
-                let consumed = self.inflater.decompress(buf, image_data)?;
+                let consumed = self.inflater.decompress(buf, image_data, out_pos)?;
                 self.current_chunk.crc.update(&buf[..consumed]);
                 self.current_chunk.remaining -= consumed as u32;
                 if self.current_chunk.remaining == 0 {
@@ -718,6 +720,7 @@ impl StreamingDecoder {
         kind: U32ValueKind,
         u32_be_bytes: &[u8],
         image_data: &mut Vec<u8>,
+        out_pos: &mut usize,
     ) -> Result<Decoded, DecodingError> {
         debug_assert_eq!(u32_be_bytes.len(), 4);
         let bytes = u32_be_bytes.try_into().unwrap();
@@ -759,7 +762,7 @@ impl StreamingDecoder {
                     && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
                 {
                     self.current_chunk.type_ = type_str;
-                    self.inflater.finish_compressed_chunks(image_data)?;
+                    self.inflater.finish_compressed_chunks(image_data, out_pos)?;
                     self.inflater.reset();
                     self.state = Some(State::U32 {
                         kind,

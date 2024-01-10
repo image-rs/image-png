@@ -722,7 +722,7 @@ impl StreamingDecoder {
 
             let initial_length = self.idat_stream.len();
             let read_amount =
-                (self.current_chunk.remaining as usize).min((32 << 10) - self.idat_stream.len());
+                (self.current_chunk.remaining as usize).min((64 << 10) - self.idat_stream.len());
 
             // This reads a fixed amount of data into a Vec without initializing it first.
             self.idat_stream.reserve(read_amount);

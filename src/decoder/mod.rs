@@ -609,9 +609,8 @@ impl<R: Read> Reader<R> {
             let mut buf = Vec::new();
             let state = self.decoder.decode_next(&mut buf)?;
 
-            match state {
-                None => break,
-                _ => {}
+            if state.is_none() {
+                break;
             }
         }
 

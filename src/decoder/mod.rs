@@ -4,7 +4,7 @@ mod zlib;
 pub use self::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
 use self::stream::{FormatErrorInner, CHUNCK_BUFFER_SIZE};
 
-use std::io::Read;
+use std::io::BufRead;
 use std::mem;
 use std::ops::Range;
 
@@ -78,7 +78,7 @@ impl Default for Limits {
 }
 
 /// PNG Decoder
-pub struct Decoder<R: Read> {
+pub struct Decoder<R: BufRead> {
     reader: R,
     decoder: StreamingDecoder,
     /// Output transformations
@@ -133,7 +133,7 @@ impl<'data> Row<'data> {
     }
 }
 
-impl<R: Read> Decoder<R> {
+impl<R: BufRead> Decoder<R> {
     /// Create a new decoder configuration with default limits.
     pub fn new(r: R) -> Decoder<R> {
         Decoder::new_with_limits(r, Limits::default())
@@ -272,7 +272,7 @@ impl<R: Read> Decoder<R> {
 /// PNG reader (mostly high-level interface)
 ///
 /// Provides a high level that iterates over lines or whole images.
-pub struct Reader<R: Read> {
+pub struct Reader<R: BufRead> {
     reader: R,
     decoder: StreamingDecoder,
     bpp: BytesPerPixel,
@@ -329,7 +329,7 @@ enum SubframeIdx {
     End,
 }
 
-impl<R: Read> Reader<R> {
+impl<R: BufRead> Reader<R> {
     /// Reads all meta data until the next frame data starts.
     /// Requires IHDR before the IDAT and fcTL before fdAT.
     fn read_until_image_data(&mut self) -> Result<(), DecodingError> {

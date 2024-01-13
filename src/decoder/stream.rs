@@ -4,7 +4,7 @@ use std::convert::{From, TryInto};
 use std::default::Default;
 use std::error;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read};
 use std::{borrow::Cow, cmp::min};
 
 use byteorder::{BigEndian, ReadBytesExt as _};
@@ -479,8 +479,6 @@ pub struct StreamingDecoder {
     have_idat: bool,
     decode_options: DecodeOptions,
     pub(crate) limits: Limits,
-
-    idat_stream: Vec<u8>,
 }
 
 struct ChunkState {
@@ -519,7 +517,6 @@ impl StreamingDecoder {
             have_idat: false,
             decode_options,
             limits: Limits { bytes: usize::MAX },
-            idat_stream: Vec::new(),
         }
     }
 
@@ -533,7 +530,6 @@ impl StreamingDecoder {
         self.info = None;
         self.current_seq_no = None;
         self.have_idat = false;
-        self.idat_stream.clear();
     }
 
     /// Provides access to the inner `info` field
@@ -577,7 +573,7 @@ impl StreamingDecoder {
             .set_skip_ancillary_crc_failures(skip_ancillary_crc_failures)
     }
 
-    fn read_chunk<R: Read>(
+    fn read_chunk<R: BufRead>(
         &mut self,
         mut reader: R,
         length: u32,
@@ -620,7 +616,7 @@ impl StreamingDecoder {
         Ok(())
     }
 
-    pub fn read_ihdr<R: Read>(&mut self, mut reader: R) -> Result<(), DecodingError> {
+    pub fn read_ihdr<R: BufRead>(&mut self, mut reader: R) -> Result<(), DecodingError> {
         let mut signature = [0u8; 8];
         reader.read_exact(&mut signature)?;
         if signature != [137, 80, 78, 71, 13, 10, 26, 10] {
@@ -643,7 +639,7 @@ impl StreamingDecoder {
         Ok(())
     }
 
-    pub fn read_metadata<R: Read>(&mut self, mut reader: R) -> Result<(), DecodingError> {
+    pub fn read_metadata<R: BufRead>(&mut self, mut reader: R) -> Result<(), DecodingError> {
         loop {
             self.current_chunk.remaining = reader.read_u32::<BigEndian>()?;
             reader.read_exact(&mut self.current_chunk.type_.0)?;
@@ -661,7 +657,7 @@ impl StreamingDecoder {
         Ok(())
     }
 
-    pub fn read_image_data<R: Read>(
+    pub fn read_image_data<R: BufRead>(
         &mut self,
         mut reader: R,
         image_data: &mut Vec<u8>,
@@ -678,7 +674,9 @@ impl StreamingDecoder {
             ));
         }
 
-        'outer: while self.idat_stream.len() < (32 << 10)
+        let target_output_size = image_data.len() + (256 << 10);
+
+        'outer: while image_data.len() < target_output_size
             && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
         {
             if self.current_chunk.remaining == 0 {
@@ -687,8 +685,9 @@ impl StreamingDecoder {
                     self.current_chunk.remaining = reader.read_u32::<BigEndian>()?;
                     reader.read_exact(&mut self.current_chunk.type_.0)?;
                     match self.current_chunk.type_ {
-                        IDAT => break,
-                        IEND => break 'outer,
+                        chunk::IDAT => break,
+                        chunk::IEND => break 'outer,
+                        chunk::fdAT => todo!(),
                         chunk::fcTL => {
                             let seq = reader.read_u32::<BigEndian>()?;
                             if self.current_seq_no.is_none()
@@ -720,35 +719,22 @@ impl StreamingDecoder {
                 }
             }
 
-            let initial_length = self.idat_stream.len();
-            let read_amount =
-                (self.current_chunk.remaining as usize).min((64 << 10) - self.idat_stream.len());
-
-            // This reads a fixed amount of data into a Vec without initializing it first.
-            self.idat_stream.reserve(read_amount);
-            (&mut reader)
-                .take(read_amount as u64)
-                .read_to_end(&mut self.idat_stream)?;
-
-            let bytes_read = self.idat_stream.len() - initial_length;
-            self.current_chunk.remaining -= bytes_read as u32;
-            if bytes_read < read_amount as usize {
+            let buf = reader.fill_buf()?;
+            if buf.len() == 0 {
                 return Err(DecodingError::Format(
-                    FormatErrorInner::UnexpectedEof.into(),
+                    FormatErrorInner::UnexpectedEndOfChunk.into(),
                 ));
             }
+
+            let input_bytes = buf
+                .len()
+                .min(self.current_chunk.remaining as usize)
+                .min(32 << 10);
+            let consumed = self.inflater.decompress(&buf[..input_bytes], image_data)?;
+            self.current_chunk.remaining -= consumed as u32;
+            reader.consume(consumed);
         }
 
-        if !self.idat_stream.is_empty() {
-            let mut index = 0;
-            while index < self.idat_stream.len() {
-                let consumed = self
-                    .inflater
-                    .decompress(&self.idat_stream[index..], image_data)?;
-                index += consumed;
-            }
-            self.idat_stream.clear();
-        }
         if self.current_chunk.type_ != IDAT && self.current_chunk.type_ != chunk::fdAT {
             self.inflater.finish_compressed_chunks(image_data)?;
         }
@@ -1669,12 +1655,13 @@ mod tests {
     use crate::{Decoder, DecodingError};
     use byteorder::WriteBytesExt;
     use std::fs::File;
+    use std::io::BufReader;
     use std::io::Write;
 
     #[test]
     fn image_gamma() -> Result<(), ()> {
         fn trial(path: &str, expected: Option<ScaledFloat>) {
-            let decoder = crate::Decoder::new(File::open(path).unwrap());
+            let decoder = crate::Decoder::new(BufReader::new(File::open(path).unwrap()));
             let reader = decoder.read_info().unwrap();
             let actual: Option<ScaledFloat> = reader.info().source_gamma;
             assert!(actual == expected);
@@ -1715,7 +1702,7 @@ mod tests {
     #[test]
     fn image_source_chromaticities() -> Result<(), ()> {
         fn trial(path: &str, expected: Option<SourceChromaticities>) {
-            let decoder = crate::Decoder::new(File::open(path).unwrap());
+            let decoder = crate::Decoder::new(BufReader::new(File::open(path).unwrap()));
             let reader = decoder.read_info().unwrap();
             let actual: Option<SourceChromaticities> = reader.info().source_chromaticities;
             assert!(actual == expected);
@@ -1907,7 +1894,9 @@ mod tests {
         // https://github.com/image-rs/image/issues/1825#issuecomment-1321798639,
         // but the 2nd iCCP chunk has been altered manually (see the 2nd comment below for more
         // details).
-        let decoder = crate::Decoder::new(File::open("tests/bugfixes/issue#1825.png").unwrap());
+        let decoder = crate::Decoder::new(BufReader::new(
+            File::open("tests/bugfixes/issue#1825.png").unwrap(),
+        ));
         let reader = decoder.read_info().unwrap();
         let icc_profile = reader.info().icc_profile.clone().unwrap().into_owned();
 

@@ -1,6 +1,39 @@
-use super::{stream::FormatErrorInner, DecodingError, CHUNCK_BUFFER_SIZE};
+use super::{stream::FormatErrorInner, DecodingError};
 
 use fdeflate::Decompressor;
+
+/// [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
+/// "deflate/inflate compression with a sliding window (which is an upper bound on the
+/// distances appearing in the deflate stream) of at most 32768 bytes".
+///
+/// `fdeflate` requires that we keep this many most recently decompressed bytes in the
+/// `out_buffer` - this allows referring back to them when handling "length and distance
+/// codes" in the deflate stream).
+const LOOKBACK_SIZE: usize = 32768;
+
+/// Threshold for postponing compacting `ZlibStream::out_buffers`.  See
+/// `compact_out_buffer_if_needed` for more details.
+///
+/// Higher factors result in higher memory usage, but the compaction cost is lower - factor of 4
+/// means that 1 byte gets copied during compaction for 3 decompressed bytes.)
+///
+/// TODO: The factor of 4 is an ad-hoc heuristic.  Consider measuring and using a different
+/// factor.  (Early experiments seem to indicate that factor of 4 is faster than a factor of
+/// 2 and 4 * `LOOKBACK_SIZE` seems like an acceptable memory trade-off.
+const COMPACTION_THRESHOLD: usize = LOOKBACK_SIZE * 4;
+
+/// Maximum size of the output slice passed to `fdeflate::Decompressor::read`.
+///
+/// This helps to ensure that the decompressed data fits into L1 cache as the data
+/// gets written into `ZlibStream::out_buffer` and then copied into into `image_data` provided
+/// by the `ZlibStream`'s client.
+///
+/// TODO: Investigate lowering this constant.  In theory a lower constant should help to keep
+/// the entire working set within L1 cache (this incremental chunk of data also needs to
+/// be "unfiltered" and then copied into the `png` crate client's output; we also need to
+/// account for memory pressure from `fdeflate`'s state).  Interestingly, early experiments
+/// show that setting this constant to 8192 regresses the performance in some cases.
+const MAX_INCREMENTAL_DECOMPRESSION_SIZE: usize = 16384;
 
 /// Ergonomics wrapper around `miniz_oxide::inflate::stream` for zlib compressed data.
 pub(super) struct ZlibStream {
@@ -54,6 +87,19 @@ impl ZlibStream {
 
     pub(crate) fn set_max_total_output(&mut self, n: usize) {
         self.max_total_output = n;
+
+        // Allocate `out_buffer` capacity once.  `debug_assert_eq` in `prepare_vec_for_appending`
+        // double-checks that we don't reallocate.
+        const MAX_UNCOMPACTED_SIZE: usize =
+            COMPACTION_THRESHOLD + MAX_INCREMENTAL_DECOMPRESSION_SIZE;
+        let reserved_capacity = if n > MAX_UNCOMPACTED_SIZE {
+            MAX_UNCOMPACTED_SIZE
+        } else {
+            n
+        };
+        self.out_buffer
+            .reserve(reserved_capacity - self.out_buffer.len());
+        debug_assert!(self.out_buffer.capacity() >= reserved_capacity);
     }
 
     /// Set the `ignore_adler32` flag and return `true` if the flag was
@@ -90,9 +136,16 @@ impl ZlibStream {
             self.state.ignore_adler32();
         }
 
+        let incremental_out_buffer = {
+            let end = self
+                .out_pos
+                .saturating_add(MAX_INCREMENTAL_DECOMPRESSION_SIZE)
+                .min(self.out_buffer.len());
+            &mut self.out_buffer[..end]
+        };
         let (in_consumed, out_consumed) = self
             .state
-            .read(data, self.out_buffer.as_mut_slice(), self.out_pos, false)
+            .read(data, incremental_out_buffer, self.out_pos, false)
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
             })?;
@@ -156,34 +209,31 @@ impl ZlibStream {
             self.max_total_output = usize::MAX;
         }
 
-        let current_len = self.out_buffer.len();
         let desired_len = self
             .out_pos
-            .saturating_add(CHUNCK_BUFFER_SIZE)
-            .min(self.max_total_output);
-        if current_len >= desired_len {
-            return;
+            .saturating_add(MAX_INCREMENTAL_DECOMPRESSION_SIZE);
+
+        // Allocate at most `self.max_total_output`.  This avoids unnecessarily allocating and
+        // zeroing-out a bigger `out_buffer` than necessary.
+        let desired_len = desired_len.min(self.max_total_output);
+
+        // Ensure the allocation request is valid.
+        // TODO: maximum allocation limits?
+        const _: () = assert!((isize::max_value() as usize) < u64::max_value() as usize);
+        let desired_len = desired_len.min(isize::max_value() as usize);
+
+        if self.out_buffer.len() < desired_len {
+            #[cfg(debug_assertions)]
+            let old_capacity = self.out_buffer.capacity();
+
+            self.out_buffer.resize(desired_len, 0u8);
+
+            #[cfg(debug_assertions)]
+            if self.max_total_output != usize::MAX {
+                let new_capacity = self.out_buffer.capacity();
+                debug_assert_eq!(old_capacity, new_capacity);
+            }
         }
-
-        let buffered_len = self.decoding_size(self.out_buffer.len());
-        debug_assert!(self.out_buffer.len() <= buffered_len);
-        self.out_buffer.resize(buffered_len, 0u8);
-    }
-
-    fn decoding_size(&self, len: usize) -> usize {
-        // Allocate one more chunk size than currently or double the length while ensuring that the
-        // allocation is valid and that any cursor within it will be valid.
-        len
-            // This keeps the buffer size a power-of-two, required by miniz_oxide.
-            .saturating_add(CHUNCK_BUFFER_SIZE.max(len))
-            // Ensure all buffer indices are valid cursor positions.
-            // Note: both cut off and zero extension give correct results.
-            .min(u64::max_value() as usize)
-            // Ensure the allocation request is valid.
-            // TODO: maximum allocation limits?
-            .min(isize::max_value() as usize)
-            // Don't unnecessarily allocate more than `max_total_output`.
-            .min(self.max_total_output)
     }
 
     fn transfer_finished_data(&mut self, image_data: &mut Vec<u8>) -> usize {
@@ -194,24 +244,9 @@ impl ZlibStream {
     }
 
     fn compact_out_buffer_if_needed(&mut self) {
-        // [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
-        // "deflate/inflate compression with a sliding window (which is an upper bound on the
-        // distances appearing in the deflate stream) of at most 32768 bytes".
-        //
-        // `fdeflate` requires that we keep this many most recently decompressed bytes in the
-        // `out_buffer` - this allows referring back to them when handling "length and distance
-        // codes" in the deflate stream).
-        const LOOKBACK_SIZE: usize = 32768;
-
         // Compact `self.out_buffer` when "needed".  Doing this conditionally helps to put an upper
         // bound on the amortized cost of copying the data within `self.out_buffer`.
-        //
-        // TODO: The factor of 4 is an ad-hoc heuristic.  Consider measuring and using a different
-        // factor.  (Early experiments seem to indicate that factor of 4 is faster than a factor of
-        // 2 and 4 * `LOOKBACK_SIZE` seems like an acceptable memory trade-off.  Higher factors
-        // result in higher memory usage, but the compaction cost is lower - factor of 4 means
-        // that 1 byte gets copied during compaction for 3 decompressed bytes.)
-        if self.out_pos > LOOKBACK_SIZE * 4 {
+        if self.out_pos > COMPACTION_THRESHOLD {
             // Only preserve the `lookback_buffer` and "throw away" the earlier prefix.
             let lookback_buffer = self.out_pos.saturating_sub(LOOKBACK_SIZE)..self.out_pos;
             let preserved_len = lookback_buffer.len();

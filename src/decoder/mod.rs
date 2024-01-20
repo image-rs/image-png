@@ -613,6 +613,7 @@ impl<R: Read> Reader<R> {
         self.data_stream.clear();
         self.current_start = 0;
         self.prev_start = 0;
+        self.lookback_start = 0;
         loop {
             let mut buf = Vec::new();
             let state = self.decoder.decode_next(&mut buf, &mut 0)?;
@@ -759,8 +760,14 @@ impl<R: Read> Reader<R> {
     fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
         // Read image data if we don't yet have enough data for the next row.
         if self.lookback_start - self.current_start < rowlen {
+            let image_bytes = self
+                .subframe
+                .rowlen
+                .saturating_mul(self.subframe.height as usize);
+            let target_bytes = (256 << 10).min(image_bytes);
+
             // Clear the current buffer before appending more data.
-            if self.prev_start > 0 {
+            if self.prev_start > 0 && self.data_stream.len() < image_bytes {
                 self.data_stream.copy_within(self.prev_start.., 0);
                 self.data_stream
                     .truncate(self.data_stream.len() - self.prev_start);
@@ -769,12 +776,6 @@ impl<R: Read> Reader<R> {
                 self.current_start -= self.prev_start;
                 self.prev_start = 0;
             }
-
-            let image_bytes = self
-                .subframe
-                .rowlen
-                .saturating_mul(self.subframe.height as usize);
-            let target_bytes = (256 << 10).min(image_bytes);
 
             self.data_stream.resize(self.data_stream.len().max(target_bytes), 0);
 
@@ -788,7 +789,7 @@ impl<R: Read> Reader<R> {
                 match self.decoder.decode_next(&mut self.data_stream, &mut self.write_start)? {
                     Some(Decoded::ImageData) => {
                         // TODO: interlaced
-                        if self.data_stream.len() >= image_bytes {
+                        if self.data_stream.len() >= image_bytes && matches!(self.subframe.interlace, InterlaceIter::None(_)) {
                             self.lookback_start = self.write_start;
                         } else {
                             self.lookback_start = self.write_start.saturating_sub(32 << 10);

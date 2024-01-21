@@ -8,12 +8,12 @@ use glium::{
     texture::{ClientFormat, RawImage2d},
     BlitTarget, Rect, Surface,
 };
-use std::{borrow::Cow, env, fs::File, io, path};
+use std::{borrow::Cow, env, fs::File, io::{self, BufReader}, path};
 
 /// Load the image using `png`
 fn load_image(path: &path::PathBuf) -> io::Result<RawImage2d<'static, u8>> {
     use png::ColorType::*;
-    let mut decoder = png::Decoder::new(File::open(path)?);
+    let mut decoder = png::Decoder::new(BufReader::new(File::open(path)?));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info()?;
     let mut img_data = vec![0; reader.output_buffer_size()];

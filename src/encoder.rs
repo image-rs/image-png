@@ -1,8 +1,6 @@
 use borrow::Cow;
 use io::{Read, Write};
 use ops::{Deref, DerefMut};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use rayon::slice::ParallelSlice;
 use std::{borrow, error, fmt, io, mem, ops, result};
 
 use crc32fast::Hasher as Crc32;
@@ -697,45 +695,62 @@ impl<W: Write> Writer<W> {
 
         let zlib_encoded = match self.info.compression {
             Compression::Fast => {
-                let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
+                let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(
+                    Vec::with_capacity(data_size / 8),
+                ))?;
 
-                compressor.par_write_data((0..height).into_par_iter().map(|i| {
-                    let prev = if i == 0 {
-                        &prev
-                    } else {
-                        &data[(i - 1) * in_len..][..in_len]
-                    };
-                    let line = &data[i * in_len..][..in_len];
+                if cfg!(feature = "rayon") {
+                    #[cfg(feature = "rayon")]
+                    {
+                        use rayon::prelude::*;
 
+                        //     let chunk_size = (height / 16).min(256 / (in_len)).max(1);
+
+                        //     .fold_chunks(chunk_size, Vec::new, |mut acc, mut current| {
+                        //         acc.append(&mut current);
+                        //         acc
+                        //     })
+                        // ;
+
+                        compressor.par_write_data((0..height).into_par_iter().map(|i| {
+                            let prev = if i == 0 {
+                                &prev
+                            } else {
+                                &data[(i - 1) * in_len..][..in_len]
+                            };
+                            let line = &data[i * in_len..][..in_len];
+
+                            let mut current = vec![0; in_len + 1];
+                            let filter_type = filter(
+                                filter_method,
+                                adaptive_method,
+                                bpp,
+                                prev,
+                                line,
+                                &mut current[1..],
+                            );
+                            current[0] = filter_type as u8;
+
+                            current
+                        }))?;
+                    }
+                } else {
                     let mut current = vec![0; in_len + 1];
-                    let filter_type = filter(
-                        filter_method,
-                        adaptive_method,
-                        bpp,
-                        prev,
-                        line,
-                        &mut current[1..],
-                    );
-                    current[0] = filter_type as u8;
+                    for line in data.chunks(in_len) {
+                        let filter_type = filter(
+                            filter_method,
+                            adaptive_method,
+                            bpp,
+                            prev,
+                            line,
+                            &mut current[1..],
+                        );
 
-                    current
-                }))?;
-
-                // let mut current = vec![0; in_len + 1];
-                // for line in data.chunks(in_len) {
-                //     let filter_type = filter(
-                //         filter_method,
-                //         adaptive_method,
-                //         bpp,
-                //         prev,
-                //         line,
-                //         &mut current[1..],
-                //     );
-
-                //     current[0] = filter_type as u8;
-                //     compressor.write_data(&current)?;
-                //     prev = line;
-                // }
+                        current[0] = filter_type as u8;
+                        compressor.write_data(&current)?;
+                        prev = line;
+                    }
+                }
 
                 let compressed = compressor.finish()?.into_inner();
                 if compressed.len()

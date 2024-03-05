@@ -26,7 +26,7 @@ crc32fast = "1.2.0"
 fdeflate = { path = "../fdeflate" }
 flate2 = "1.0.11"
 miniz_oxide = { version = "0.7.1", features = ["simd"] }
-rayon = "1.9.0"
+rayon = { version = "1.9.0", optional = true }
 
 [dev-dependencies]
 byteorder = "1.5.0"
@@ -41,6 +41,7 @@ term = "0.7"
 [features]
 unstable = []
 benchmarks = []
+rayon = ["dep:rayon"]
 
 [[bench]]
 path = "benches/decoder.rs"

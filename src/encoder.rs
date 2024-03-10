@@ -695,22 +695,54 @@ impl<W: Write> Writer<W> {
 
         let zlib_encoded = match self.info.compression {
             Compression::Fast => {
-                let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
+                let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(
+                    Vec::with_capacity(data_size / 8),
+                ))?;
 
-                let mut current = vec![0; in_len + 1];
-                for line in data.chunks(in_len) {
-                    let filter_type = filter(
-                        filter_method,
-                        adaptive_method,
-                        bpp,
-                        prev,
-                        line,
-                        &mut current[1..],
-                    );
+                // TODO: Add flag to force single-threaded encoding
+                if cfg!(feature = "rayon") {
+                    #[cfg(feature = "rayon")]
+                    {
+                        use rayon::prelude::*;
 
-                    current[0] = filter_type as u8;
-                    compressor.write_data(&current)?;
-                    prev = line;
+                        compressor.par_write_data((0..height).into_par_iter().map(|i| {
+                            let prev = if i == 0 {
+                                &prev
+                            } else {
+                                &data[(i - 1) * in_len..][..in_len]
+                            };
+                            let line = &data[i * in_len..][..in_len];
+
+                            let mut current = vec![0; in_len + 1];
+                            let filter_type = filter(
+                                filter_method,
+                                adaptive_method,
+                                bpp,
+                                prev,
+                                line,
+                                &mut current[1..],
+                            );
+                            current[0] = filter_type as u8;
+
+                            current
+                        }))?;
+                    }
+                } else {
+                    let mut current = vec![0; in_len + 1];
+                    for line in data.chunks(in_len) {
+                        let filter_type = filter(
+                            filter_method,
+                            adaptive_method,
+                            bpp,
+                            prev,
+                            line,
+                            &mut current[1..],
+                        );
+
+                        current[0] = filter_type as u8;
+                        compressor.write_data(&current)?;
+                        prev = line;
+                    }
                 }
 
                 let compressed = compressor.finish()?.into_inner();

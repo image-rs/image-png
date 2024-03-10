@@ -23,7 +23,7 @@ include = [
 [dependencies]
 bitflags = "1.0"
 crc32fast = "1.2.0"
-fdeflate = { path = "../fdeflate" }
+fdeflate = { git = "https://github.com/fintelia/fdeflate", branch = "rayon" }
 flate2 = "1.0.11"
 miniz_oxide = { version = "0.7.1", features = ["simd"] }
 rayon = { version = "1.9.0", optional = true }

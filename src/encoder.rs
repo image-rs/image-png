@@ -699,18 +699,11 @@ impl<W: Write> Writer<W> {
                     Vec::with_capacity(data_size / 8),
                 ))?;
 
+                // TODO: Add flag to force single-threaded encoding
                 if cfg!(feature = "rayon") {
                     #[cfg(feature = "rayon")]
                     {
                         use rayon::prelude::*;
-
-                        //     let chunk_size = (height / 16).min(256 / (in_len)).max(1);
-
-                        //     .fold_chunks(chunk_size, Vec::new, |mut acc, mut current| {
-                        //         acc.append(&mut current);
-                        //         acc
-                        //     })
-                        // ;
 
                         compressor.par_write_data((0..height).into_par_iter().map(|i| {
                             let prev = if i == 0 {

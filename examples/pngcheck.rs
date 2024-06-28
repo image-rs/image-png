@@ -174,7 +174,7 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
             }
             buf = &data[..n];
         }
-        match decoder.update(buf, &mut Vec::new()) {
+        match decoder.update(buf, &mut Vec::new(), &mut 0) {
             Ok((_, ImageEnd)) => {
                 if !have_idat {
                     // This isn't beautiful. But it works.

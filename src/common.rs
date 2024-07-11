@@ -325,6 +325,8 @@ pub enum Compression {
         note = "use one of the other compression levels instead, such as 'fast'"
     )]
     Rle,
+    /// Integer representing the compression level, typically on a scale of 0-9
+    Level(u32),
 }
 
 impl Default for Compression {

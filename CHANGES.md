@@ -1,4 +1,9 @@
-## Unreleased
+## 0.18.0
+
+* Breaking API changes (motivated by performance gains in some scenarios):
+  - Removing the `Row` and `InterlacedRow` structs
+  - Removing the `Reader::next_interlaced_row` method
+  - Changing the signature of the `Reader::next_row` method
 
 ## 0.17.13
 

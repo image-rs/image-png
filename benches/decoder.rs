@@ -89,8 +89,7 @@ fn bench_next_row(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: &str) {
             let mut reader = create_reader(data.as_slice());
 
             for output_row in image.chunks_exact_mut(bytes_per_row) {
-                let decoded_row = reader.next_row().unwrap().unwrap();
-                output_row.copy_from_slice(decoded_row.data());
+                reader.next_row(output_row).unwrap().unwrap();
             }
         })
     });

@@ -23,6 +23,7 @@ pub const CHUNK_BUFFER_SIZE: usize = 32 * 1024;
 ///
 /// This is used only in fuzzing. `afl` automatically adds `--cfg fuzzing` to RUSTFLAGS which can
 /// be used to detect that build.
+#[allow(unexpected_cfgs)]
 const CHECKSUM_DISABLED: bool = cfg!(fuzzing);
 
 /// Kind of `u32` value that is being read via `State::U32`.

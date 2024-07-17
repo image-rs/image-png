@@ -333,7 +333,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     ///
     /// If the denominator is 0, it is to be treated as if it were 100
     /// (that is, the numerator then specifies 1/100ths of a second).
-    /// If the the value of the numerator is 0 the decoder should render the next frame
+    /// If the value of the numerator is 0 the decoder should render the next frame
     /// as quickly as possible, though viewers may impose a reasonable lower bound.
     ///
     /// The default value is 0 for both the numerator and denominator.
@@ -652,9 +652,9 @@ impl<W: Write> Writer<W> {
         }
     }
 
-    const MAX_IDAT_CHUNK_LEN: u32 = std::u32::MAX >> 1;
+    const MAX_IDAT_CHUNK_LEN: u32 = u32::MAX >> 1;
     #[allow(non_upper_case_globals)]
-    const MAX_fdAT_CHUNK_LEN: u32 = (std::u32::MAX >> 1) - 4;
+    const MAX_fdAT_CHUNK_LEN: u32 = (u32::MAX >> 1) - 4;
 
     /// Writes the next image data.
     pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
@@ -846,7 +846,7 @@ impl<W: Write> Writer<W> {
     ///
     /// If the denominator is 0, it is to be treated as if it were 100
     /// (that is, the numerator then specifies 1/100ths of a second).
-    /// If the the value of the numerator is 0 the decoder should render the next frame
+    /// If the value of the numerator is 0 the decoder should render the next frame
     /// as quickly as possible, though viewers may impose a reasonable lower bound.
     ///
     /// This method will return an error if the image is not animated.
@@ -1119,7 +1119,7 @@ impl<'a, W: Write> ChunkWriter<'a, W> {
         //
         // TODO (maybe): find a way to hold two chunks at a time if `usize`
         //               is 64 bits.
-        const CAP: usize = std::u32::MAX as usize >> 1;
+        const CAP: usize = u32::MAX as usize >> 1;
         let curr_chunk = if writer.images_written == 0 {
             chunk::IDAT
         } else {
@@ -1393,7 +1393,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     ///
     /// If the denominator is 0, it is to be treated as if it were 100
     /// (that is, the numerator then specifies 1/100ths of a second).
-    /// If the the value of the numerator is 0 the decoder should render the next frame
+    /// If the value of the numerator is 0 the decoder should render the next frame
     /// as quickly as possible, though viewers may impose a reasonable lower bound.
     ///
     /// This method will return an error if the image is not animated.
@@ -1716,9 +1716,9 @@ mod tests {
     use crate::Decoder;
 
     use rand::{thread_rng, Rng};
+    use std::cmp;
     use std::fs::File;
-    use std::io::{Cursor, Write};
-    use std::{cmp, io};
+    use std::io::Cursor;
 
     #[test]
     fn roundtrip() {

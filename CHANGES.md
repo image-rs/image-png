@@ -1,4 +1,21 @@
-## Unreleased
+## 0.18.0
+
+* Breaking API changes (motivated by performance gains in some scenarios):
+  - Removing the `Row` and `InterlacedRow` structs
+  - Removing the `Reader::next_interlaced_row` method
+  - Changing the signature of the `Reader::next_row` method
+
+## 0.17.13
+
+* Fix `Send` bound on `Reader`.
+
+## 0.17.12
+
+* Reject zero-sized frames.
+* Optimized decoding of paletted images.
+* Removed remaining uses of miniz_oxide for decoding.
+* Correct lifetime used for `Info` struct.
+* Fix build issue with `-Z minimal-versions`.
 
 ## 0.17.11
 
@@ -7,7 +24,7 @@
 * Added `new_with_info` constructor for encoder.
 * Removed hard-coded memory limits.
 * No longer allow zero sized images.
-* Added `Reader::finish` to read all the auxillary chunks that comes after the
+* Added `Reader::finish` to read all the auxiliary chunks that comes after the
   image.
 
 ## 0.17.10

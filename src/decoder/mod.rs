@@ -3,11 +3,10 @@ pub(crate) mod transform;
 mod zlib;
 
 pub use self::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
-use self::stream::{FormatErrorInner, CHUNCK_BUFFER_SIZE};
+use self::stream::{FormatErrorInner, CHUNK_BUFFER_SIZE};
 use self::transform::{create_transform_fn, TransformFn};
 
 use std::io::{BufRead, BufReader, Read};
-use std::mem;
 use std::ops::Range;
 
 use crate::adam7;
@@ -87,25 +86,8 @@ pub struct Decoder<R: Read> {
     transform: Transformations,
 }
 
-/// A row of data with interlace information attached.
-#[derive(Clone, Copy, Debug)]
-pub struct InterlacedRow<'data> {
-    data: &'data [u8],
-    interlace: InterlaceInfo,
-}
-
-impl<'data> InterlacedRow<'data> {
-    pub fn data(&self) -> &'data [u8] {
-        self.data
-    }
-
-    pub fn interlace(&self) -> InterlaceInfo {
-        self.interlace
-    }
-}
-
 /// PNG (2003) specifies two interlace modes, but reserves future extensions.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterlaceInfo {
     /// the null method means no interlacing
     Null,
@@ -123,18 +105,6 @@ pub enum InterlaceInfo {
     Adam7 { pass: u8, line: u32, width: u32 },
 }
 
-/// A row of data without interlace information.
-#[derive(Clone, Copy, Debug)]
-pub struct Row<'data> {
-    data: &'data [u8],
-}
-
-impl<'data> Row<'data> {
-    pub fn data(&self) -> &'data [u8] {
-        self.data
-    }
-}
-
 impl<R: Read> Decoder<R> {
     /// Create a new decoder configuration with default limits.
     pub fn new(r: R) -> Decoder<R> {
@@ -148,7 +118,7 @@ impl<R: Read> Decoder<R> {
 
         Decoder {
             read_decoder: ReadDecoder {
-                reader: BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
+                reader: BufReader::with_capacity(CHUNK_BUFFER_SIZE, r),
                 decoder,
                 at_eof: false,
             },
@@ -163,7 +133,7 @@ impl<R: Read> Decoder<R> {
 
         Decoder {
             read_decoder: ReadDecoder {
-                reader: BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
+                reader: BufReader::with_capacity(CHUNK_BUFFER_SIZE, r),
                 decoder,
                 at_eof: false,
             },
@@ -202,7 +172,7 @@ impl<R: Read> Decoder<R> {
     ///
     /// Most image metadata will not be read until `read_info` is called, so those fields will be
     /// None or empty.
-    pub fn read_header_info(&mut self) -> Result<&Info, DecodingError> {
+    pub fn read_header_info(&mut self) -> Result<&Info<'static>, DecodingError> {
         let mut buf = Vec::new();
         while self.read_decoder.info().is_none() {
             buf.clear();
@@ -230,7 +200,6 @@ impl<R: Read> Decoder<R> {
             current_start: 0,
             transform: self.transform,
             transform_fn: None,
-            scratch_buffer: Vec::new(),
         };
 
         // Check if the decoding buffer of a single raw line has a valid size.
@@ -277,6 +246,22 @@ impl<R: Read> Decoder<R> {
         self.read_decoder
             .decoder
             .set_ignore_text_chunk(ignore_text_chunk);
+    }
+
+    /// Set the decoder to ignore iccp chunks while parsing.
+    ///
+    /// eg.
+    /// ```
+    /// use std::fs::File;
+    /// use png::Decoder;
+    /// let mut decoder = Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
+    /// decoder.set_ignore_iccp_chunk(true);
+    /// assert!(decoder.read_info().is_ok());
+    /// ```
+    pub fn set_ignore_iccp_chunk(&mut self, ignore_iccp_chunk: bool) {
+        self.read_decoder
+            .decoder
+            .set_ignore_iccp_chunk(ignore_iccp_chunk);
     }
 
     /// Set the decoder to ignore and not verify the Adler-32 checksum
@@ -345,7 +330,7 @@ impl<R: Read> ReadDecoder<R> {
         ))
     }
 
-    fn info(&self) -> Option<&Info> {
+    fn info(&self) -> Option<&Info<'static>> {
         self.decoder.info.as_ref()
     }
 }
@@ -373,10 +358,6 @@ pub struct Reader<R: Read> {
     /// Function that can transform decompressed, unfiltered rows into final output.
     /// See the `transform.rs` module for more details.
     transform_fn: Option<TransformFn>,
-    /// This buffer is only used so that `next_row` and `next_interlaced_row` can return reference
-    /// to a byte slice. In a future version of this library, this buffer will be removed and
-    /// `next_row` and `next_interlaced_row` will write directly into a user provided output buffer.
-    scratch_buffer: Vec<u8>,
 }
 
 /// The subframe specific information.
@@ -466,7 +447,7 @@ impl<R: Read> Reader<R> {
     /// Get information on the image.
     ///
     /// The structure will change as new frames of an animated image are decoded.
-    pub fn info(&self) -> &Info {
+    pub fn info(&self) -> &Info<'static> {
         self.decoder.info().unwrap()
     }
 
@@ -522,18 +503,14 @@ impl<R: Read> Reader<R> {
         self.prev_start = 0;
         let width = self.info().width;
         if self.info().interlaced {
-            while let Some(InterlacedRow {
-                data: row,
-                interlace,
-                ..
-            }) = self.next_interlaced_row()?
-            {
+            let mut row = vec![0; self.output_line_size(width)];
+            while let Some(interlace) = self.next_row(&mut row)? {
                 let (line, pass) = match interlace {
                     InterlaceInfo::Adam7 { line, pass, .. } => (line, pass),
                     InterlaceInfo::Null => unreachable!("expected interlace information"),
                 };
                 let samples = color_type.samples() as u8;
-                adam7::expand_pass(buf, width, row, pass, line, samples * (bit_depth as u8));
+                adam7::expand_pass(buf, width, &row, pass, line, samples * (bit_depth as u8));
             }
         } else {
             for row in buf
@@ -570,14 +547,12 @@ impl<R: Read> Reader<R> {
         Ok(output_info)
     }
 
-    /// Returns the next processed row of the image
-    pub fn next_row(&mut self) -> Result<Option<Row>, DecodingError> {
-        self.next_interlaced_row()
-            .map(|v| v.map(|v| Row { data: v.data }))
-    }
-
-    /// Returns the next processed row of the image
-    pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow>, DecodingError> {
+    /// Returns the next processed row of the image.
+    ///
+    /// A `ParameterError` will be returned if `row` doesn't have enough space.  For initial
+    /// interlaced rows a smaller buffer may work, but providing a buffer that can hold
+    /// `self.output_line_size(self.info().width` bytes should always avoid that error.
+    pub fn next_row(&mut self, row: &mut [u8]) -> Result<Option<InterlaceInfo>, DecodingError> {
         let (rowlen, interlace) = match self.next_pass() {
             Some((rowlen, interlace)) => (rowlen, interlace),
             None => return Ok(None),
@@ -589,19 +564,18 @@ impl<R: Read> Reader<R> {
             self.subframe.width
         };
         let output_line_size = self.output_line_size(width);
+        if row.len() < output_line_size {
+            return Err(DecodingError::Parameter(
+                ParameterErrorKind::ImageBufferSize {
+                    expected: output_line_size,
+                    actual: row.len(),
+                }
+                .into(),
+            ));
+        }
 
-        // TODO: change the interface of `next_interlaced_row` to take an output buffer instead of
-        // making us return a reference to a buffer that we own.
-        let mut output_buffer = mem::take(&mut self.scratch_buffer);
-        output_buffer.resize(output_line_size, 0u8);
-        let ret = self.next_interlaced_row_impl(rowlen, &mut output_buffer);
-        self.scratch_buffer = output_buffer;
-        ret?;
-
-        Ok(Some(InterlacedRow {
-            data: &self.scratch_buffer[..output_line_size],
-            interlace,
-        }))
+        self.next_interlaced_row_impl(rowlen, &mut row[..output_line_size])?;
+        Ok(Some(interlace))
     }
 
     /// Read the rest of the image and chunks and finish up, including text chunks or others
@@ -638,7 +612,7 @@ impl<R: Read> Reader<R> {
             if self.transform_fn.is_none() {
                 self.transform_fn = Some(create_transform_fn(self.info(), self.transform)?);
             }
-            self.transform_fn.unwrap()
+            self.transform_fn.as_deref().unwrap()
         };
         transform_fn(row, output_buffer, self.info());
 

@@ -1,7 +1,4 @@
-extern crate crc32fast;
-
-use std::convert::{From, TryInto};
-use std::default::Default;
+use std::convert::TryInto;
 use std::error;
 use std::fmt;
 use std::io;
@@ -20,12 +17,13 @@ use crate::traits::ReadBytesExt;
 use crate::Limits;
 
 /// TODO check if these size are reasonable
-pub const CHUNCK_BUFFER_SIZE: usize = 32 * 1024;
+pub const CHUNK_BUFFER_SIZE: usize = 32 * 1024;
 
 /// Determines if checksum checks should be disabled globally.
 ///
 /// This is used only in fuzzing. `afl` automatically adds `--cfg fuzzing` to RUSTFLAGS which can
 /// be used to detect that build.
+#[allow(unexpected_cfgs)]
 const CHECKSUM_DISABLED: bool = cfg!(fuzzing);
 
 /// Kind of `u32` value that is being read via `State::U32`.
@@ -315,7 +313,7 @@ impl fmt::Display for FormatError {
                 "Transparency chunk found for color type {:?}.",
                 color_type
             ),
-            InvalidBitDepth(nr) => write!(fmt, "Invalid dispose operation {}.", nr),
+            InvalidBitDepth(nr) => write!(fmt, "Invalid bit depth {}.", nr),
             InvalidColorType(nr) => write!(fmt, "Invalid color type {}.", nr),
             InvalidDisposeOp(nr) => write!(fmt, "Invalid dispose op {}.", nr),
             InvalidBlendOp(nr) => write!(fmt, "Invalid blend op {}.", nr),
@@ -328,7 +326,10 @@ impl fmt::Display for FormatError {
             InvalidSignature => write!(fmt, "Invalid PNG signature."),
             UnexpectedEof => write!(fmt, "Unexpected end of data before image end."),
             UnexpectedEndOfChunk => write!(fmt, "Unexpected end of data within a chunk."),
-            NoMoreImageData => write!(fmt, "IDAT or fDAT chunk is has not enough data for image."),
+            NoMoreImageData => write!(
+                fmt,
+                "IDAT or fDAT chunk does not have enough data for image."
+            ),
             CorruptFlateStream { err } => {
                 write!(fmt, "Corrupt deflate stream. ")?;
                 write!(fmt, "{:?}", err)
@@ -408,6 +409,7 @@ pub struct DecodeOptions {
     ignore_adler32: bool,
     ignore_crc: bool,
     ignore_text_chunk: bool,
+    ignore_iccp_chunk: bool,
     skip_ancillary_crc_failures: bool,
 }
 
@@ -417,6 +419,7 @@ impl Default for DecodeOptions {
             ignore_adler32: true,
             ignore_crc: false,
             ignore_text_chunk: false,
+            ignore_iccp_chunk: false,
             skip_ancillary_crc_failures: true,
         }
     }
@@ -451,6 +454,13 @@ impl DecodeOptions {
         self.ignore_text_chunk = ignore_text_chunk;
     }
 
+    /// Ignore ICCP chunks while decoding.
+    ///
+    /// Defaults to `false`.
+    pub fn set_ignore_iccp_chunk(&mut self, ignore_iccp_chunk: bool) {
+        self.ignore_iccp_chunk = ignore_iccp_chunk;
+    }
+
     /// Ignore ancillary chunks if CRC fails
     ///
     /// Defaults to `true`
@@ -476,6 +486,8 @@ pub struct StreamingDecoder {
     /// Whether we have already seen a start of an IDAT chunk.  (Used to validate chunk ordering -
     /// some chunk types can only appear before or after an IDAT chunk.)
     have_idat: bool,
+    /// Whether we have already seen an iCCP chunk. Used to prevent parsing of duplicate iCCP chunks.
+    have_iccp: bool,
     decode_options: DecodeOptions,
     pub(crate) limits: Limits,
 }
@@ -514,6 +526,7 @@ impl StreamingDecoder {
             info: None,
             current_seq_no: None,
             have_idat: false,
+            have_iccp: false,
             decode_options,
             limits: Limits { bytes: usize::MAX },
         }
@@ -538,6 +551,10 @@ impl StreamingDecoder {
 
     pub fn set_ignore_text_chunk(&mut self, ignore_text_chunk: bool) {
         self.decode_options.set_ignore_text_chunk(ignore_text_chunk);
+    }
+
+    pub fn set_ignore_iccp_chunk(&mut self, ignore_iccp_chunk: bool) {
+        self.decode_options.set_ignore_iccp_chunk(ignore_iccp_chunk);
     }
 
     /// Return whether the decoder is set to ignore the Adler-32 checksum.
@@ -888,7 +905,7 @@ impl StreamingDecoder {
             chunk::fcTL => self.parse_fctl(),
             chunk::cHRM => self.parse_chrm(),
             chunk::sRGB => self.parse_srgb(),
-            chunk::iCCP => self.parse_iccp(),
+            chunk::iCCP if !self.decode_options.ignore_iccp_chunk => self.parse_iccp(),
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
             chunk::iTXt if !self.decode_options.ignore_text_chunk => self.parse_itxt(),
@@ -1190,12 +1207,11 @@ impl StreamingDecoder {
     }
 
     fn parse_iccp(&mut self) -> Result<Decoded, DecodingError> {
-        let info = self.info.as_mut().unwrap();
         if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::iCCP }.into(),
             ))
-        } else if info.icc_profile.is_some() {
+        } else if self.have_iccp {
             // We have already encountered an iCCP chunk before.
             //
             // Section "4.2.2.4. iCCP Embedded ICC profile" of the spec says:
@@ -1209,44 +1225,51 @@ impl StreamingDecoder {
             //     (treating them as a benign error).
             Ok(Decoded::Nothing)
         } else {
-            let mut buf = &self.current_chunk.raw_bytes[..];
-
-            // read profile name
-            let _: u8 = buf.read_be()?;
-            for _ in 1..80 {
-                let raw: u8 = buf.read_be()?;
-                if raw == 0 {
-                    break;
-                }
-            }
-
-            match buf.read_be()? {
-                // compression method
-                0u8 => (),
-                n => {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::UnknownCompressionMethod(n).into(),
-                    ))
-                }
-            }
-
-            match fdeflate::decompress_to_vec_bounded(buf, self.limits.bytes) {
-                Ok(profile) => {
-                    self.limits.reserve_bytes(profile.len())?;
-                    info.icc_profile = Some(Cow::Owned(profile));
-                }
-                Err(fdeflate::BoundedDecompressionError::DecompressionError { inner: err }) => {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::CorruptFlateStream { err }.into(),
-                    ))
-                }
-                Err(fdeflate::BoundedDecompressionError::OutputTooLarge { .. }) => {
-                    return Err(DecodingError::LimitsExceeded);
-                }
-            }
-
+            self.have_iccp = true;
+            let _ = self.parse_iccp_raw();
             Ok(Decoded::Nothing)
         }
+    }
+
+    fn parse_iccp_raw(&mut self) -> Result<(), DecodingError> {
+        let info = self.info.as_mut().unwrap();
+        let mut buf = &self.current_chunk.raw_bytes[..];
+
+        // read profile name
+        let _: u8 = buf.read_be()?;
+        for _ in 1..80 {
+            let raw: u8 = buf.read_be()?;
+            if raw == 0 {
+                break;
+            }
+        }
+
+        match buf.read_be()? {
+            // compression method
+            0u8 => (),
+            n => {
+                return Err(DecodingError::Format(
+                    FormatErrorInner::UnknownCompressionMethod(n).into(),
+                ))
+            }
+        }
+
+        match fdeflate::decompress_to_vec_bounded(buf, self.limits.bytes) {
+            Ok(profile) => {
+                self.limits.reserve_bytes(profile.len())?;
+                info.icc_profile = Some(Cow::Owned(profile));
+            }
+            Err(fdeflate::BoundedDecompressionError::DecompressionError { inner: err }) => {
+                return Err(DecodingError::Format(
+                    FormatErrorInner::CorruptFlateStream { err }.into(),
+                ))
+            }
+            Err(fdeflate::BoundedDecompressionError::OutputTooLarge { .. }) => {
+                return Err(DecodingError::LimitsExceeded);
+            }
+        }
+
+        Ok(())
     }
 
     fn parse_ihdr(&mut self) -> Result<Decoded, DecodingError> {
@@ -1478,7 +1501,7 @@ impl Default for ChunkState {
             type_: ChunkType([0; 4]),
             crc: Crc32::new(),
             remaining: 0,
-            raw_bytes: Vec::with_capacity(CHUNCK_BUFFER_SIZE),
+            raw_bytes: Vec::with_capacity(CHUNK_BUFFER_SIZE),
         }
     }
 }
@@ -1740,6 +1763,15 @@ mod tests {
         assert_eq!(4070462061, crc32fast::hash(&icc_profile));
     }
 
+    #[test]
+    fn test_png_with_broken_iccp() {
+        let decoder = crate::Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
+        assert!(decoder.read_info().is_ok());
+        let mut decoder = crate::Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
+        decoder.set_ignore_iccp_chunk(true);
+        assert!(decoder.read_info().is_ok());
+    }
+
     /// Writes an acTL chunk.
     /// See https://wiki.mozilla.org/APNG_Specification#.60acTL.60:_The_Animation_Control_Chunk
     fn write_actl(w: &mut impl Write, animation: &crate::AnimationControl) {
@@ -1909,7 +1941,7 @@ mod tests {
                 panic!("No fcTL (2nd frame)");
             };
             // The sequence number is taken from the `fcTL` chunk that comes before the two `fdAT`
-            // chunks.  Note that sequence numbers inside `fdAT` chunks are not publically exposed
+            // chunks.  Note that sequence numbers inside `fdAT` chunks are not publicly exposed
             // (but they are still checked when decoding to verify that they are sequential).
             assert_eq!(frame_control.sequence_number, 1);
         }

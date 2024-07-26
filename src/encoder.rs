@@ -9,7 +9,7 @@ use flate2::write::ZlibEncoder;
 use crate::chunk::{self, ChunkType};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
-    FrameControl, Info, ParameterError, ParameterErrorKind, ScaledFloat,
+    FrameControl, Info, ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat,
 };
 use crate::filter::{filter, AdaptiveFilterType, FilterType};
 use crate::text_metadata::{
@@ -169,6 +169,24 @@ impl<'a, W: Write> Encoder<'a, W> {
         }
     }
 
+    pub fn with_info(w: W, info: Info<'a>) -> Result<Encoder<'a, W>> {
+        if info.animation_control.is_some() != info.frame_control.is_some() {
+            return Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()));
+        }
+
+        if let Some(actl) = info.animation_control {
+            if actl.num_frames == 0 {
+                return Err(EncodingError::Format(FormatErrorKind::ZeroFrames.into()));
+            }
+        }
+
+        Ok(Encoder {
+            w,
+            info,
+            options: Options::default(),
+        })
+    }
+
     /// Specify that the image is animated.
     ///
     /// `num_frames` controls how many frames the animation has, while
@@ -315,7 +333,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     ///
     /// If the denominator is 0, it is to be treated as if it were 100
     /// (that is, the numerator then specifies 1/100ths of a second).
-    /// If the the value of the numerator is 0 the decoder should render the next frame
+    /// If the value of the numerator is 0 the decoder should render the next frame
     /// as quickly as possible, though viewers may impose a reasonable lower bound.
     ///
     /// The default value is 0 for both the numerator and denominator.
@@ -403,7 +421,9 @@ impl<'a, W: Write> Encoder<'a, W> {
             Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()))
         }
     }
-
+    pub fn set_pixel_dims(&mut self, pixel_dims: Option<PixelDimensions>) {
+        self.info.pixel_dims = pixel_dims
+    }
     /// Convenience function to add tEXt chunks to [`Info`] struct
     pub fn add_text_chunk(&mut self, keyword: String, text: String) -> Result<()> {
         let text_chunk = TEXtChunk::new(keyword, text);
@@ -632,9 +652,9 @@ impl<W: Write> Writer<W> {
         }
     }
 
-    const MAX_IDAT_CHUNK_LEN: u32 = std::u32::MAX >> 1;
+    const MAX_IDAT_CHUNK_LEN: u32 = u32::MAX >> 1;
     #[allow(non_upper_case_globals)]
-    const MAX_fdAT_CHUNK_LEN: u32 = (std::u32::MAX >> 1) - 4;
+    const MAX_fdAT_CHUNK_LEN: u32 = (u32::MAX >> 1) - 4;
 
     /// Writes the next image data.
     pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
@@ -668,21 +688,74 @@ impl<W: Write> Writer<W> {
 
         let prev = vec![0; in_len];
         let mut prev = prev.as_slice();
-        let mut current = vec![0; in_len];
 
-        let mut zlib = ZlibEncoder::new(Vec::new(), self.info.compression.to_options());
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
         let adaptive_method = self.options.adaptive_filter;
 
-        for line in data.chunks(in_len) {
-            current.copy_from_slice(line);
-            let filter_type = filter(filter_method, adaptive_method, bpp, prev, &mut current);
-            zlib.write_all(&[filter_type as u8])?;
-            zlib.write_all(&current)?;
-            prev = line;
-        }
-        let zlib_encoded = zlib.finish()?;
+        let zlib_encoded = match self.info.compression {
+            Compression::Fast => {
+                let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
+
+                let mut current = vec![0; in_len + 1];
+                for line in data.chunks(in_len) {
+                    let filter_type = filter(
+                        filter_method,
+                        adaptive_method,
+                        bpp,
+                        prev,
+                        line,
+                        &mut current[1..],
+                    );
+
+                    current[0] = filter_type as u8;
+                    compressor.write_data(&current)?;
+                    prev = line;
+                }
+
+                let compressed = compressor.finish()?.into_inner();
+                if compressed.len()
+                    > fdeflate::StoredOnlyCompressor::<()>::compressed_size((in_len + 1) * height)
+                {
+                    // Write uncompressed data since the result from fast compression would take
+                    // more space than that.
+                    //
+                    // We always use FilterType::NoFilter here regardless of the filter method
+                    // requested by the user. Doing filtering again would only add performance
+                    // cost for both encoding and subsequent decoding, without improving the
+                    // compression ratio.
+                    let mut compressor =
+                        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                    for line in data.chunks(in_len) {
+                        compressor.write_data(&[0])?;
+                        compressor.write_data(line)?;
+                    }
+                    compressor.finish()?.into_inner()
+                } else {
+                    compressed
+                }
+            }
+            _ => {
+                let mut current = vec![0; in_len];
+
+                let mut zlib = ZlibEncoder::new(Vec::new(), self.info.compression.to_options());
+                for line in data.chunks(in_len) {
+                    let filter_type = filter(
+                        filter_method,
+                        adaptive_method,
+                        bpp,
+                        prev,
+                        line,
+                        &mut current,
+                    );
+
+                    zlib.write_all(&[filter_type as u8])?;
+                    zlib.write_all(&current)?;
+                    prev = line;
+                }
+                zlib.finish()?
+            }
+        };
 
         match self.info.frame_control {
             None => {
@@ -773,7 +846,7 @@ impl<W: Write> Writer<W> {
     ///
     /// If the denominator is 0, it is to be treated as if it were 100
     /// (that is, the numerator then specifies 1/100ths of a second).
-    /// If the the value of the numerator is 0 the decoder should render the next frame
+    /// If the value of the numerator is 0 the decoder should render the next frame
     /// as quickly as possible, though viewers may impose a reasonable lower bound.
     ///
     /// This method will return an error if the image is not animated.
@@ -1046,13 +1119,12 @@ impl<'a, W: Write> ChunkWriter<'a, W> {
         //
         // TODO (maybe): find a way to hold two chunks at a time if `usize`
         //               is 64 bits.
-        const CAP: usize = std::u32::MAX as usize >> 1;
-        let curr_chunk;
-        if writer.images_written == 0 {
-            curr_chunk = chunk::IDAT;
+        const CAP: usize = u32::MAX as usize >> 1;
+        let curr_chunk = if writer.images_written == 0 {
+            chunk::IDAT
         } else {
-            curr_chunk = chunk::fdAT;
-        }
+            chunk::fdAT
+        };
         ChunkWriter {
             writer,
             buffer: vec![0; CAP.min(buf_len)],
@@ -1321,7 +1393,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     ///
     /// If the denominator is 0, it is to be treated as if it were 100
     /// (that is, the numerator then specifies 1/100ths of a second).
-    /// If the the value of the numerator is 0 the decoder should render the next frame
+    /// If the value of the numerator is 0 the decoder should render the next frame
     /// as quickly as possible, though viewers may impose a reasonable lower bound.
     ///
     /// This method will return an error if the image is not animated.
@@ -1471,6 +1543,12 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         }
     }
 
+    /// Consume the stream writer with validation.
+    ///
+    /// Unlike a simple drop this ensures that the all data was written correctly. When other
+    /// validation options (chunk sequencing) had been turned on in the configuration of inner
+    /// [`Writer`], then it will also do a check on their correctness. Differently from
+    /// [`Writer::finish`], this just `flush`es, returns error if some data is abandoned.
     pub fn finish(mut self) -> Result<()> {
         if self.to_write > 0 {
             let err = FormatErrorKind::MissingData(self.to_write).into();
@@ -1561,12 +1639,15 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
         self.to_write -= written;
 
         if self.index == self.line_len {
+            // TODO: reuse this buffer between rows.
+            let mut filtered = vec![0; self.curr_buf.len()];
             let filter_type = filter(
                 self.filter,
                 self.adaptive_filter,
                 self.bpp,
                 &self.prev_buf,
-                &mut self.curr_buf,
+                &self.curr_buf,
+                &mut filtered,
             );
             // This can't fail as the other variant is used only to allow the zlib encoder to finish
             let wrt = match &mut self.writer {
@@ -1575,7 +1656,7 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
             };
 
             wrt.write_all(&[filter_type as u8])?;
-            wrt.write_all(&self.curr_buf)?;
+            wrt.write_all(&filtered)?;
             mem::swap(&mut self.prev_buf, &mut self.curr_buf);
             self.index = 0;
         }
@@ -1610,15 +1691,34 @@ impl<W: Write> Drop for StreamWriter<'_, W> {
     }
 }
 
+/// Mod to encapsulate the converters depending on the `deflate` crate.
+///
+/// Since this only contains trait impls, there is no need to make this public, they are simply
+/// available when the mod is compiled as well.
+impl Compression {
+    fn to_options(self) -> flate2::Compression {
+        #[allow(deprecated)]
+        match self {
+            Compression::Default => flate2::Compression::default(),
+            Compression::Fast => flate2::Compression::fast(),
+            Compression::Best => flate2::Compression::best(),
+            #[allow(deprecated)]
+            Compression::Huffman => flate2::Compression::none(),
+            #[allow(deprecated)]
+            Compression::Rle => flate2::Compression::none(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Decoder;
 
     use rand::{thread_rng, Rng};
+    use std::cmp;
     use std::fs::File;
-    use std::io::{Cursor, Write};
-    use std::{cmp, io};
+    use std::io::Cursor;
 
     #[test]
     fn roundtrip() {
@@ -2196,6 +2296,35 @@ mod tests {
     }
 
     #[test]
+    fn stream_filtering() -> Result<()> {
+        let output = vec![0u8; 1024];
+        let mut cursor = Cursor::new(output);
+
+        let mut encoder = Encoder::new(&mut cursor, 8, 8);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_filter(FilterType::Paeth);
+        let mut writer = encoder.write_header()?;
+        let mut stream = writer.stream_writer()?;
+
+        for _ in 0..8 {
+            let written = stream.write(&[1; 32])?;
+            assert_eq!(written, 32);
+        }
+        stream.finish()?;
+        drop(writer);
+
+        {
+            cursor.set_position(0);
+            let mut decoder = Decoder::new(cursor).read_info().expect("A valid image");
+            let mut buffer = [0u8; 256];
+            decoder.next_frame(&mut buffer[..]).expect("Valid read");
+            assert_eq!(buffer, [1; 256]);
+        }
+
+        Ok(())
+    }
+
+    #[test]
     #[cfg(all(unix, not(target_pointer_width = "32")))]
     fn exper_error_on_huge_chunk() -> Result<()> {
         // Okay, so we want a proper 4 GB chunk but not actually spend the memory for reserving it.
@@ -2255,7 +2384,7 @@ mod tests {
             encoder.set_color(ColorType::Grayscale);
 
             let mut writer = encoder.write_header()?;
-            writer.write_image_data(&vec![0; 100])?;
+            writer.write_image_data(&[0; 100])?;
             writer.finish()?;
         }
 
@@ -2279,22 +2408,6 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             self.w.flush()
-        }
-    }
-}
-
-/// Mod to encapsulate the converters depending on the `deflate` crate.
-///
-/// Since this only contains trait impls, there is no need to make this public, they are simply
-/// available when the mod is compiled as well.
-impl Compression {
-    fn to_options(self) -> flate2::Compression {
-        match self {
-            Compression::Default => flate2::Compression::default(),
-            Compression::Fast => flate2::Compression::fast(),
-            Compression::Best => flate2::Compression::best(),
-            Compression::Huffman => flate2::Compression::none(),
-            Compression::Rle => flate2::Compression::none(),
         }
     }
 }

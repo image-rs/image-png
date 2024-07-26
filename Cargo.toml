@@ -1,14 +1,15 @@
 [package]
 name = "png"
-version = "0.17.7"
+version = "0.17.13"
 license = "MIT OR Apache-2.0"
 
 description = "PNG decoding and encoding library in pure Rust"
 categories = ["multimedia::images"]
 authors = ["The image-rs Developers"]
-repository = "https://github.com/image-rs/image-png.git"
+repository = "https://github.com/image-rs/image-png"
 
 edition = "2018"
+rust-version = "1.57"
 include = [
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
@@ -22,20 +23,20 @@ include = [
 [dependencies]
 bitflags = "1.0"
 crc32fast = "1.2.0"
-flate2 = { version = "1.0", default-features = false }
-miniz_oxide = "0.6.0"
+
+fdeflate = "0.3.3"
+flate2 =  { version = "1.0.11", default-features = false }
+miniz_oxide = { version = "0.7.1", features = ["simd"] }
 
 [dev-dependencies]
-criterion = "0.3.1"
+byteorder = "1.5.0"
+clap = { version = "3.0", features = ["derive"] }
+criterion = "0.4.0"
 getopts = "0.2.14"
-term = "0.7"
+glium = { version = "0.32", features = ["glutin"], default-features = false }
 glob = "0.3"
 rand = "0.8.4"
-
-[dev-dependencies.glium]
-version = "0.31"
-features = ["glutin"]
-default-features = false
+term = "0.7"
 
 [features]
 default = ["rust_backend"]
@@ -48,3 +49,15 @@ zlib-ng = ["flate2/zlib-ng"]
 path = "benches/decoder.rs"
 name = "decoder"
 harness = false
+
+[[bench]]
+path = "benches/unfilter.rs"
+name = "unfilter"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+path = "benches/expand_paletted.rs"
+name = "expand_paletted"
+harness = false
+required-features = ["benchmarks"]

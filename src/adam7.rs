@@ -1,91 +1,6 @@
 //! Utility functions
-use std::iter::{repeat, StepBy};
+use std::iter::StepBy;
 use std::ops::Range;
-
-#[inline(always)]
-pub fn unpack_bits<F>(buf: &mut [u8], channels: usize, bit_depth: u8, func: F)
-where
-    F: Fn(u8, &mut [u8]),
-{
-    // Return early if empty. This enables to subtract `channels` later without overflow.
-    if buf.len() < channels {
-        return;
-    }
-
-    let bits = buf.len() / channels * bit_depth as usize;
-    let extra_bits = bits % 8;
-    let entries = bits / 8
-        + match extra_bits {
-            0 => 0,
-            _ => 1,
-        };
-    let skip = match extra_bits {
-        0 => 0,
-        n => (8 - n) / bit_depth as usize,
-    };
-    let mask = ((1u16 << bit_depth) - 1) as u8;
-    let i = (0..entries)
-        .rev() // reverse iterator
-        .flat_map(|idx|
-            // this has to be reversed too
-            (0..8).step_by(bit_depth.into())
-            .zip(repeat(idx)))
-        .skip(skip);
-    let j = (0..=buf.len() - channels).rev().step_by(channels);
-    for ((shift, i), j) in i.zip(j) {
-        let pixel = (buf[i] & (mask << shift)) >> shift;
-        func(pixel, &mut buf[j..(j + channels)])
-    }
-}
-
-pub fn expand_trns_line(buf: &mut [u8], trns: &[u8], channels: usize) {
-    // Return early if empty. This enables to subtract `channels` later without overflow.
-    if buf.len() < (channels + 1) {
-        return;
-    }
-
-    let i = (0..=buf.len() / (channels + 1) * channels - channels)
-        .rev()
-        .step_by(channels);
-    let j = (0..=buf.len() - (channels + 1)).rev().step_by(channels + 1);
-    for (i, j) in i.zip(j) {
-        let i_pixel = i;
-        let j_chunk = j;
-        if &buf[i_pixel..i_pixel + channels] == trns {
-            buf[j_chunk + channels] = 0
-        } else {
-            buf[j_chunk + channels] = 0xFF
-        }
-        for k in (0..channels).rev() {
-            buf[j_chunk + k] = buf[i_pixel + k];
-        }
-    }
-}
-
-pub fn expand_trns_line16(buf: &mut [u8], trns: &[u8], channels: usize) {
-    let c2 = 2 * channels;
-    // Return early if empty. This enables to subtract `channels` later without overflow.
-    if buf.len() < (c2 + 2) {
-        return;
-    }
-
-    let i = (0..=buf.len() / (c2 + 2) * c2 - c2).rev().step_by(c2);
-    let j = (0..=buf.len() - (c2 + 2)).rev().step_by(c2 + 2);
-    for (i, j) in i.zip(j) {
-        let i_pixel = i;
-        let j_chunk = j;
-        if &buf[i_pixel..i_pixel + c2] == trns {
-            buf[j_chunk + c2] = 0;
-            buf[j_chunk + c2 + 1] = 0
-        } else {
-            buf[j_chunk + c2] = 0xFF;
-            buf[j_chunk + c2 + 1] = 0xFF
-        }
-        for k in (0..c2).rev() {
-            buf[j_chunk + k] = buf[i_pixel + k];
-        }
-    }
-}
 
 /// This iterator iterates over the different passes of an image Adam7 encoded
 /// PNG image
@@ -310,7 +225,7 @@ fn test_expand_adam7_bits() {
             expected(start, 8, 4)
         );
 
-        let start = (8 * line_no + 4) as usize * width as usize;
+        let start = (8 * line_no + 4) * width;
 
         assert_eq!(
             expand_adam7_bits(3, width, line_no, bits_pp).collect::<Vec<_>>(),

@@ -343,7 +343,7 @@ impl ScaledFloat {
 
     /// Gets whether the value is within the clamped range of this type.
     pub fn in_range(value: f32) -> bool {
-        value >= 0.0 && (value * Self::SCALING).floor() <= std::u32::MAX as f32
+        value >= 0.0 && (value * Self::SCALING).floor() <= u32::MAX as f32
     }
 
     /// Gets whether the value can be exactly converted in round-trip.
@@ -365,14 +365,12 @@ impl ScaledFloat {
     /// Slightly inaccurate scaling and quantization.
     /// Clamps the value into the representable range if it is negative or too large.
     pub fn new(value: f32) -> Self {
-        Self {
-            0: Self::forward(value),
-        }
+        Self(Self::forward(value))
     }
 
     /// Fully accurate construction from a value scaled as per specification.
     pub fn from_scaled(val: u32) -> Self {
-        Self { 0: val }
+        Self(val)
     }
 
     /// Get the accurate encoded value.
@@ -382,7 +380,7 @@ impl ScaledFloat {
 
     /// Get the unscaled value as a floating point.
     pub fn into_value(self) -> f32 {
-        Self::reverse(self.0) as f32
+        Self::reverse(self.0)
     }
 
     pub(crate) fn encode_gama<W: Write>(self, w: &mut W) -> encoder::Result<()> {
@@ -596,15 +594,7 @@ impl Info<'_> {
     /// has the consequence that the number of possible values is rather small. To make this fact
     /// more obvious in the type system and the optimizer we use an explicit enum here.
     pub(crate) fn bpp_in_prediction(&self) -> BytesPerPixel {
-        match self.bytes_per_pixel() {
-            1 => BytesPerPixel::One,
-            2 => BytesPerPixel::Two,
-            3 => BytesPerPixel::Three,
-            4 => BytesPerPixel::Four,
-            6 => BytesPerPixel::Six,   // Only rgb×16bit
-            8 => BytesPerPixel::Eight, // Only rgba×16bit
-            _ => unreachable!("Not a possible byte rounded pixel width"),
-        }
+        BytesPerPixel::from_usize(self.bytes_per_pixel())
     }
 
     /// Returns the number of bytes needed for one deinterlaced image.
@@ -641,6 +631,17 @@ impl Info<'_> {
         data[9] = self.color_type as u8;
         data[12] = self.interlaced as u8;
         encoder::write_chunk(&mut w, chunk::IHDR, &data)?;
+        // Encode the pHYs chunk
+        if let Some(pd) = self.pixel_dims {
+            let mut phys_data = [0; 9];
+            phys_data[0..4].copy_from_slice(&pd.xppu.to_be_bytes());
+            phys_data[4..8].copy_from_slice(&pd.yppu.to_be_bytes());
+            match pd.unit {
+                Unit::Meter => phys_data[8] = 1,
+                Unit::Unspecified => phys_data[8] = 0,
+            }
+            encoder::write_chunk(&mut w, chunk::pHYs, &phys_data)?;
+        }
 
         if let Some(p) = &self.palette {
             encoder::write_chunk(&mut w, chunk::PLTE, p)?;
@@ -686,12 +687,24 @@ impl Info<'_> {
 }
 
 impl BytesPerPixel {
+    pub(crate) fn from_usize(bpp: usize) -> Self {
+        match bpp {
+            1 => BytesPerPixel::One,
+            2 => BytesPerPixel::Two,
+            3 => BytesPerPixel::Three,
+            4 => BytesPerPixel::Four,
+            6 => BytesPerPixel::Six,   // Only rgb×16bit
+            8 => BytesPerPixel::Eight, // Only rgba×16bit
+            _ => unreachable!("Not a possible byte rounded pixel width"),
+        }
+    }
+
     pub(crate) fn into_usize(self) -> usize {
         self as usize
     }
 }
 
-bitflags! {
+bitflags::bitflags! {
     /// Output transformations
     ///
     /// Many flags from libpng are not yet supported. A PR discussing/adding them would be nice.
@@ -729,13 +742,15 @@ bitflags! {
     "]
     pub struct Transformations: u32 {
         /// No transformation
-        const IDENTITY            = 0x0000; // read and write */
+        const IDENTITY            = 0x00000; // read and write */
         /// Strip 16-bit samples to 8 bits
-        const STRIP_16            = 0x0001; // read only */
+        const STRIP_16            = 0x00001; // read only */
         /// Expand paletted images to RGB; expand grayscale images of
         /// less than 8-bit depth to 8-bit depth; and expand tRNS chunks
         /// to alpha channels.
-        const EXPAND              = 0x0010; // read only */
+        const EXPAND              = 0x00010; // read only */
+        /// Expand paletted images to include an alpha channel. Implies `EXPAND`.
+        const ALPHA               = 0x10000; // read only */
     }
 }
 

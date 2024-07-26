@@ -1,5 +1,50 @@
 ## Unreleased
 
+## 0.17.13
+
+* Fix `Send` bound on `Reader`.
+
+## 0.17.12
+
+* Reject zero-sized frames.
+* Optimized decoding of paletted images.
+* Removed remaining uses of miniz_oxide for decoding.
+* Correct lifetime used for `Info` struct.
+* Fix build issue with `-Z minimal-versions`.
+
+## 0.17.11
+
+* Ignore subsequent iCCP chunks to match libpng behavior.
+* Added an option to ignore ancillary chunks with invalid CRC.
+* Added `new_with_info` constructor for encoder.
+* Removed hard-coded memory limits.
+* No longer allow zero sized images.
+* Added `Reader::finish` to read all the auxiliary chunks that comes after the
+  image.
+
+## 0.17.10
+
+* Added Transformations::ALPHA
+* Enable encoding pixel dimensions
+
+## 0.17.9
+
+* Fixed a bug in ICC profile decompression.
+* Improved unfilter performance.
+
+## 0.17.8
+
+* Increased MSRV to 1.57.0.
+* Substantially optimized encoding and decoding:
+  - Autovectorize filtering and unfiltering.
+  - Make the "fast" compression preset use fdeflate.
+  - Switch decompression to always use fdeflate.
+  - Updated to miniz_oxide 0.7.
+  - Added an option to ignore checksums.
+* Added corpus-bench example which measures the compression ratio and time to
+  re-encode and subsequently decode a corpus of images.
+* More fuzz testing.
+
 ## 0.17.7
 
 * Fixed handling broken tRNS chunk.

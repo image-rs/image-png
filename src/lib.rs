@@ -58,11 +58,10 @@
 //! ```
 //!
 
+#![cfg_attr(feature = "unstable", feature(portable_simd))]
 #![forbid(unsafe_code)]
 
-#[macro_use]
-extern crate bitflags;
-
+mod adam7;
 pub mod chunk;
 mod common;
 mod decoder;
@@ -71,11 +70,16 @@ mod filter;
 mod srgb;
 pub mod text_metadata;
 mod traits;
-mod utils;
 
-pub use crate::{
-    common::*,
-    decoder::{Decoded, Decoder, DecodingError, Limits, OutputInfo, Reader, StreamingDecoder},
-    encoder::{Encoder, EncodingError, StreamWriter, Writer},
-    filter::{AdaptiveFilterType, FilterType},
+pub use crate::common::*;
+pub use crate::decoder::{
+    DecodeOptions, Decoded, Decoder, DecodingError, Limits, OutputInfo, Reader, StreamingDecoder,
 };
+pub use crate::encoder::{Encoder, EncodingError, StreamWriter, Writer};
+pub use crate::filter::{AdaptiveFilterType, FilterType};
+
+#[cfg(test)]
+pub(crate) mod test_utils;
+
+#[cfg(feature = "benchmarks")]
+pub mod benchable_apis;

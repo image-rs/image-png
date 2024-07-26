@@ -23,8 +23,9 @@ include = [
 [dependencies]
 bitflags = "1.0"
 crc32fast = "1.2.0"
+
 fdeflate = "0.3.3"
-flate2 = "1.0.11"
+flate2 =  { version = "1.0.11", default-features = false }
 miniz_oxide = { version = "0.7.1", features = ["simd"] }
 
 [dev-dependencies]
@@ -38,8 +39,11 @@ rand = "0.8.4"
 term = "0.7"
 
 [features]
+default = ["rust_backend"]
 unstable = []
 benchmarks = []
+rust_backend = ["flate2/rust_backend"]
+zlib-ng = ["flate2/zlib-ng"]
 
 [[bench]]
 path = "benches/decoder.rs"

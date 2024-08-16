@@ -483,14 +483,45 @@ impl<R: Read> Reader<R> {
         Ok(())
     }
 
-    /// Returns the next processed row of the image
+    /// Returns the next processed row of the image (discarding `InterlaceInfo`).
+    ///
+    /// See also [`Reader.read_row`], which reads into a caller-provided buffer.
     pub fn next_row(&mut self) -> Result<Option<Row>, DecodingError> {
         self.next_interlaced_row()
             .map(|v| v.map(|v| Row { data: v.data }))
     }
 
-    /// Returns the next processed row of the image
+    /// Returns the next processed row of the image.
+    ///
+    /// See also [`Reader.read_row`], which reads into a caller-provided buffer.
     pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow>, DecodingError> {
+        let mut output_buffer = mem::take(&mut self.scratch_buffer);
+        output_buffer.resize(self.output_line_size(self.info().width), 0u8);
+        let result = self.read_row(&mut output_buffer);
+        self.scratch_buffer = output_buffer;
+        result.map(move |option| {
+            option.map(move |interlace| {
+                let output_line_size = self.output_line_size_for_interlace_info(&interlace);
+                InterlacedRow {
+                    data: &self.scratch_buffer[..output_line_size],
+                    interlace,
+                }
+            })
+        })
+    }
+
+    /// Reads the next row of the image into the provided `output_buffer`.
+    /// `Ok(None)` will be returned if the current image frame has no more rows.
+    ///
+    /// `output_buffer` needs to be long enough to accommodate [`Reader.output_line_size`] for
+    /// [`Info.width`] (initial interlaced rows may need less than that).
+    ///
+    /// See also [`Reader.next_row`] and [`Reader.next_interlaced_row`], which read into a
+    /// `Reader`-owned buffer.
+    pub fn read_row(
+        &mut self,
+        output_buffer: &mut [u8],
+    ) -> Result<Option<InterlaceInfo>, DecodingError> {
         let interlace = match self.subframe.current_interlace_info.as_ref() {
             None => {
                 self.finish_decoding()?;
@@ -507,24 +538,21 @@ impl<R: Read> Reader<R> {
                 self.info().raw_row_length_from_width(width)
             }
         };
+
+        let output_line_size = self.output_line_size_for_interlace_info(&interlace);
+        let output_buffer = &mut output_buffer[..output_line_size];
+
+        self.next_interlaced_row_impl(rowlen, output_buffer)?;
+
+        Ok(Some(interlace))
+    }
+
+    fn output_line_size_for_interlace_info(&self, interlace: &InterlaceInfo) -> usize {
         let width = match interlace {
-            InterlaceInfo::Adam7(Adam7Info { width, .. }) => width,
+            InterlaceInfo::Adam7(Adam7Info { width, .. }) => *width,
             InterlaceInfo::Null(_) => self.subframe.width,
         };
-        let output_line_size = self.output_line_size(width);
-
-        // TODO: change the interface of `next_interlaced_row` to take an output buffer instead of
-        // making us return a reference to a buffer that we own.
-        let mut output_buffer = mem::take(&mut self.scratch_buffer);
-        output_buffer.resize(output_line_size, 0u8);
-        let ret = self.next_interlaced_row_impl(rowlen, &mut output_buffer);
-        self.scratch_buffer = output_buffer;
-        ret?;
-
-        Ok(Some(InterlacedRow {
-            data: &self.scratch_buffer[..output_line_size],
-            interlace,
-        }))
+        self.output_line_size(width)
     }
 
     /// Read the rest of the image and chunks and finish up, including text chunks or others

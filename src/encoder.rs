@@ -694,7 +694,7 @@ impl<W: Write> Writer<W> {
         let adaptive_method = self.options.adaptive_filter;
 
         let zlib_encoded = match self.info.compression {
-            Compression::None => self.stored_only_compressor(data, in_len)?,
+            Compression::None => Self::stored_only_compressor(data, in_len)?,
             Compression::Fast => {
                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
 
@@ -725,7 +725,7 @@ impl<W: Write> Writer<W> {
                     // requested by the user. Doing filtering again would only add performance
                     // cost for both encoding and subsequent decoding, without improving the
                     // compression ratio.
-                    self.stored_only_compressor(data, in_len)?
+                    Self::stored_only_compressor(data, in_len)?
                 } else {
                     compressed
                 }
@@ -812,7 +812,7 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    fn stored_only_compressor(&self, data: &[u8], in_len: usize) -> Result<Vec<u8>> {
+    fn stored_only_compressor(data: &[u8], in_len: usize) -> Result<Vec<u8>> {
         let mut compressor = fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
         for line in data.chunks(in_len) {
             compressor.write_data(&[0])?;

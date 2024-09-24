@@ -1731,30 +1731,34 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                // Encode decoded image
-                let mut out = Vec::new();
-                {
-                    let mut wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut out,
-                    };
+                use AdvancedCompression::*;
+                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                    // Encode decoded image
+                    let mut out = Vec::new();
+                    {
+                        let mut wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut out,
+                        };
 
-                    let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
-                    encoder.set_color(info.color_type);
-                    encoder.set_depth(info.bit_depth);
-                    if let Some(palette) = &reader.info().palette {
-                        encoder.set_palette(palette.clone());
+                        let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
+                        encoder.set_color(info.color_type);
+                        encoder.set_depth(info.bit_depth);
+                        encoder.set_compression_advanced(compression);
+                        if let Some(palette) = &reader.info().palette {
+                            encoder.set_palette(palette.clone());
+                        }
+                        let mut encoder = encoder.write_header().unwrap();
+                        encoder.write_image_data(&buf).unwrap();
                     }
-                    let mut encoder = encoder.write_header().unwrap();
-                    encoder.write_image_data(&buf).unwrap();
+                    // Decode encoded decoded image
+                    let decoder = Decoder::new(&*out);
+                    let mut reader = decoder.read_info().unwrap();
+                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    reader.next_frame(&mut buf2).unwrap();
+                    // check if the encoded image is ok:
+                    assert_eq!(buf, buf2);
                 }
-                // Decode encoded decoded image
-                let decoder = Decoder::new(&*out);
-                let mut reader = decoder.read_info().unwrap();
-                let mut buf2 = vec![0; reader.output_buffer_size()];
-                reader.next_frame(&mut buf2).unwrap();
-                // check if the encoded image is ok:
-                assert_eq!(buf, buf2);
             }
         }
     }
@@ -1776,37 +1780,41 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                // Encode decoded image
-                let mut out = Vec::new();
-                {
-                    let mut wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut out,
-                    };
+                use AdvancedCompression::*;
+                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                    // Encode decoded image
+                    let mut out = Vec::new();
+                    {
+                        let mut wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut out,
+                        };
 
-                    let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
-                    encoder.set_color(info.color_type);
-                    encoder.set_depth(info.bit_depth);
-                    if let Some(palette) = &reader.info().palette {
-                        encoder.set_palette(palette.clone());
+                        let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
+                        encoder.set_color(info.color_type);
+                        encoder.set_depth(info.bit_depth);
+                        encoder.set_compression_advanced(compression);
+                        if let Some(palette) = &reader.info().palette {
+                            encoder.set_palette(palette.clone());
+                        }
+                        let mut encoder = encoder.write_header().unwrap();
+                        let mut stream_writer = encoder.stream_writer().unwrap();
+
+                        let mut outer_wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut stream_writer,
+                        };
+
+                        outer_wrapper.write_all(&buf).unwrap();
                     }
-                    let mut encoder = encoder.write_header().unwrap();
-                    let mut stream_writer = encoder.stream_writer().unwrap();
-
-                    let mut outer_wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut stream_writer,
-                    };
-
-                    outer_wrapper.write_all(&buf).unwrap();
+                    // Decode encoded decoded image
+                    let decoder = Decoder::new(&*out);
+                    let mut reader = decoder.read_info().unwrap();
+                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    reader.next_frame(&mut buf2).unwrap();
+                    // check if the encoded image is ok:
+                    assert_eq!(buf, buf2);
                 }
-                // Decode encoded decoded image
-                let decoder = Decoder::new(&*out);
-                let mut reader = decoder.read_info().unwrap();
-                let mut buf2 = vec![0; reader.output_buffer_size()];
-                reader.next_frame(&mut buf2).unwrap();
-                // check if the encoded image is ok:
-                assert_eq!(buf, buf2);
             }
         }
     }

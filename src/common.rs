@@ -1,6 +1,8 @@
 //! Common types shared between the encoder and decoder
 use crate::text_metadata::{EncodableTextChunk, ITXtChunk, TEXtChunk, ZTXtChunk};
 use crate::{chunk, encoder};
+#[allow(unused_imports)] // used by doc comments only
+use crate::{AdaptiveFilterType, FilterType};
 use io::Write;
 use std::{borrow::Cow, convert::TryFrom, fmt, io};
 
@@ -333,6 +335,67 @@ impl Default for Compression {
     }
 }
 
+/// Advanced compression settings with more customization options than [Compression].
+///
+/// Note that this setting only affects DEFLATE compression.
+/// Another setting that influences the compression ratio and lets you choose
+/// between encoding speed and compression ratio is the *filter*,
+/// See [FilterType] and [AdaptiveFilterType].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub enum AdvancedCompression {
+    /// Do not compress the data at all.
+    ///
+    /// Useful for incompressible images such as photographs,
+    /// or when speed is paramount and you don't care about size at all.
+    ///
+    /// This mode also disables filters, forcing [FilterType::NoFilter].
+    NoCompression,
+
+    /// Excellent for creating lightly compressed PNG images very quickly.
+    ///
+    /// Uses the [fdeflate](https://crates.io/crates/fdeflate) crate under the hood
+    /// to achieve speeds far exceeding what libpng is capable of
+    /// while still providing a decent compression ratio.
+    ///
+    /// Images encoded in this mode can also be decoded by the `png` crate extremely quickly,
+    /// much faster than what is typical for PNG images.
+    /// Other decoders (e.g. libpng) do not get a decoding speed boost from this mode.
+    FdeflateUltraFast,
+
+    /// Uses [flate2](https://crates.io/crates/flate2) crate with the specified [compression level](flate2::Compression::new).
+    ///
+    /// Flate2 has several backends that make different trade-offs.
+    /// See the flate2 documentation for the available backends for more information.
+    Flate2(u32),
+    // TODO: Zopfli?
+}
+
+impl AdvancedCompression {
+    pub(crate) fn from_simple(value: Compression) -> Self {
+        #[allow(deprecated)]
+        match value {
+            Compression::Default => Self::Flate2(flate2::Compression::default().level()),
+            Compression::Fast => Self::FdeflateUltraFast,
+            Compression::Best => Self::Flate2(flate2::Compression::best().level()),
+            // These two options are deprecated, and no longer directly supported.
+            // They used to map to flate2 level 0, which was meant to map to "no compression",
+            // but miniz_oxide doesn't understand level 0 and uses its default level instead.
+            // So we just keep mapping these to the default compression level to preserve that behavior.
+            Compression::Huffman => Self::Flate2(flate2::Compression::default().level()),
+            Compression::Rle => Self::Flate2(flate2::Compression::default().level()),
+        }
+    }
+
+    pub(crate) fn closest_flate2_level(&self) -> flate2::Compression {
+        match self {
+            AdvancedCompression::NoCompression => flate2::Compression::none(),
+            AdvancedCompression::FdeflateUltraFast => flate2::Compression::new(1),
+            AdvancedCompression::Flate2(level) => flate2::Compression::new(*level),
+        }
+    }
+}
+
 /// An unsigned integer scaled version of a floating point value,
 /// equivalent to an integer quotient with fixed denominator (100_000)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,6 +558,8 @@ pub struct Info<'a> {
     pub frame_control: Option<FrameControl>,
     pub animation_control: Option<AnimationControl>,
     pub compression: Compression,
+    /// Advanced compression settings. Overrides the `compression` field, if set.
+    pub compression_advanced: Option<AdvancedCompression>,
     /// Gamma of the source system.
     /// Set by both `gAMA` as well as to a replacement by `sRGB` chunk.
     pub source_gamma: Option<ScaledFloat>,
@@ -533,6 +598,7 @@ impl Default for Info<'_> {
             // Default to `deflate::Compression::Fast` and `filter::FilterType::Sub`
             // to maintain backward compatible output.
             compression: Compression::Fast,
+            compression_advanced: None,
             source_gamma: None,
             source_chromaticities: None,
             srgb: None,
@@ -683,6 +749,15 @@ impl Info<'_> {
         }
 
         Ok(())
+    }
+
+    /// Computes the low-level compression settings from [Self::compression] and [Self::compression_advanced]
+    pub(crate) fn compression(&self) -> AdvancedCompression {
+        if let Some(options) = self.compression_advanced {
+            options
+        } else {
+            AdvancedCompression::from_simple(self.compression)
+        }
     }
 }
 

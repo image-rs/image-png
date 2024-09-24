@@ -16,6 +16,7 @@ use crate::text_metadata::{
     EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
 use crate::traits::WriteBytesExt;
+use crate::AdvancedCompression;
 
 pub type Result<T> = result::Result<T, EncodingError>;
 
@@ -295,11 +296,16 @@ impl<'a, W: Write> Encoder<'a, W> {
     }
 
     /// Set compression parameters.
-    ///
-    /// Accepts a `Compression` or any type that can transform into a `Compression`. Notably `deflate::Compression` and
-    /// `deflate::CompressionOptions` which "just work".
     pub fn set_compression(&mut self, compression: Compression) {
         self.info.compression = compression;
+        self.info.compression_advanced = None;
+    }
+
+    /// Provides in-depth customization of DEFLATE compression options.
+    ///
+    /// For a simpler selection of compression options see [Self::set_compression].
+    pub fn set_compression_advanced(&mut self, compression: AdvancedCompression) {
+        self.info.compression_advanced = Some(compression);
     }
 
     /// Set the used filter type.
@@ -495,7 +501,7 @@ struct PartialInfo {
     color_type: ColorType,
     frame_control: Option<FrameControl>,
     animation_control: Option<AnimationControl>,
-    compression: Compression,
+    compression: AdvancedCompression,
     has_palette: bool,
 }
 
@@ -508,7 +514,7 @@ impl PartialInfo {
             color_type: info.color_type,
             frame_control: info.frame_control,
             animation_control: info.animation_control,
-            compression: info.compression,
+            compression: info.compression(),
             has_palette: info.palette.is_some(),
         }
     }
@@ -538,7 +544,7 @@ impl PartialInfo {
             color_type: self.color_type,
             frame_control: self.frame_control,
             animation_control: self.animation_control,
-            compression: self.compression,
+            compression_advanced: Some(self.compression),
             ..Default::default()
         }
     }
@@ -694,7 +700,16 @@ impl<W: Write> Writer<W> {
         let adaptive_method = self.options.adaptive_filter;
 
         let zlib_encoded = match self.info.compression {
-            Compression::Fast => {
+            AdvancedCompression::NoCompression => {
+                let mut compressor =
+                    fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                for line in data.chunks(in_len) {
+                    compressor.write_data(&[0])?;
+                    compressor.write_data(line)?;
+                }
+                compressor.finish()?.into_inner()
+            }
+            AdvancedCompression::FdeflateUltraFast => {
                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
 
                 let mut current = vec![0; in_len + 1];
@@ -720,10 +735,7 @@ impl<W: Write> Writer<W> {
                     // Write uncompressed data since the result from fast compression would take
                     // more space than that.
                     //
-                    // We always use FilterType::NoFilter here regardless of the filter method
-                    // requested by the user. Doing filtering again would only add performance
-                    // cost for both encoding and subsequent decoding, without improving the
-                    // compression ratio.
+                    // This is essentially a fallback to NoCompression.
                     let mut compressor =
                         fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
                     for line in data.chunks(in_len) {
@@ -735,10 +747,10 @@ impl<W: Write> Writer<W> {
                     compressed
                 }
             }
-            _ => {
+            AdvancedCompression::Flate2(level) => {
                 let mut current = vec![0; in_len];
 
-                let mut zlib = ZlibEncoder::new(Vec::new(), self.info.compression.to_options());
+                let mut zlib = ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
                 for line in data.chunks(in_len) {
                     let filter_type = filter(
                         filter_method,
@@ -1322,7 +1334,7 @@ pub struct StreamWriter<'a, W: Write> {
     filter: FilterType,
     adaptive_filter: AdaptiveFilterType,
     fctl: Option<FrameControl>,
-    compression: Compression,
+    compression: AdvancedCompression,
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
@@ -1345,7 +1357,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let mut chunk_writer = ChunkWriter::new(writer, buf_len);
         let (line_len, to_write) = chunk_writer.next_frame_info();
         chunk_writer.write_header()?;
-        let zlib = ZlibEncoder::new(chunk_writer, compression.to_options());
+        let zlib = ZlibEncoder::new(chunk_writer, compression.closest_flate2_level());
 
         Ok(StreamWriter {
             writer: Wrapper::Zlib(zlib),
@@ -1595,7 +1607,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         // now it can be taken because the next statements cannot cause any errors
         match self.writer.take() {
             Wrapper::Chunk(wrt) => {
-                let encoder = ZlibEncoder::new(wrt, self.compression.to_options());
+                let encoder = ZlibEncoder::new(wrt, self.compression.closest_flate2_level());
                 self.writer = Wrapper::Zlib(encoder);
             }
             _ => unreachable!(),
@@ -1688,25 +1700,6 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
 impl<W: Write> Drop for StreamWriter<'_, W> {
     fn drop(&mut self) {
         let _ = self.flush();
-    }
-}
-
-/// Mod to encapsulate the converters depending on the `deflate` crate.
-///
-/// Since this only contains trait impls, there is no need to make this public, they are simply
-/// available when the mod is compiled as well.
-impl Compression {
-    fn to_options(self) -> flate2::Compression {
-        #[allow(deprecated)]
-        match self {
-            Compression::Default => flate2::Compression::default(),
-            Compression::Fast => flate2::Compression::fast(),
-            Compression::Best => flate2::Compression::best(),
-            #[allow(deprecated)]
-            Compression::Huffman => flate2::Compression::none(),
-            #[allow(deprecated)]
-            Compression::Rle => flate2::Compression::none(),
-        }
     }
 }
 

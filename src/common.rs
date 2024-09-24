@@ -343,7 +343,7 @@ impl Default for Compression {
 /// See [FilterType] and [AdaptiveFilterType].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
-pub enum AdvancedCompression {
+pub enum DeflateCompression {
     /// Do not compress the data at all.
     ///
     /// Useful for incompressible images such as photographs,
@@ -371,7 +371,7 @@ pub enum AdvancedCompression {
     // TODO: Zopfli?
 }
 
-impl AdvancedCompression {
+impl DeflateCompression {
     pub(crate) fn from_simple(value: Compression) -> Self {
         #[allow(deprecated)]
         match value {
@@ -389,9 +389,9 @@ impl AdvancedCompression {
 
     pub(crate) fn closest_flate2_level(&self) -> flate2::Compression {
         match self {
-            AdvancedCompression::NoCompression => flate2::Compression::none(),
-            AdvancedCompression::FdeflateUltraFast => flate2::Compression::new(1),
-            AdvancedCompression::Flate2(level) => flate2::Compression::new(*level),
+            DeflateCompression::NoCompression => flate2::Compression::none(),
+            DeflateCompression::FdeflateUltraFast => flate2::Compression::new(1),
+            DeflateCompression::Flate2(level) => flate2::Compression::new(*level),
         }
     }
 }
@@ -559,7 +559,7 @@ pub struct Info<'a> {
     pub animation_control: Option<AnimationControl>,
     pub compression: Compression,
     /// Advanced compression settings. Overrides the `compression` field, if set.
-    pub compression_advanced: Option<AdvancedCompression>,
+    pub compression_deflate: Option<DeflateCompression>,
     /// Gamma of the source system.
     /// Set by both `gAMA` as well as to a replacement by `sRGB` chunk.
     pub source_gamma: Option<ScaledFloat>,
@@ -598,7 +598,7 @@ impl Default for Info<'_> {
             // Default to `deflate::Compression::Fast` and `filter::FilterType::Sub`
             // to maintain backward compatible output.
             compression: Compression::Fast,
-            compression_advanced: None,
+            compression_deflate: None,
             source_gamma: None,
             source_chromaticities: None,
             srgb: None,
@@ -752,11 +752,11 @@ impl Info<'_> {
     }
 
     /// Computes the low-level compression settings from [Self::compression] and [Self::compression_advanced]
-    pub(crate) fn compression(&self) -> AdvancedCompression {
-        if let Some(options) = self.compression_advanced {
+    pub(crate) fn compression(&self) -> DeflateCompression {
+        if let Some(options) = self.compression_deflate {
             options
         } else {
-            AdvancedCompression::from_simple(self.compression)
+            DeflateCompression::from_simple(self.compression)
         }
     }
 }

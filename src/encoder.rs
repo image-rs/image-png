@@ -16,7 +16,7 @@ use crate::text_metadata::{
     EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
 use crate::traits::WriteBytesExt;
-use crate::AdvancedCompression;
+use crate::DeflateCompression;
 
 pub type Result<T> = result::Result<T, EncodingError>;
 
@@ -298,14 +298,14 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// Set compression parameters.
     pub fn set_compression(&mut self, compression: Compression) {
         self.info.compression = compression;
-        self.info.compression_advanced = None;
+        self.info.compression_deflate = None;
     }
 
     /// Provides in-depth customization of DEFLATE compression options.
     ///
     /// For a simpler selection of compression options see [Self::set_compression].
-    pub fn set_compression_advanced(&mut self, compression: AdvancedCompression) {
-        self.info.compression_advanced = Some(compression);
+    pub fn set_deflate_compression(&mut self, compression: DeflateCompression) {
+        self.info.compression_deflate = Some(compression);
     }
 
     /// Set the used filter type.
@@ -501,7 +501,7 @@ struct PartialInfo {
     color_type: ColorType,
     frame_control: Option<FrameControl>,
     animation_control: Option<AnimationControl>,
-    compression: AdvancedCompression,
+    compression: DeflateCompression,
     has_palette: bool,
 }
 
@@ -544,7 +544,7 @@ impl PartialInfo {
             color_type: self.color_type,
             frame_control: self.frame_control,
             animation_control: self.animation_control,
-            compression_advanced: Some(self.compression),
+            compression_deflate: Some(self.compression),
             ..Default::default()
         }
     }
@@ -700,7 +700,7 @@ impl<W: Write> Writer<W> {
         let adaptive_method = self.options.adaptive_filter;
 
         let zlib_encoded = match self.info.compression {
-            AdvancedCompression::NoCompression => {
+            DeflateCompression::NoCompression => {
                 let mut compressor =
                     fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
                 for line in data.chunks(in_len) {
@@ -709,7 +709,7 @@ impl<W: Write> Writer<W> {
                 }
                 compressor.finish()?.into_inner()
             }
-            AdvancedCompression::FdeflateUltraFast => {
+            DeflateCompression::FdeflateUltraFast => {
                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
 
                 let mut current = vec![0; in_len + 1];
@@ -747,7 +747,7 @@ impl<W: Write> Writer<W> {
                     compressed
                 }
             }
-            AdvancedCompression::Flate2(level) => {
+            DeflateCompression::Flate2(level) => {
                 let mut current = vec![0; in_len];
 
                 let mut zlib = ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
@@ -1334,7 +1334,7 @@ pub struct StreamWriter<'a, W: Write> {
     filter: FilterType,
     adaptive_filter: AdaptiveFilterType,
     fctl: Option<FrameControl>,
-    compression: AdvancedCompression,
+    compression: DeflateCompression,
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
@@ -1731,7 +1731,7 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                use AdvancedCompression::*;
+                use DeflateCompression::*;
                 for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
                     // Encode decoded image
                     let mut out = Vec::new();
@@ -1744,7 +1744,7 @@ mod tests {
                         let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
                         encoder.set_color(info.color_type);
                         encoder.set_depth(info.bit_depth);
-                        encoder.set_compression_advanced(compression);
+                        encoder.set_deflate_compression(compression);
                         if let Some(palette) = &reader.info().palette {
                             encoder.set_palette(palette.clone());
                         }
@@ -1780,7 +1780,7 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                use AdvancedCompression::*;
+                use DeflateCompression::*;
                 for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
                     // Encode decoded image
                     let mut out = Vec::new();
@@ -1793,7 +1793,7 @@ mod tests {
                         let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
                         encoder.set_color(info.color_type);
                         encoder.set_depth(info.bit_depth);
-                        encoder.set_compression_advanced(compression);
+                        encoder.set_deflate_compression(compression);
                         if let Some(palette) = &reader.info().palette {
                             encoder.set_palette(palette.clone());
                         }

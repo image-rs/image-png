@@ -298,7 +298,19 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// Set compression parameters.
     pub fn set_compression(&mut self, compression: Compression) {
         self.info.compression_deflate = DeflateCompression::from_simple(compression);
-        // TODO: also set filters
+        // choose the filter based on the requested compression
+        match compression {
+            Compression::None => {
+                self.set_filter(FilterType::NoFilter); // with no DEFLATE filtering would only waste time
+                self.set_adaptive_filter(AdaptiveFilterType::NonAdaptive);
+            }
+            Compression::Fast => {
+                self.set_filter(FilterType::Up); // fast and avoids long backreferences in DEFLATE stream
+                self.set_adaptive_filter(AdaptiveFilterType::NonAdaptive);
+            }
+            Compression::Default => self.set_adaptive_filter(AdaptiveFilterType::Adaptive),
+            Compression::High => self.set_adaptive_filter(AdaptiveFilterType::Adaptive),
+        }
     }
 
     /// Provides in-depth customization of DEFLATE compression options.

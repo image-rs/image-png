@@ -44,7 +44,7 @@ fn run_encode(
     encoder.set_compression(match args.speed {
         Speed::Fast => png::Compression::Fast,
         Speed::Default => png::Compression::Default,
-        Speed::Best => png::Compression::Best,
+        Speed::Best => png::Compression::High,
     });
     encoder.set_filter(match args.filter {
         Filter::None => png::FilterType::NoFilter,

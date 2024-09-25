@@ -305,28 +305,26 @@ impl AnimationControl {
 }
 
 /// The type and strength of applied compression.
+///
+/// This is a simple, high-level interface that will automatically choose
+/// the appropriate DEFLATE compression mode and PNG filter.
+///
+/// If you need more control over the encoding paramters,
+/// you can set the [DeflateCompression], [FilterType] and [AdaptiveFilterType] manually.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Compression {
-    /// Default level
-    Default,
-    /// Fast minimal compression
-    Fast,
-    /// Higher compression level
+    /// No compression whatsoever. Fastest, but results in large files.
+    None,
+    /// Extremely fast compression with a decent compression ratio.
     ///
-    /// Best in this context isn't actually the highest possible level
-    /// the encoder can do, but is meant to emulate the `Best` setting in the `Flate2`
-    /// library.
-    Best,
-    #[deprecated(
-        since = "0.17.6",
-        note = "use one of the other compression levels instead, such as 'fast'"
-    )]
-    Huffman,
-    #[deprecated(
-        since = "0.17.6",
-        note = "use one of the other compression levels instead, such as 'fast'"
-    )]
-    Rle,
+    /// Significantly outperforms libpng and other popular encoders
+    /// by using a [specialized DEFLATE implementation tuned for PNG](https://crates.io/crates/fdeflate).
+    Fast,
+    /// Balances encoding speed and compression ratio
+    Default,
+    /// Spend more time to produce a slightly smaller file than with `Default`
+    High,
 }
 
 impl Default for Compression {
@@ -371,19 +369,19 @@ pub enum DeflateCompression {
     // TODO: Zopfli?
 }
 
+impl Default for DeflateCompression {
+    fn default() -> Self {
+        Self::from_simple(Compression::Default)
+    }
+}
+
 impl DeflateCompression {
     pub(crate) fn from_simple(value: Compression) -> Self {
-        #[allow(deprecated)]
         match value {
-            Compression::Default => Self::Flate2(flate2::Compression::default().level()),
+            Compression::None => Self::NoCompression,
             Compression::Fast => Self::FdeflateUltraFast,
-            Compression::Best => Self::Flate2(flate2::Compression::best().level()),
-            // These two options are deprecated, and no longer directly supported.
-            // They used to map to flate2 level 0, which was meant to map to "no compression",
-            // but miniz_oxide doesn't understand level 0 and uses its default level instead.
-            // So we just keep mapping these to the default compression level to preserve that behavior.
-            Compression::Huffman => Self::Flate2(flate2::Compression::default().level()),
-            Compression::Rle => Self::Flate2(flate2::Compression::default().level()),
+            Compression::Default => Self::Flate2(flate2::Compression::default().level()),
+            Compression::High => Self::Flate2(flate2::Compression::best().level()),
         }
     }
 
@@ -557,9 +555,8 @@ pub struct Info<'a> {
 
     pub frame_control: Option<FrameControl>,
     pub animation_control: Option<AnimationControl>,
-    pub compression: Compression,
-    /// Advanced compression settings. Overrides the `compression` field, if set.
-    pub compression_deflate: Option<DeflateCompression>,
+    /// Controls the DEFLATE compression options. Influences the trade-off between compression speed and ratio, along with filters.
+    pub compression_deflate: DeflateCompression,
     /// Gamma of the source system.
     /// Set by both `gAMA` as well as to a replacement by `sRGB` chunk.
     pub source_gamma: Option<ScaledFloat>,
@@ -595,10 +592,7 @@ impl Default for Info<'_> {
             pixel_dims: None,
             frame_control: None,
             animation_control: None,
-            // Default to `deflate::Compression::Fast` and `filter::FilterType::Sub`
-            // to maintain backward compatible output.
-            compression: Compression::Fast,
-            compression_deflate: None,
+            compression_deflate: DeflateCompression::default(),
             source_gamma: None,
             source_chromaticities: None,
             srgb: None,
@@ -749,15 +743,6 @@ impl Info<'_> {
         }
 
         Ok(())
-    }
-
-    /// Computes the low-level compression settings from [Self::compression] and [Self::compression_advanced]
-    pub(crate) fn compression(&self) -> DeflateCompression {
-        if let Some(options) = self.compression_deflate {
-            options
-        } else {
-            DeflateCompression::from_simple(self.compression)
-        }
     }
 }
 

@@ -297,15 +297,15 @@ impl<'a, W: Write> Encoder<'a, W> {
 
     /// Set compression parameters.
     pub fn set_compression(&mut self, compression: Compression) {
-        self.info.compression = compression;
-        self.info.compression_deflate = None;
+        self.info.compression_deflate = DeflateCompression::from_simple(compression);
+        // TODO: also set filters
     }
 
     /// Provides in-depth customization of DEFLATE compression options.
     ///
     /// For a simpler selection of compression options see [Self::set_compression].
     pub fn set_deflate_compression(&mut self, compression: DeflateCompression) {
-        self.info.compression_deflate = Some(compression);
+        self.info.compression_deflate = compression;
     }
 
     /// Set the used filter type.
@@ -514,7 +514,7 @@ impl PartialInfo {
             color_type: info.color_type,
             frame_control: info.frame_control,
             animation_control: info.animation_control,
-            compression: info.compression(),
+            compression: info.compression_deflate,
             has_palette: info.palette.is_some(),
         }
     }
@@ -544,7 +544,7 @@ impl PartialInfo {
             color_type: self.color_type,
             frame_control: self.frame_control,
             animation_control: self.animation_control,
-            compression_deflate: Some(self.compression),
+            compression_deflate: self.compression,
             ..Default::default()
         }
     }

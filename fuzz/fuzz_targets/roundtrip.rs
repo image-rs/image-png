@@ -32,7 +32,7 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
         0 => png::Compression::Default,
         1 => png::Compression::Fast,
         2 => png::Compression::High,
-        // 3 => png::Compression::None, // TODO: re-enable
+        3 => png::Compression::None,
         _ => return None,
     };
 

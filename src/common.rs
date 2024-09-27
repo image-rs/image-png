@@ -340,8 +340,7 @@ impl Default for Compression {
 ///
 /// Note that this setting only affects DEFLATE compression.
 /// Another setting that influences the compression ratio and lets you choose
-/// between encoding speed and compression ratio is the *filter*,
-/// See [Filter] and [AdaptiveFilter].
+/// between encoding speed and compression ratio is the [Filter].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum DeflateCompression {

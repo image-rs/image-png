@@ -79,7 +79,7 @@ pub use crate::decoder::{
     OutputInfo, Reader, StreamingDecoder,
 };
 pub use crate::encoder::{Encoder, EncodingError, StreamWriter, Writer};
-pub use crate::filter::FilterType;
+pub use crate::filter::Filter;
 
 #[cfg(test)]
 pub(crate) mod test_utils;

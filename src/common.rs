@@ -1,7 +1,7 @@
 //! Common types shared between the encoder and decoder
 use crate::text_metadata::{EncodableTextChunk, ITXtChunk, TEXtChunk, ZTXtChunk};
 #[allow(unused_imports)] // used by doc comments only
-use crate::FilterType;
+use crate::Filter;
 use crate::{chunk, encoder};
 use io::Write;
 use std::{borrow::Cow, convert::TryFrom, fmt, io};

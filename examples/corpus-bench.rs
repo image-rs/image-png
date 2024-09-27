@@ -47,12 +47,12 @@ fn run_encode(
         Speed::Best => png::Compression::High,
     });
     encoder.set_filter(match args.filter {
-        Filter::None => png::FilterType::NoFilter,
-        Filter::Sub => png::FilterType::Sub,
-        Filter::Up => png::FilterType::Up,
-        Filter::Average => png::FilterType::Avg,
-        Filter::Paeth => png::FilterType::Paeth,
-        Filter::Adaptive => png::FilterType::Paeth,
+        Filter::None => png::Filter::NoFilter,
+        Filter::Sub => png::Filter::Sub,
+        Filter::Up => png::Filter::Up,
+        Filter::Average => png::Filter::Avg,
+        Filter::Paeth => png::Filter::Paeth,
+        Filter::Adaptive => png::Filter::Paeth,
     });
     encoder.set_adaptive_filter(match args.filter {
         Filter::Adaptive => png::AdaptiveFilterType::Adaptive,

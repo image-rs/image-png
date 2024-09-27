@@ -270,7 +270,7 @@ mod simd {
 ///
 /// Details on how each filter works can be found in the [PNG Book](http://www.libpng.org/pub/png/book/chapter09.html).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilterType {
+pub enum Filter {
     NoFilter,
     Sub,
     Up,
@@ -279,20 +279,20 @@ pub enum FilterType {
     Adaptive,
 }
 
-impl Default for FilterType {
+impl Default for Filter {
     fn default() -> Self {
-        FilterType::Up
+        Filter::Up
     }
 }
 
-impl From<RowFilter> for FilterType {
+impl From<RowFilter> for Filter {
     fn from(value: RowFilter) -> Self {
         match value {
-            RowFilter::NoFilter => FilterType::NoFilter,
-            RowFilter::Sub => FilterType::Sub,
-            RowFilter::Up => FilterType::Up,
-            RowFilter::Avg => FilterType::Avg,
-            RowFilter::Paeth => FilterType::Paeth,
+            RowFilter::NoFilter => Filter::NoFilter,
+            RowFilter::Sub => Filter::Sub,
+            RowFilter::Up => Filter::Up,
+            RowFilter::Avg => Filter::Avg,
+            RowFilter::Paeth => Filter::Paeth,
         }
     }
 }
@@ -326,14 +326,14 @@ impl RowFilter {
         }
     }
 
-    pub fn from_method(strat: FilterType) -> Option<Self> {
+    pub fn from_method(strat: Filter) -> Option<Self> {
         match strat {
-            FilterType::NoFilter => Some(Self::NoFilter),
-            FilterType::Sub => Some(Self::Sub),
-            FilterType::Up => Some(Self::Up),
-            FilterType::Avg => Some(Self::Avg),
-            FilterType::Paeth => Some(Self::Paeth),
-            FilterType::Adaptive => None,
+            Filter::NoFilter => Some(Self::NoFilter),
+            Filter::Sub => Some(Self::Sub),
+            Filter::Up => Some(Self::Up),
+            Filter::Avg => Some(Self::Avg),
+            Filter::Paeth => Some(Self::Paeth),
+            Filter::Adaptive => None,
         }
     }
 }
@@ -1051,7 +1051,7 @@ fn filter_internal(
 }
 
 pub(crate) fn filter(
-    method: FilterType,
+    method: Filter,
     bpp: BytesPerPixel,
     previous: &[u8],
     current: &[u8],
@@ -1062,7 +1062,7 @@ pub(crate) fn filter(
     let len = current.len();
 
     match method {
-        FilterType::Adaptive => {
+        Filter::Adaptive => {
             let mut min_sum: u64 = u64::MAX;
             let mut filter_choice = RowFilter::NoFilter;
             for &filter in [Sub, Up, Avg, Paeth].iter() {

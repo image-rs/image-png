@@ -11,7 +11,7 @@ use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
     FrameControl, Info, ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat,
 };
-use crate::filter::{filter, FilterType};
+use crate::filter::{filter, Filter};
 use crate::text_metadata::{
     EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
@@ -155,7 +155,7 @@ pub struct Encoder<'a, W: Write> {
 /// Decoding options, internal type, forwarded to the Writer.
 #[derive(Default)]
 struct Options {
-    filter: FilterType,
+    filter: Filter,
     sep_def_img: bool,
     validate_sequence: bool,
 }
@@ -300,14 +300,14 @@ impl<'a, W: Write> Encoder<'a, W> {
         // choose the filter based on the requested compression
         match compression {
             Compression::NoCompression => {
-                self.set_filter(FilterType::NoFilter); // with no DEFLATE filtering would only waste time
+                self.set_filter(Filter::NoFilter); // with no DEFLATE filtering would only waste time
             }
             Compression::Fastest => {
-                self.set_filter(FilterType::Up); // fast and avoids long backreferences in DEFLATE stream
+                self.set_filter(Filter::Up); // fast and avoids long backreferences in DEFLATE stream
             }
-            Compression::Fast => self.set_filter(FilterType::Adaptive),
-            Compression::Balanced => self.set_filter(FilterType::Adaptive),
-            Compression::High => self.set_filter(FilterType::Adaptive),
+            Compression::Fast => self.set_filter(Filter::Adaptive),
+            Compression::Balanced => self.set_filter(Filter::Adaptive),
+            Compression::High => self.set_filter(Filter::Adaptive),
         }
     }
 
@@ -323,7 +323,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
     /// sample values based on the previous. For a potentially better compression ratio, at the
     /// cost of more complex processing, try out [`FilterType::Paeth`].
-    pub fn set_filter(&mut self, filter: FilterType) {
+    pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
     }
 
@@ -805,7 +805,7 @@ impl<W: Write> Writer<W> {
     /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
     /// sample values based on the previous. For a potentially better compression ratio, at the
     /// cost of more complex processing, try out [`FilterType::Paeth`].
-    pub fn set_filter(&mut self, filter: FilterType) {
+    pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
     }
 
@@ -1284,7 +1284,7 @@ pub struct StreamWriter<'a, W: Write> {
     height: u32,
 
     bpp: BytesPerPixel,
-    filter: FilterType,
+    filter: Filter,
     fctl: Option<FrameControl>,
     compression: DeflateCompression,
 }
@@ -1334,7 +1334,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     /// For optimal compression ratio you should enable adaptive filtering
     /// instead of setting a single filter for the entire image, see
     /// [set_adaptive_filter](Self::set_adaptive_filter).
-    pub fn set_filter(&mut self, filter: FilterType) {
+    pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
     }
 
@@ -1972,7 +1972,7 @@ mod tests {
     fn all_filters_roundtrip() -> io::Result<()> {
         let pixel: Vec<_> = (0..48).collect();
 
-        let roundtrip = |filter: FilterType| -> io::Result<()> {
+        let roundtrip = |filter: Filter| -> io::Result<()> {
             let mut buffer = vec![];
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
@@ -1992,11 +1992,11 @@ mod tests {
             Ok(())
         };
 
-        roundtrip(FilterType::NoFilter)?;
-        roundtrip(FilterType::Sub)?;
-        roundtrip(FilterType::Up)?;
-        roundtrip(FilterType::Avg)?;
-        roundtrip(FilterType::Paeth)?;
+        roundtrip(Filter::NoFilter)?;
+        roundtrip(Filter::Sub)?;
+        roundtrip(Filter::Up)?;
+        roundtrip(Filter::Avg)?;
+        roundtrip(Filter::Paeth)?;
 
         Ok(())
     }
@@ -2010,7 +2010,7 @@ mod tests {
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
             encoder.set_color(ColorType::Rgb);
-            encoder.set_filter(FilterType::Avg);
+            encoder.set_filter(Filter::Avg);
             if let Some(gamma) = gamma {
                 encoder.set_source_gamma(gamma);
             }
@@ -2234,7 +2234,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut cursor, 8, 8);
         encoder.set_color(ColorType::Rgba);
-        encoder.set_filter(FilterType::Paeth);
+        encoder.set_filter(Filter::Paeth);
         let mut writer = encoder.write_header()?;
         let mut stream = writer.stream_writer()?;
 

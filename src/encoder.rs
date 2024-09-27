@@ -300,7 +300,7 @@ impl<'a, W: Write> Encoder<'a, W> {
         self.info.compression_deflate = DeflateCompression::from_simple(compression);
         // choose the filter based on the requested compression
         match compression {
-            Compression::None => {
+            Compression::NoCompression => {
                 self.set_filter(FilterType::NoFilter); // with no DEFLATE filtering would only waste time
                 self.set_adaptive_filter(AdaptiveFilterType::NonAdaptive);
             }

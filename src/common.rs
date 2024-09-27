@@ -315,7 +315,7 @@ impl AnimationControl {
 #[non_exhaustive]
 pub enum Compression {
     /// No compression whatsoever. Fastest, but results in large files.
-    None,
+    NoCompression,
     /// Extremely fast compression with a decent compression ratio.
     ///
     /// Significantly outperforms libpng and other popular encoders
@@ -378,7 +378,7 @@ impl Default for DeflateCompression {
 impl DeflateCompression {
     pub(crate) fn from_simple(value: Compression) -> Self {
         match value {
-            Compression::None => Self::NoCompression,
+            Compression::NoCompression => Self::NoCompression,
             Compression::Fast => Self::FdeflateUltraFast,
             Compression::Default => Self::Flate2(flate2::Compression::default().level()),
             Compression::High => Self::Flate2(flate2::Compression::best().level()),

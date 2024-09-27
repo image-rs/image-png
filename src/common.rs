@@ -322,14 +322,14 @@ pub enum Compression {
     /// by using a [specialized DEFLATE implementation tuned for PNG](https://crates.io/crates/fdeflate).
     Fast,
     /// Balances encoding speed and compression ratio
-    Default,
+    Balanced,
     /// Spend more time to produce a slightly smaller file than with `Default`
     High,
 }
 
 impl Default for Compression {
     fn default() -> Self {
-        Self::Default
+        Self::Balanced
     }
 }
 
@@ -371,7 +371,7 @@ pub enum DeflateCompression {
 
 impl Default for DeflateCompression {
     fn default() -> Self {
-        Self::from_simple(Compression::Default)
+        Self::from_simple(Compression::Balanced)
     }
 }
 
@@ -380,7 +380,7 @@ impl DeflateCompression {
         match value {
             Compression::NoCompression => Self::NoCompression,
             Compression::Fast => Self::FdeflateUltraFast,
-            Compression::Default => Self::Flate2(flate2::Compression::default().level()),
+            Compression::Balanced => Self::Flate2(flate2::Compression::default().level()),
             Compression::High => Self::Flate2(flate2::Compression::best().level()),
         }
     }

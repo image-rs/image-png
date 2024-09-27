@@ -43,7 +43,7 @@ fn run_encode(
     encoder.set_depth(bit_depth);
     encoder.set_compression(match args.speed {
         Speed::Fast => png::Compression::Fast,
-        Speed::Default => png::Compression::Default,
+        Speed::Default => png::Compression::Balanced,
         Speed::Best => png::Compression::High,
     });
     encoder.set_filter(match args.filter {

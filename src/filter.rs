@@ -269,6 +269,8 @@ mod simd {
 /// this does not operate on pixels but on raw bytes of a scanline.
 ///
 /// Details on how each filter works can be found in the [PNG Book](http://www.libpng.org/pub/png/book/chapter09.html).
+///
+/// The default filter is `Adaptive`, which uses heuristics to select the best filter for every row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
     NoFilter,

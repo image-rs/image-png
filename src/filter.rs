@@ -1,6 +1,6 @@
 use core::convert::TryInto;
 
-use crate::common::BytesPerPixel;
+use crate::{common::BytesPerPixel, Compression};
 
 /// SIMD helpers for `fn unfilter`
 ///
@@ -293,6 +293,18 @@ impl From<RowFilter> for Filter {
             RowFilter::Up => Filter::Up,
             RowFilter::Avg => Filter::Avg,
             RowFilter::Paeth => Filter::Paeth,
+        }
+    }
+}
+
+impl Filter {
+    pub(crate) fn from_simple(compression: Compression) -> Self {
+        match compression {
+            Compression::NoCompression => Filter::NoFilter, // with no DEFLATE filtering would only waste time
+            Compression::Fastest => Filter::Up, // fast and avoids long backreferences in DEFLATE stream
+            Compression::Fast => Filter::Adaptive,
+            Compression::Balanced => Filter::Adaptive,
+            Compression::High => Filter::Adaptive,
         }
     }
 }

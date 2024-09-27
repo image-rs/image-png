@@ -270,8 +270,37 @@ mod simd {
 ///
 /// Details on how each filter works can be found in the [PNG Book](http://www.libpng.org/pub/png/book/chapter09.html).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum FilterType {
+    NoFilter,
+    Sub,
+    Up,
+    Avg,
+    Paeth,
+    Adaptive,
+}
+
+impl Default for FilterType {
+    fn default() -> Self {
+        FilterType::Up
+    }
+}
+
+impl From<RowFilter> for FilterType {
+    fn from(value: RowFilter) -> Self {
+        match value {
+            RowFilter::NoFilter => FilterType::NoFilter,
+            RowFilter::Sub => FilterType::Sub,
+            RowFilter::Up => FilterType::Up,
+            RowFilter::Avg => FilterType::Avg,
+            RowFilter::Paeth => FilterType::Paeth,
+        }
+    }
+}
+
+/// Unlike the public [FilterType], does not include the "Adaptive" option
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum RowFilter {
     NoFilter = 0,
     Sub = 1,
     Up = 2,
@@ -279,22 +308,32 @@ pub enum FilterType {
     Paeth = 4,
 }
 
-impl Default for FilterType {
+impl Default for RowFilter {
     fn default() -> Self {
-        FilterType::Sub
+        RowFilter::Up
     }
 }
 
-impl FilterType {
-    /// u8 -> Self. Temporary solution until Rust provides a canonical one.
-    pub fn from_u8(n: u8) -> Option<FilterType> {
+impl RowFilter {
+    pub fn from_u8(n: u8) -> Option<Self> {
         match n {
-            0 => Some(FilterType::NoFilter),
-            1 => Some(FilterType::Sub),
-            2 => Some(FilterType::Up),
-            3 => Some(FilterType::Avg),
-            4 => Some(FilterType::Paeth),
+            0 => Some(Self::NoFilter),
+            1 => Some(Self::Sub),
+            2 => Some(Self::Up),
+            3 => Some(Self::Avg),
+            4 => Some(Self::Paeth),
             _ => None,
+        }
+    }
+
+    pub fn from_method(strat: FilterType) -> Option<Self> {
+        match strat {
+            FilterType::NoFilter => Some(Self::NoFilter),
+            FilterType::Sub => Some(Self::Sub),
+            FilterType::Up => Some(Self::Up),
+            FilterType::Avg => Some(Self::Avg),
+            FilterType::Paeth => Some(Self::Paeth),
+            FilterType::Adaptive => None,
         }
     }
 }
@@ -382,12 +421,12 @@ fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
 }
 
 pub(crate) fn unfilter(
-    mut filter: FilterType,
+    mut filter: RowFilter,
     tbpp: BytesPerPixel,
     previous: &[u8],
     current: &mut [u8],
 ) {
-    use self::FilterType::*;
+    use self::RowFilter::*;
 
     // If the previous row is empty, then treat it as if it were filled with zeros.
     if previous.is_empty() {
@@ -894,14 +933,14 @@ pub(crate) fn unfilter(
 }
 
 fn filter_internal(
-    method: FilterType,
+    method: RowFilter,
     bpp: usize,
     len: usize,
     previous: &[u8],
     current: &[u8],
     output: &mut [u8],
-) -> FilterType {
-    use self::FilterType::*;
+) -> RowFilter {
+    use self::RowFilter::*;
 
     // This value was chosen experimentally based on what achieved the best performance. The
     // Rust compiler does auto-vectorization, and 32-bytes per loop iteration seems to enable
@@ -1034,23 +1073,19 @@ fn filter_internal(
 
 pub(crate) fn filter(
     method: FilterType,
-    adaptive: AdaptiveFilterType,
     bpp: BytesPerPixel,
     previous: &[u8],
     current: &[u8],
     output: &mut [u8],
-) -> FilterType {
-    use FilterType::*;
+) -> RowFilter {
+    use RowFilter::*;
     let bpp = bpp.into_usize();
     let len = current.len();
 
-    match adaptive {
-        AdaptiveFilterType::NonAdaptive => {
-            filter_internal(method, bpp, len, previous, current, output)
-        }
-        AdaptiveFilterType::Adaptive => {
+    match method {
+        FilterType::Adaptive => {
             let mut min_sum: u64 = u64::MAX;
-            let mut filter_choice = FilterType::NoFilter;
+            let mut filter_choice = RowFilter::NoFilter;
             for &filter in [Sub, Up, Avg, Paeth].iter() {
                 filter_internal(filter, bpp, len, previous, current, output);
                 let sum = sum_buffer(output);
@@ -1064,6 +1099,10 @@ pub(crate) fn filter(
                 filter_internal(filter_choice, bpp, len, previous, current, output);
             }
             filter_choice
+        }
+        _ => {
+            let filter = RowFilter::from_method(method).unwrap();
+            filter_internal(filter, bpp, len, previous, current, output)
         }
     }
 }
@@ -1094,7 +1133,7 @@ fn sum_buffer(buf: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use super::{filter, unfilter, AdaptiveFilterType, BytesPerPixel, FilterType};
+    use super::{filter, unfilter, BytesPerPixel, RowFilter};
     use core::iter;
 
     #[test]
@@ -1104,11 +1143,10 @@ mod test {
         let previous: Vec<_> = iter::repeat(1).take(LEN.into()).collect();
         let current: Vec<_> = (0..LEN).collect();
         let expected = current.clone();
-        let adaptive = AdaptiveFilterType::NonAdaptive;
 
-        let roundtrip = |kind, bpp: BytesPerPixel| {
+        let roundtrip = |kind: RowFilter, bpp: BytesPerPixel| {
             let mut output = vec![0; LEN.into()];
-            filter(kind, adaptive, bpp, &previous, &current, &mut output);
+            filter(kind.into(), bpp, &previous, &current, &mut output);
             unfilter(kind, bpp, &previous, &mut output);
             assert_eq!(
                 output, expected,
@@ -1118,11 +1156,11 @@ mod test {
         };
 
         let filters = [
-            FilterType::NoFilter,
-            FilterType::Sub,
-            FilterType::Up,
-            FilterType::Avg,
-            FilterType::Paeth,
+            RowFilter::NoFilter,
+            RowFilter::Sub,
+            RowFilter::Up,
+            RowFilter::Avg,
+            RowFilter::Paeth,
         ];
 
         let bpps = [
@@ -1148,11 +1186,10 @@ mod test {
         let previous: Vec<_> = (0..LEN).collect();
         let current: Vec<_> = (0..LEN).collect();
         let expected = current.clone();
-        let adaptive = AdaptiveFilterType::NonAdaptive;
 
-        let roundtrip = |kind, bpp: BytesPerPixel| {
+        let roundtrip = |kind: RowFilter, bpp: BytesPerPixel| {
             let mut output = vec![0; LEN.into()];
-            filter(kind, adaptive, bpp, &previous, &current, &mut output);
+            filter(kind.into(), bpp, &previous, &current, &mut output);
             unfilter(kind, bpp, &previous, &mut output);
             assert_eq!(
                 output, expected,
@@ -1162,11 +1199,11 @@ mod test {
         };
 
         let filters = [
-            FilterType::NoFilter,
-            FilterType::Sub,
-            FilterType::Up,
-            FilterType::Avg,
-            FilterType::Paeth,
+            RowFilter::NoFilter,
+            RowFilter::Sub,
+            RowFilter::Up,
+            RowFilter::Avg,
+            RowFilter::Paeth,
         ];
 
         let bpps = [

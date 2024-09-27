@@ -699,7 +699,6 @@ impl<W: Write> Writer<W> {
 
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
-        let adaptive_method = self.options.adaptive_filter;
 
         let zlib_encoded = match self.info.compression {
             DeflateCompression::NoCompression => {
@@ -716,14 +715,7 @@ impl<W: Write> Writer<W> {
 
                 let mut current = vec![0; in_len + 1];
                 for line in data.chunks(in_len) {
-                    let filter_type = filter(
-                        filter_method,
-                        adaptive_method,
-                        bpp,
-                        prev,
-                        line,
-                        &mut current[1..],
-                    );
+                    let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
 
                     current[0] = filter_type as u8;
                     compressor.write_data(&current)?;
@@ -754,14 +746,7 @@ impl<W: Write> Writer<W> {
 
                 let mut zlib = ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
                 for line in data.chunks(in_len) {
-                    let filter_type = filter(
-                        filter_method,
-                        adaptive_method,
-                        bpp,
-                        prev,
-                        line,
-                        &mut current,
-                    );
+                    let filter_type = filter(filter_method, bpp, prev, line, &mut current);
 
                     zlib.write_all(&[filter_type as u8])?;
                     zlib.write_all(&current)?;
@@ -1642,7 +1627,6 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
             let mut filtered = vec![0; self.curr_buf.len()];
             let filter_type = filter(
                 self.filter,
-                self.adaptive_filter,
                 self.bpp,
                 &self.prev_buf,
                 &self.curr_buf,

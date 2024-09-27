@@ -344,7 +344,7 @@ impl Default for Compression {
 pub enum DeflateCompression {
     /// Do not compress the data at all.
     ///
-    /// Useful for incompressible images such as photographs,
+    /// Useful for incompressible images,
     /// or when speed is paramount and you don't care about size at all.
     ///
     /// This mode also disables filters, forcing [FilterType::NoFilter].

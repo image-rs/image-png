@@ -338,27 +338,6 @@ impl RowFilter {
     }
 }
 
-/// Adaptive filtering tries every possible filter for each row and uses a heuristic to select the best one.
-/// This improves compression ratio, but makes encoding slightly slower.
-///
-/// It is recommended to use `Adaptive` whenever you care about compression ratio.
-/// Filtering is quite cheap compared to other parts of encoding, but can contribute
-/// to the compression ratio significantly.
-///
-/// `Adaptive` filtering is the default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum AdaptiveFilterType {
-    Adaptive,
-    NonAdaptive,
-}
-
-impl Default for AdaptiveFilterType {
-    fn default() -> Self {
-        AdaptiveFilterType::Adaptive
-    }
-}
-
 fn filter_paeth_decode(a: u8, b: u8, c: u8) -> u8 {
     // Decoding seems to optimize better with this algorithm
     let pa = (i16::from(b) - i16::from(c)).abs();

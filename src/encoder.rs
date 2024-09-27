@@ -11,7 +11,7 @@ use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
     FrameControl, Info, ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat,
 };
-use crate::filter::{filter, AdaptiveFilterType, FilterType};
+use crate::filter::{filter, FilterType};
 use crate::text_metadata::{
     EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
@@ -156,7 +156,6 @@ pub struct Encoder<'a, W: Write> {
 #[derive(Default)]
 struct Options {
     filter: FilterType,
-    adaptive_filter: AdaptiveFilterType,
     sep_def_img: bool,
     validate_sequence: bool,
 }
@@ -302,17 +301,13 @@ impl<'a, W: Write> Encoder<'a, W> {
         match compression {
             Compression::NoCompression => {
                 self.set_filter(FilterType::NoFilter); // with no DEFLATE filtering would only waste time
-                self.set_adaptive_filter(AdaptiveFilterType::NonAdaptive);
             }
             Compression::Fastest => {
                 self.set_filter(FilterType::Up); // fast and avoids long backreferences in DEFLATE stream
-                self.set_adaptive_filter(AdaptiveFilterType::NonAdaptive);
             }
-            Compression::Fast => {
-                self.set_adaptive_filter(AdaptiveFilterType::Adaptive);
-            }
-            Compression::Balanced => self.set_adaptive_filter(AdaptiveFilterType::Adaptive),
-            Compression::High => self.set_adaptive_filter(AdaptiveFilterType::Adaptive),
+            Compression::Fast => self.set_filter(FilterType::Adaptive),
+            Compression::Balanced => self.set_filter(FilterType::Adaptive),
+            Compression::High => self.set_filter(FilterType::Adaptive),
         }
     }
 
@@ -330,17 +325,6 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// cost of more complex processing, try out [`FilterType::Paeth`].
     pub fn set_filter(&mut self, filter: FilterType) {
         self.options.filter = filter;
-    }
-
-    /// Set the adaptive filter type.
-    ///
-    /// Adaptive filtering attempts to select the best filter for each line
-    /// based on heuristics which minimize the file size for compression rather
-    /// than use a single filter for the entire image. The default method is
-    /// [`AdaptiveFilterType::Adaptive`].
-
-    pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
-        self.options.adaptive_filter = adaptive_filter;
     }
 
     /// Set the fraction of time every frame is going to be displayed, in seconds.
@@ -825,16 +809,6 @@ impl<W: Write> Writer<W> {
         self.options.filter = filter;
     }
 
-    /// Set the adaptive filter type for the following frames.
-    ///
-    /// Adaptive filtering attempts to select the best filter for each line
-    /// based on heuristics which minimize the file size for compression rather
-    /// than use a single filter for the entire image. The default method is
-    /// [`AdaptiveFilterType::NonAdaptive`].
-    pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
-        self.options.adaptive_filter = adaptive_filter;
-    }
-
     /// Set the fraction of time the following frames are going to be displayed,
     /// in seconds
     ///
@@ -1311,7 +1285,6 @@ pub struct StreamWriter<'a, W: Write> {
 
     bpp: BytesPerPixel,
     filter: FilterType,
-    adaptive_filter: AdaptiveFilterType,
     fctl: Option<FrameControl>,
     compression: DeflateCompression,
 }
@@ -1329,7 +1302,6 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let bpp = writer.info.bpp_in_prediction();
         let in_len = writer.info.raw_row_length() - 1;
         let filter = writer.options.filter;
-        let adaptive_filter = writer.options.adaptive_filter;
         let prev_buf = vec![0; in_len];
         let curr_buf = vec![0; in_len];
 
@@ -1347,7 +1319,6 @@ impl<'a, W: Write> StreamWriter<'a, W> {
             filter,
             width,
             height,
-            adaptive_filter,
             line_len,
             to_write,
             fctl,
@@ -1365,17 +1336,6 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     /// [set_adaptive_filter](Self::set_adaptive_filter).
     pub fn set_filter(&mut self, filter: FilterType) {
         self.filter = filter;
-    }
-
-    /// Set the adaptive filter type for the next frame.
-    ///
-    /// Adaptive filtering attempts to select the best filter for each line
-    /// based on heuristics which minimize the file size for compression rather
-    /// than use a single filter for the entire image.
-    ///
-    /// The default method is [`AdaptiveFilterType::Adaptive`].
-    pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
-        self.adaptive_filter = adaptive_filter;
     }
 
     /// Set the fraction of time the following frames are going to be displayed,

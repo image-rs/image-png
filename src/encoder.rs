@@ -294,7 +294,7 @@ impl<'a, W: Write> Encoder<'a, W> {
         self.info.bit_depth = depth;
     }
 
-    /// Set compression parameters.
+    /// Set compression parameters, see [Compression] for the available options.
     pub fn set_compression(&mut self, compression: Compression) {
         self.set_deflate_compression(DeflateCompression::from_simple(compression));
         self.set_filter(Filter::from_simple(compression));
@@ -309,9 +309,11 @@ impl<'a, W: Write> Encoder<'a, W> {
 
     /// Set the used filter type.
     ///
-    /// The default filter is [`Filter::Sub`] which provides a basic prediction algorithm for
-    /// sample values based on the previous. For a potentially better compression ratio, at the
-    /// cost of more complex processing, try out [`Filter::Paeth`].
+    /// The default filter is [`Filter::Adaptive`] which automatically selects the best filter
+    /// for each row of the image.
+    ///
+    /// You should only change this if you are after very fast compression,
+    /// and either don't care about compression ratio or know exactly what works best for your images.
     pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
     }
@@ -789,11 +791,13 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    /// Set the used filter type for the following frames.
+    /// Set the used filter type.
     ///
-    /// The default filter is [`Filter::Sub`] which provides a basic prediction algorithm for
-    /// sample values based on the previous. For a potentially better compression ratio, at the
-    /// cost of more complex processing, try out [`Filter::Paeth`].
+    /// The default filter is [`Filter::Adaptive`] which automatically selects the best filter
+    /// for each row of the image.
+    ///
+    /// You should only change this if you are after very fast compression,
+    /// and either don't care about compression ratio or know exactly what works best for your images.
     pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
     }
@@ -1315,14 +1319,13 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         })
     }
 
-    /// Set the used filter type for the next frame.
+    /// Set the used filter type.
     ///
-    /// The default filter is [`Filter::Sub`] which provides a basic prediction algorithm for
-    /// sample values based on the previous.
+    /// The default filter is [`Filter::Adaptive`] which automatically selects the best filter
+    /// for each row of the image.
     ///
-    /// For optimal compression ratio you should enable adaptive filtering
-    /// instead of setting a single filter for the entire image, see
-    /// [set_adaptive_filter](Self::set_adaptive_filter).
+    /// You should only change this if you are after very fast compression,
+    /// and either don't care about compression ratio or know exactly what works best for your images.
     pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
     }

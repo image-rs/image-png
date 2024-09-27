@@ -306,7 +306,7 @@ impl FilterType {
 /// Filtering is quite cheap compared to other parts of encoding, but can contribute
 /// to the compression ratio significantly.
 ///
-/// `NonAdaptive` filtering is the default.
+/// `Adaptive` filtering is the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AdaptiveFilterType {
@@ -316,7 +316,7 @@ pub enum AdaptiveFilterType {
 
 impl Default for AdaptiveFilterType {
     fn default() -> Self {
-        AdaptiveFilterType::NonAdaptive
+        AdaptiveFilterType::Adaptive
     }
 }
 

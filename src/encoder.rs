@@ -334,7 +334,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// Adaptive filtering attempts to select the best filter for each line
     /// based on heuristics which minimize the file size for compression rather
     /// than use a single filter for the entire image. The default method is
-    /// [`AdaptiveFilterType::NonAdaptive`].
+    /// [`AdaptiveFilterType::Adaptive`].
 
     pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
         self.options.adaptive_filter = adaptive_filter;
@@ -1385,7 +1385,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     /// based on heuristics which minimize the file size for compression rather
     /// than use a single filter for the entire image.
     ///
-    /// The default method is [`AdaptiveFilterType::NonAdaptive`].
+    /// The default method is [`AdaptiveFilterType::Adaptive`].
     pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
         self.adaptive_filter = adaptive_filter;
     }

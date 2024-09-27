@@ -272,6 +272,7 @@ mod simd {
 ///
 /// The default filter is `Adaptive`, which uses heuristics to select the best filter for every row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Filter {
     NoFilter,
     Sub,

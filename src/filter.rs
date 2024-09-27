@@ -281,7 +281,7 @@ pub enum Filter {
 
 impl Default for Filter {
     fn default() -> Self {
-        Filter::Up
+        Filter::Adaptive
     }
 }
 

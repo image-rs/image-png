@@ -52,11 +52,7 @@ fn run_encode(
         Filter::Up => png::Filter::Up,
         Filter::Average => png::Filter::Avg,
         Filter::Paeth => png::Filter::Paeth,
-        Filter::Adaptive => png::Filter::Paeth,
-    });
-    encoder.set_adaptive_filter(match args.filter {
-        Filter::Adaptive => png::AdaptiveFilterType::Adaptive,
-        _ => png::AdaptiveFilterType::NonAdaptive,
+        Filter::Adaptive => png::Filter::Adaptive,
     });
     let mut encoder = encoder.write_header().unwrap();
     encoder.write_image_data(image).unwrap();

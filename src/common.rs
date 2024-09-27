@@ -356,8 +356,7 @@ pub enum DeflateCompression {
     /// to achieve speeds far exceeding what libpng is capable of
     /// while still providing a decent compression ratio.
     ///
-    /// Images encoded in this mode can also be decoded by the `png` crate extremely quickly,
-    /// much faster than what is typical for PNG images.
+    /// Images encoded in this mode can also be decoded by the `png` crate slightly faster than usual.
     /// Other decoders (e.g. libpng) do not get a decoding speed boost from this mode.
     FdeflateUltraFast,
 

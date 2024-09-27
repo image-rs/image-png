@@ -2,12 +2,13 @@
 //! This module is gated behind the "benchmarks" feature.
 
 use crate::common::BytesPerPixel;
-use crate::filter::Filter;
+use crate::filter::{Filter, RowFilter};
 use crate::{BitDepth, ColorType, Info};
 
 /// Re-exporting `unfilter` to make it easier to benchmark, despite some items being only
 /// `pub(crate)`: `fn unfilter`, `enum BytesPerPixel`.
 pub fn unfilter(filter: Filter, tbpp: u8, previous: &[u8], current: &mut [u8]) {
+    let filter = RowFilter::from_method(filter).unwrap(); // RowFilter type is private
     let tbpp = BytesPerPixel::from_usize(tbpp as usize);
     crate::filter::unfilter(filter, tbpp, previous, current)
 }

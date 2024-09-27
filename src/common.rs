@@ -341,6 +341,15 @@ impl Default for Compression {
 /// Note that this setting only affects DEFLATE compression.
 /// Another setting that influences the compression ratio and lets you choose
 /// between encoding speed and compression ratio is the [Filter].
+///
+/// ### Stability guarantees
+///
+/// The implementation details of DEFLATE compression may evolve over time,
+/// even without a semver-breaking change to the version of `png` crate.
+///
+/// If a certain compression setting is superseded by other options,
+/// it may be marked deprecated and remapped to a different option.
+/// You will see a deprecation notice when compiling code relying on such options.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum DeflateCompression {

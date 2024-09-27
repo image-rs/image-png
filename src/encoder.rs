@@ -304,9 +304,12 @@ impl<'a, W: Write> Encoder<'a, W> {
                 self.set_filter(FilterType::NoFilter); // with no DEFLATE filtering would only waste time
                 self.set_adaptive_filter(AdaptiveFilterType::NonAdaptive);
             }
-            Compression::Fast => {
+            Compression::Fastest => {
                 self.set_filter(FilterType::Up); // fast and avoids long backreferences in DEFLATE stream
                 self.set_adaptive_filter(AdaptiveFilterType::NonAdaptive);
+            }
+            Compression::Fast => {
+                self.set_adaptive_filter(AdaptiveFilterType::Adaptive);
             }
             Compression::Balanced => self.set_adaptive_filter(AdaptiveFilterType::Adaptive),
             Compression::High => self.set_adaptive_filter(AdaptiveFilterType::Adaptive),

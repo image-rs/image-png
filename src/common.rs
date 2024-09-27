@@ -316,10 +316,13 @@ impl AnimationControl {
 pub enum Compression {
     /// No compression whatsoever. Fastest, but results in large files.
     NoCompression,
+    /// Extremely fast but light compression.
+    Fastest,
     /// Extremely fast compression with a decent compression ratio.
     ///
     /// Significantly outperforms libpng and other popular encoders
-    /// by using a [specialized DEFLATE implementation tuned for PNG](https://crates.io/crates/fdeflate).
+    /// by using a [specialized DEFLATE implementation tuned for PNG](https://crates.io/crates/fdeflate),
+    /// while still providing better compression ratio than the fastest modes of other encoders.
     Fast,
     /// Balances encoding speed and compression ratio
     Balanced,
@@ -378,6 +381,7 @@ impl DeflateCompression {
     pub(crate) fn from_simple(value: Compression) -> Self {
         match value {
             Compression::NoCompression => Self::NoCompression,
+            Compression::Fastest => Self::FdeflateUltraFast,
             Compression::Fast => Self::FdeflateUltraFast,
             Compression::Balanced => Self::Flate2(flate2::Compression::default().level()),
             Compression::High => Self::Flate2(flate2::Compression::best().level()),

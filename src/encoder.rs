@@ -309,9 +309,9 @@ impl<'a, W: Write> Encoder<'a, W> {
 
     /// Set the used filter type.
     ///
-    /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
+    /// The default filter is [`Filter::Sub`] which provides a basic prediction algorithm for
     /// sample values based on the previous. For a potentially better compression ratio, at the
-    /// cost of more complex processing, try out [`FilterType::Paeth`].
+    /// cost of more complex processing, try out [`Filter::Paeth`].
     pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
     }
@@ -791,9 +791,9 @@ impl<W: Write> Writer<W> {
 
     /// Set the used filter type for the following frames.
     ///
-    /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
+    /// The default filter is [`Filter::Sub`] which provides a basic prediction algorithm for
     /// sample values based on the previous. For a potentially better compression ratio, at the
-    /// cost of more complex processing, try out [`FilterType::Paeth`].
+    /// cost of more complex processing, try out [`Filter::Paeth`].
     pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
     }
@@ -1317,7 +1317,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
 
     /// Set the used filter type for the next frame.
     ///
-    /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
+    /// The default filter is [`Filter::Sub`] which provides a basic prediction algorithm for
     /// sample values based on the previous.
     ///
     /// For optimal compression ratio you should enable adaptive filtering

@@ -103,7 +103,7 @@ mod simd {
             .select(a, smallest.simd_eq(pb).select(b, c))
     }
 
-    /// Memory of previous pixels (as needed to unfilter `FilterType::Paeth`).
+    /// Memory of previous pixels (as needed to unfilter `Filter::Paeth`).
     /// See also https://www.w3.org/TR/png/#filter-byte-positions
     #[derive(Default)]
     struct PaethState<T, const N: usize>
@@ -118,7 +118,7 @@ mod simd {
         a: Simd<T, N>,
     }
 
-    /// Mutates `x` as needed to unfilter `FilterType::Paeth`.
+    /// Mutates `x` as needed to unfilter `Filter::Paeth`.
     ///
     /// `b` is the current pixel in the previous row.  `x` is the current pixel in the current row.
     /// See also https://www.w3.org/TR/png/#filter-byte-positions
@@ -167,7 +167,7 @@ mod simd {
         dest[0..3].copy_from_slice(&src.to_array()[0..3])
     }
 
-    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Three`.
+    /// Undoes `Filter::Paeth` for `BytesPerPixel::Three`.
     pub fn unfilter_paeth3(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 3, 0);
@@ -198,7 +198,7 @@ mod simd {
         store3(x, curr_row);
     }
 
-    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Four` and `BytesPerPixel::Eight`.
+    /// Undoes `Filter::Paeth` for `BytesPerPixel::Four` and `BytesPerPixel::Eight`.
     ///
     /// This function calculates the Paeth predictor entirely in `Simd<u8, N>`
     /// without converting to an intermediate `Simd<i16, N>`. Doing so avoids
@@ -230,7 +230,7 @@ mod simd {
         dest[0..6].copy_from_slice(&src.to_array()[0..6])
     }
 
-    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Six`.
+    /// Undoes `Filter::Paeth` for `BytesPerPixel::Six`.
     pub fn unfilter_paeth6(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 6, 0);
@@ -309,7 +309,7 @@ impl Filter {
     }
 }
 
-/// Unlike the public [FilterType], does not include the "Adaptive" option
+/// Unlike the public [Filter], does not include the "Adaptive" option
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum RowFilter {

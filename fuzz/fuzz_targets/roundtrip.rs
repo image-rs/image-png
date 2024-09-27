@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use png::{FilterType, ColorType, BitDepth};
+use png::{Filter, ColorType, BitDepth};
 
 fuzz_target!(|data: (u8, u8, u8, u8, u8, Vec<u8>, Vec<u8>)| {
     if let Some((raw, encoded)) = encode_png(data.0, data.1, data.2, data.3, data.4, &data.5, &data.6) {
@@ -16,7 +16,7 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
     // Convert untyped bytes to the correct types and validate them:
     let width = width as u32;
     if width == 0 { return None };
-    let filter = FilterType::from_u8(filter)?;
+    let filter = Filter::from_u8(filter)?;
     let bit_depth = BitDepth::from_u8(raw_bit_depth)?;
     let max_palette_length = 3 * u32::pow(2, raw_bit_depth as u32) as usize;
     let mut palette = raw_palette;

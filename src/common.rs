@@ -310,7 +310,7 @@ impl AnimationControl {
 /// the appropriate DEFLATE compression mode and PNG filter.
 ///
 /// If you need more control over the encoding paramters,
-/// you can set the [DeflateCompression], [FilterType] and [AdaptiveFilterType] manually.
+/// you can set the [DeflateCompression] and [Filter] manually.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Compression {
@@ -341,7 +341,7 @@ impl Default for Compression {
 /// Note that this setting only affects DEFLATE compression.
 /// Another setting that influences the compression ratio and lets you choose
 /// between encoding speed and compression ratio is the *filter*,
-/// See [FilterType] and [AdaptiveFilterType].
+/// See [Filter] and [AdaptiveFilter].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum DeflateCompression {
@@ -350,7 +350,7 @@ pub enum DeflateCompression {
     /// Useful for incompressible images,
     /// or when speed is paramount and you don't care about size at all.
     ///
-    /// This mode also disables filters, forcing [FilterType::NoFilter].
+    /// This mode also disables filters, forcing [Filter::NoFilter].
     NoCompression,
 
     /// Excellent for creating lightly compressed PNG images very quickly.

@@ -26,7 +26,7 @@ crc32fast = "1.2.0"
 fdeflate = "0.3.3"
 flate2 = "1.0.11"
 miniz_oxide = { version = "0.8", features = ["simd"] }
-multiversion = "0.7.4"
+multiversion = { version = "0.7.4", optional = true }
 
 [dev-dependencies]
 byteorder = "1.5.0"
@@ -41,6 +41,7 @@ term = "0.7"
 [features]
 unstable = []
 benchmarks = []
+multiversioning = ["multiversion"]
 
 [[bench]]
 path = "benches/decoder.rs"

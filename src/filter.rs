@@ -340,6 +340,26 @@ fn filter_paeth_decode(a: u8, b: u8, c: u8) -> u8 {
     out
 }
 
+fn filter_paeth_decode_i16(a: i16, b: i16, c: i16) -> i16 {
+    // Decoding seems to optimize better with this algorithm
+    let pa = (b - c).abs();
+    let pb = (a - c).abs();
+    let pc = ((a - c) + (b - c)).abs();
+
+    let mut out = a;
+    let mut min = pa;
+
+    if pb < min {
+        min = pb;
+        out = b;
+    }
+    if pc < min {
+        out = c;
+    }
+
+    out
+}
+
 fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     // This is an optimized version of the paeth filter from the PNG specification, proposed by
     // Luca Versari for [FPNGE](https://www.lucaversari.it/FJXL_and_FPNGE.pdf). It operates
@@ -813,34 +833,57 @@ pub(crate) fn unfilter(
                     simd::unfilter_paeth6(previous, current);
 
                     #[cfg(not(feature = "unstable"))]
+                    // The compiler will only vectorize this loop
+                    // if we align the values to the width of a SIMD lane exactly.
+                    // So we pad values to 8-bit vectors of 16-bit values,
+                    // which works out to 128 bits which is wide enough for SIMD
                     {
-                        let mut a_bpp = [0; 6];
-                        let mut c_bpp = [0; 6];
+                        let mut a_bpp: [i16; 8] = [0; 8];
+                        let mut c_bpp: [i16; 8] = [0; 8];
                         for (chunk, b_bpp) in
                             current.chunks_exact_mut(6).zip(previous.chunks_exact(6))
                         {
-                            let new_chunk = [
-                                chunk[0].wrapping_add(filter_paeth_decode(
-                                    a_bpp[0], b_bpp[0], c_bpp[0],
-                                )),
-                                chunk[1].wrapping_add(filter_paeth_decode(
-                                    a_bpp[1], b_bpp[1], c_bpp[1],
-                                )),
-                                chunk[2].wrapping_add(filter_paeth_decode(
-                                    a_bpp[2], b_bpp[2], c_bpp[2],
-                                )),
-                                chunk[3].wrapping_add(filter_paeth_decode(
-                                    a_bpp[3], b_bpp[3], c_bpp[3],
-                                )),
-                                chunk[4].wrapping_add(filter_paeth_decode(
-                                    a_bpp[4], b_bpp[4], c_bpp[4],
-                                )),
-                                chunk[5].wrapping_add(filter_paeth_decode(
-                                    a_bpp[5], b_bpp[5], c_bpp[5],
-                                )),
+                            let chunk_8: [i16; 8] = [
+                                chunk[0] as i16,
+                                chunk[1] as i16,
+                                chunk[2] as i16,
+                                chunk[3] as i16,
+                                chunk[4] as i16,
+                                chunk[5] as i16,
+                                chunk[5] as i16,
+                                chunk[5] as i16,
                             ];
-                            *TryInto::<&mut [u8; 6]>::try_into(chunk).unwrap() = new_chunk;
-                            a_bpp = new_chunk;
+                            let b_bpp: [i16; 8] = [
+                                b_bpp[0] as i16,
+                                b_bpp[1] as i16,
+                                b_bpp[2] as i16,
+                                b_bpp[3] as i16,
+                                b_bpp[4] as i16,
+                                b_bpp[5] as i16,
+                                b_bpp[5] as i16,
+                                b_bpp[5] as i16,
+                            ];
+
+                            let mut new_chunk: [i16; 8] = [0; 8];
+
+                            for i in 0..8 {
+                                new_chunk[i] = chunk_8[i].wrapping_add(filter_paeth_decode_i16(
+                                    a_bpp[i], b_bpp[i], c_bpp[i],
+                                ));
+                            }
+
+                            let result: [u8; 6] = [
+                                new_chunk[0] as u8,
+                                new_chunk[1] as u8,
+                                new_chunk[2] as u8,
+                                new_chunk[3] as u8,
+                                new_chunk[4] as u8,
+                                new_chunk[5] as u8,
+                            ];
+
+                            // write out the new_chunk
+                            chunk.copy_from_slice(&result);
+                            a_bpp.copy_from_slice(&new_chunk);
                             c_bpp = b_bpp.try_into().unwrap();
                         }
                     }

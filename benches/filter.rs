@@ -8,7 +8,7 @@
 //! ```
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use png::benchable_apis::filter;
+use png::benchable_apis;
 use png::FilterType;
 use rand::Rng;
 
@@ -42,6 +42,7 @@ fn bench_filter(c: &mut Criterion, filter: FilterType, bpp: u8) {
     let mut rng = rand::thread_rng();
     let row_size = 4096 * (bpp as usize);
     let two_rows = get_random_bytes(&mut rng, row_size * 2);
+    let mut out = vec![0; row_size];
 
     group.throughput(Throughput::Bytes(row_size as u64));
     group.bench_with_input(
@@ -50,7 +51,7 @@ fn bench_filter(c: &mut Criterion, filter: FilterType, bpp: u8) {
         |b, two_rows| {
             let (prev_row, curr_row) = two_rows.split_at(row_size);
             let mut curr_row = curr_row.to_vec();
-            b.iter(|| filter(filter, bpp, prev_row, curr_row.as_mut_slice()));
+            b.iter(|| benchable_apis::filter(filter, bpp, prev_row, curr_row.as_mut_slice(), &mut out));
         },
     );
 }

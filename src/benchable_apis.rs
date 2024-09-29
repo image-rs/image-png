@@ -12,9 +12,10 @@ pub fn unfilter(filter: FilterType, tbpp: u8, previous: &[u8], current: &mut [u8
     crate::filter::unfilter(filter, tbpp, previous, current)
 }
 
-pub fn filter(filter: FilterType, tbpp: u8, previous: &[u8], current: &mut [u8]) {
+pub fn filter(filter: FilterType, tbpp: u8, previous: &[u8], current: &[u8], output: &mut [u8]) {
     let tbpp = BytesPerPixel::from_usize(tbpp as usize);
-    crate::filter::filter(filter, tbpp, previous, current)
+    let adaptive = crate::AdaptiveFilterType::NonAdaptive;
+    crate::filter::filter(filter, adaptive, tbpp, previous, current, output);
 }
 
 pub use crate::decoder::transform::{create_transform_fn, TransformFn};

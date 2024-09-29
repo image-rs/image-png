@@ -12,11 +12,11 @@ use crate::common::BytesPerPixel;
 /// feature of Rust gets stabilized.
 #[cfg(feature = "unstable")]
 mod simd {
+    #[cfg(feature = "multiversioning")]
+    use multiversion::multiversion;
     use std::simd::cmp::{SimdOrd, SimdPartialEq, SimdPartialOrd};
     use std::simd::num::{SimdInt, SimdUint};
     use std::simd::{u8x4, u8x8, LaneCount, Simd, SimdElement, SupportedLaneCount};
-    #[cfg(feature = "multiversioning")]
-    use multiversion::multiversion;
 
     /// This is an equivalent of the `PaethPredictor` function from
     /// [the spec](http://www.libpng.org/pub/png/spec/1.2/PNG-Filters.html#Filter-type-4-Paeth)

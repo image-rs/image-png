@@ -51,7 +51,9 @@ fn bench_filter(c: &mut Criterion, filter: FilterType, bpp: u8) {
         |b, two_rows| {
             let (prev_row, curr_row) = two_rows.split_at(row_size);
             let mut curr_row = curr_row.to_vec();
-            b.iter(|| benchable_apis::filter(filter, bpp, prev_row, curr_row.as_mut_slice(), &mut out));
+            b.iter(|| {
+                benchable_apis::filter(filter, bpp, prev_row, curr_row.as_mut_slice(), &mut out)
+            });
         },
     );
 }

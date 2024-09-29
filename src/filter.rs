@@ -864,26 +864,30 @@ pub(crate) fn unfilter(
                                 b_bpp[5] as i16,
                             ];
 
-                            let mut new_chunk: [i16; 8] = [0; 8];
+                            let mut unfiltered: [i16; 8] = [0; 8];
 
                             for i in 0..8 {
-                                new_chunk[i] = chunk_8[i].wrapping_add(filter_paeth_decode_i16(
+                                unfiltered[i] = chunk_8[i].wrapping_add(filter_paeth_decode_i16(
                                     a_bpp[i], b_bpp[i], c_bpp[i],
                                 ));
                             }
 
-                            let result: [u8; 6] = [
-                                new_chunk[0] as u8,
-                                new_chunk[1] as u8,
-                                new_chunk[2] as u8,
-                                new_chunk[3] as u8,
-                                new_chunk[4] as u8,
-                                new_chunk[5] as u8,
+                            let new_chunk: [u8; 8] = [
+                                unfiltered[0] as u8,
+                                unfiltered[1] as u8,
+                                unfiltered[2] as u8,
+                                unfiltered[3] as u8,
+                                unfiltered[4] as u8,
+                                unfiltered[5] as u8,
+                                unfiltered[6] as u8,
+                                unfiltered[7] as u8,
                             ];
 
-                            // write out the new_chunk
-                            chunk.copy_from_slice(&result);
-                            a_bpp.copy_from_slice(&new_chunk);
+                            // write out all the results
+                            chunk.copy_from_slice(&new_chunk[..6]);
+                            for i in 0..8 {
+                                a_bpp[i] = new_chunk[i] as i16;
+                            }
                             c_bpp = b_bpp.try_into().unwrap();
                         }
                     }

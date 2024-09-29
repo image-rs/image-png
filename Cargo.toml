@@ -26,6 +26,7 @@ crc32fast = "1.2.0"
 fdeflate = "0.3.3"
 flate2 = "1.0.11"
 miniz_oxide = { version = "0.8", features = ["simd"] }
+multiversion = "0.7.4"
 
 [dev-dependencies]
 byteorder = "1.5.0"

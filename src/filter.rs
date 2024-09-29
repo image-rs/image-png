@@ -1,5 +1,7 @@
 use core::convert::TryInto;
 
+use multiversion::multiversion;
+
 use crate::common::BytesPerPixel;
 
 /// SIMD helpers for `fn unfilter`
@@ -12,6 +14,7 @@ mod simd {
     use std::simd::cmp::{SimdOrd, SimdPartialEq, SimdPartialOrd};
     use std::simd::num::{SimdInt, SimdUint};
     use std::simd::{u8x4, u8x8, LaneCount, Simd, SimdElement, SupportedLaneCount};
+    use multiversion::multiversion;
 
     /// This is an equivalent of the `PaethPredictor` function from
     /// [the spec](http://www.libpng.org/pub/png/spec/1.2/PNG-Filters.html#Filter-type-4-Paeth)
@@ -167,6 +170,10 @@ mod simd {
         dest[0..3].copy_from_slice(&src.to_array()[0..3])
     }
 
+    #[multiversion(targets(
+        "x86_64+sse+sse2+sse3+sse4.1+ssse3", // SSE4.1 is enough because our vectors are 128bit
+        "arm+neon", // 32-bit ARM only; 64-bit always has NEON
+    ))]
     /// Undoes `FilterType::Paeth` for `BytesPerPixel::Three`.
     pub fn unfilter_paeth3(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
@@ -198,6 +205,10 @@ mod simd {
         store3(x, curr_row);
     }
 
+    #[multiversion(targets(
+        "x86_64+sse+sse2+sse3+sse4.1+ssse3", // SSE4.1 is enough because our vectors are 128bit
+        "arm+neon", // 32-bit ARM only; 64-bit always has NEON
+    ))]
     /// Undoes `FilterType::Paeth` for `BytesPerPixel::Four` and `BytesPerPixel::Eight`.
     ///
     /// This function calculates the Paeth predictor entirely in `Simd<u8, N>`
@@ -230,6 +241,10 @@ mod simd {
         dest[0..6].copy_from_slice(&src.to_array()[0..6])
     }
 
+    #[multiversion(targets(
+        "x86_64+sse+sse2+sse3+sse4.1+ssse3", // x86-64-v2, higher levels provide no benefit
+        "arm+neon", // 32-bit ARM only; 64-bit always has NEON
+    ))]
     /// Undoes `FilterType::Paeth` for `BytesPerPixel::Six`.
     pub fn unfilter_paeth6(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
@@ -381,6 +396,10 @@ fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
+#[multiversion(targets(
+    "x86_64+sse+sse2+sse3+sse4.1+ssse3", // SSE4.1 is enough because our vectors are 128bit
+    "arm+neon", // 32-bit ARM only; 64-bit always has NEON
+))]
 pub(crate) fn unfilter(
     mut filter: FilterType,
     tbpp: BytesPerPixel,

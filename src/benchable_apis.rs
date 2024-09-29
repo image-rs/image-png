@@ -12,6 +12,11 @@ pub fn unfilter(filter: FilterType, tbpp: u8, previous: &[u8], current: &mut [u8
     crate::filter::unfilter(filter, tbpp, previous, current)
 }
 
+pub fn filter(filter: FilterType, tbpp: u8, previous: &[u8], current: &mut [u8]) {
+    let tbpp = BytesPerPixel::from_usize(tbpp as usize);
+    crate::filter::filter(filter, tbpp, previous, current)
+}
+
 pub use crate::decoder::transform::{create_transform_fn, TransformFn};
 
 pub fn create_info_from_plte_trns_bitdepth<'a>(

@@ -774,25 +774,64 @@ pub(crate) fn unfilter(
                     simd::unfilter_paeth3(previous, current);
 
                     #[cfg(not(feature = "unstable"))]
+                    // The compiler will only vectorize this loop
+                    // if we align the values to the width of a SIMD lane exactly.
+                    // So we pad values to 8-bit vectors of 16-bit values,
+                    // which works out to 128 bits which is wide enough for SIMD
+                    //
+                    // Despite 5/8 of the work being wasted, this is still slightly faster
+                    // than the scalar implementation!
                     {
-                        let mut a_bpp = [0; 3];
-                        let mut c_bpp = [0; 3];
+                        let mut a_bpp: [i16; 8] = [0; 8];
+                        let mut c_bpp: [i16; 8] = [0; 8];
                         for (chunk, b_bpp) in
                             current.chunks_exact_mut(3).zip(previous.chunks_exact(3))
                         {
-                            let new_chunk = [
-                                chunk[0].wrapping_add(filter_paeth_decode(
-                                    a_bpp[0], b_bpp[0], c_bpp[0],
-                                )),
-                                chunk[1].wrapping_add(filter_paeth_decode(
-                                    a_bpp[1], b_bpp[1], c_bpp[1],
-                                )),
-                                chunk[2].wrapping_add(filter_paeth_decode(
-                                    a_bpp[2], b_bpp[2], c_bpp[2],
-                                )),
+                            let chunk_8: [i16; 8] = [
+                                chunk[0] as i16,
+                                chunk[1] as i16,
+                                chunk[2] as i16,
+                                chunk[2] as i16,
+                                chunk[2] as i16,
+                                chunk[2] as i16,
+                                chunk[2] as i16,
+                                chunk[2] as i16,
                             ];
-                            *TryInto::<&mut [u8; 3]>::try_into(chunk).unwrap() = new_chunk;
-                            a_bpp = new_chunk;
+                            let b_bpp: [i16; 8] = [
+                                b_bpp[0] as i16,
+                                b_bpp[1] as i16,
+                                b_bpp[2] as i16,
+                                b_bpp[2] as i16,
+                                b_bpp[2] as i16,
+                                b_bpp[2] as i16,
+                                b_bpp[2] as i16,
+                                b_bpp[2] as i16,
+                            ];
+
+                            let mut unfiltered: [i16; 8] = [0; 8];
+
+                            for i in 0..8 {
+                                unfiltered[i] = chunk_8[i].wrapping_add(filter_paeth_decode_i16(
+                                    a_bpp[i], b_bpp[i], c_bpp[i],
+                                ));
+                            }
+
+                            let new_chunk: [u8; 8] = [
+                                unfiltered[0] as u8,
+                                unfiltered[1] as u8,
+                                unfiltered[2] as u8,
+                                unfiltered[3] as u8,
+                                unfiltered[4] as u8,
+                                unfiltered[5] as u8,
+                                unfiltered[6] as u8,
+                                unfiltered[7] as u8,
+                            ];
+
+                            // write out all the results
+                            chunk.copy_from_slice(&new_chunk[..3]);
+                            for i in 0..8 {
+                                a_bpp[i] = new_chunk[i] as i16;
+                            }
                             c_bpp = b_bpp.try_into().unwrap();
                         }
                     }

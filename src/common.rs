@@ -740,6 +740,7 @@ bitflags::bitflags! {
     const SCALE_16            = 0x8000; // read only
     ```
     "]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Transformations: u32 {
         /// No transformation
         const IDENTITY            = 0x00000; // read and write */

@@ -9,17 +9,12 @@
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use png::benchable_apis::unfilter;
-use png::FilterType;
+use png::Filter;
 use rand::Rng;
 
 fn unfilter_all(c: &mut Criterion) {
     let bpps = [1, 2, 3, 4, 6, 8];
-    let filters = [
-        FilterType::Sub,
-        FilterType::Up,
-        FilterType::Avg,
-        FilterType::Paeth,
-    ];
+    let filters = [Filter::Sub, Filter::Up, Filter::Avg, Filter::Paeth];
     for &filter in filters.iter() {
         for &bpp in bpps.iter() {
             bench_unfilter(c, filter, bpp);
@@ -30,7 +25,7 @@ fn unfilter_all(c: &mut Criterion) {
 criterion_group!(benches, unfilter_all);
 criterion_main!(benches);
 
-fn bench_unfilter(c: &mut Criterion, filter: FilterType, bpp: u8) {
+fn bench_unfilter(c: &mut Criterion, filter: Filter, bpp: u8) {
     let mut group = c.benchmark_group("unfilter");
 
     fn get_random_bytes<R: Rng>(rng: &mut R, n: usize) -> Vec<u8> {

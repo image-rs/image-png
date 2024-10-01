@@ -15,7 +15,7 @@ use crate::chunk;
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
-use crate::filter::{unfilter, FilterType};
+use crate::filter::{unfilter, RowFilter};
 
 pub use interlace_info::InterlaceInfo;
 use interlace_info::InterlaceInfoIter;
@@ -723,7 +723,7 @@ impl<R: Read> Reader<R> {
         let (prev, row) = self.data_stream.split_at_mut(self.current_start);
 
         // Unfilter the row.
-        let filter = FilterType::from_u8(row[0]).ok_or(DecodingError::Format(
+        let filter = RowFilter::from_u8(row[0]).ok_or(DecodingError::Format(
             FormatErrorInner::UnknownFilterMethod(row[0]).into(),
         ))?;
         unfilter(

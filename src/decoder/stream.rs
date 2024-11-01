@@ -428,6 +428,7 @@ pub struct DecodeOptions {
     ignore_text_chunk: bool,
     ignore_iccp_chunk: bool,
     skip_ancillary_crc_failures: bool,
+    skip_frame_decoding: bool,
 }
 
 impl Default for DecodeOptions {
@@ -438,6 +439,7 @@ impl Default for DecodeOptions {
             ignore_text_chunk: false,
             ignore_iccp_chunk: false,
             skip_ancillary_crc_failures: true,
+            skip_frame_decoding: false,
         }
     }
 }
@@ -615,6 +617,10 @@ impl StreamingDecoder {
             .set_skip_ancillary_crc_failures(skip_ancillary_crc_failures)
     }
 
+    pub(crate) fn set_skip_frame_decoding(&mut self, skip_frame_decoding: bool) {
+        self.decode_options.skip_frame_decoding = skip_frame_decoding;
+    }
+
     /// Low level StreamingDecoder interface.
     ///
     /// Allows to stream partial data to the encoder. Returns a tuple containing the bytes that have
@@ -752,7 +758,16 @@ impl StreamingDecoder {
                 debug_assert!(type_str == IDAT || type_str == chunk::fdAT);
                 let len = std::cmp::min(buf.len(), self.current_chunk.remaining as usize);
                 let buf = &buf[..len];
-                let consumed = self.inflater.decompress(buf, image_data)?;
+                let consumed = if self.decode_options.skip_frame_decoding {
+                    // `inflater.reset()` is not strictly necessary.  We do it anyway to ensure
+                    // that if (unexpectedly) `skip_frame_decoding` changes before the end of this
+                    // frame, then it will (most likely) lead to decompression errors later (when
+                    // restarting again from the middle).
+                    self.inflater.reset();
+                    len
+                } else {
+                    self.inflater.decompress(buf, image_data)?
+                };
                 self.current_chunk.crc.update(&buf[..consumed]);
                 self.current_chunk.remaining -= consumed as u32;
                 if self.current_chunk.remaining == 0 {
@@ -811,7 +826,9 @@ impl StreamingDecoder {
                     && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
                 {
                     self.current_chunk.type_ = type_str;
-                    self.inflater.finish_compressed_chunks(image_data)?;
+                    if !self.decode_options.skip_frame_decoding {
+                        self.inflater.finish_compressed_chunks(image_data)?;
+                    }
                     self.inflater.reset();
                     self.ready_for_idat_chunks = false;
                     self.ready_for_fdat_chunks = false;
@@ -1704,7 +1721,7 @@ mod tests {
     use super::ScaledFloat;
     use super::SourceChromaticities;
     use crate::test_utils::*;
-    use crate::{Decoder, DecodingError, Reader};
+    use crate::{DecodeOptions, Decoder, DecodingError, Reader};
     use approx::assert_relative_eq;
     use byteorder::WriteBytesExt;
     use std::cell::RefCell;
@@ -2747,5 +2764,69 @@ mod tests {
             "Unexpected kind of error: {:?}",
             &err,
         );
+    }
+
+    struct ByteByByteReader<R: Read>(R);
+
+    impl<R: Read> Read for ByteByByteReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let len = buf.len().min(1);
+            self.0.read(&mut buf[..len])
+        }
+    }
+
+    /// When decoding byte-by-byte we will decompress all image bytes *before*
+    /// consuming the final 4 bytes of the adler32 checksum.  And we consume
+    /// image bytes using `ReadDecoder.decode_image_data` but the remainder of
+    /// the compressed data is consumed using
+    /// `ReadDecoder.finish_decoding_image_data`.  In
+    /// https://github.com/image-rs/image-png/pull/533 we consider tweaking
+    /// `finish_decoding_image_data` to discard the final, non-image bytes,
+    /// rather then decompressing them - the initial naive implementation of
+    /// such short-circuiting would have effectively disabled adler32 checksum
+    /// processing when decoding byte-by-byte.  This is what this test checks.
+    #[test]
+    fn test_broken_adler_checksum_when_decoding_byte_by_byte() {
+        let png = {
+            let width = 16;
+            let mut frame_data = generate_rgba8_with_width_and_height(width, width);
+
+            // Inject invalid adler32 checksum
+            let adler32: &mut [u8; 4] = frame_data.last_chunk_mut::<4>().unwrap();
+            *adler32 = [12, 34, 56, 78];
+
+            let mut png = VecDeque::new();
+            write_png_sig(&mut png);
+            write_rgba8_ihdr_with_width(&mut png, width);
+            write_chunk(&mut png, b"IDAT", &frame_data);
+            write_iend(&mut png);
+            png
+        };
+
+        // Default `DecodeOptions` ignore adler32 - we expect no errors here.
+        let mut reader = Decoder::new(ByteByByteReader(png.clone()))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        reader.next_frame(&mut buf).unwrap();
+
+        // But we expect to get an error after explicitly opting into adler32
+        // checks.
+        let mut reader = {
+            let mut options = DecodeOptions::default();
+            options.set_ignore_adler32(false);
+            Decoder::new_with_options(ByteByByteReader(png.clone()), options)
+                .read_info()
+                .unwrap()
+        };
+        let err = reader.next_frame(&mut buf).unwrap_err();
+        assert!(
+            matches!(&err, DecodingError::Format(_)),
+            "Unexpected kind of error: {:?}",
+            &err,
+        );
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("CorruptFlateStream"));
+        assert!(msg.contains("WrongChecksum"));
     }
 }

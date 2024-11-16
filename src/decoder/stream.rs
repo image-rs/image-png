@@ -976,7 +976,6 @@ impl StreamingDecoder {
         self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
         let parse_result = match type_str {
             IHDR => self.parse_ihdr(),
-            chunk::sBIT => self.parse_sbit(),
             chunk::PLTE => self.parse_plte(),
             chunk::tRNS => self.parse_trns(),
             chunk::pHYs => self.parse_phys(),
@@ -988,6 +987,7 @@ impl StreamingDecoder {
             chunk::cICP => Ok(self.parse_cicp()),
             chunk::mDCv => Ok(self.parse_mdcv()),
             chunk::cLLi => Ok(self.parse_clli()),
+            chunk::sBIT => Ok(self.parse_sbit().unwrap_or(Decoded::Nothing)),
             chunk::iCCP if !self.decode_options.ignore_iccp_chunk => self.parse_iccp(),
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
@@ -1110,74 +1110,69 @@ impl StreamingDecoder {
     }
 
     fn parse_sbit(&mut self) -> Result<Decoded, DecodingError> {
-        let mut parse = || {
-            let info = self.info.as_mut().unwrap();
-            if info.palette.is_some() {
+        let info = self.info.as_mut().unwrap();
+        if info.palette.is_some() {
+            return Err(DecodingError::Format(
+                FormatErrorInner::AfterPlte { kind: chunk::sBIT }.into(),
+            ));
+        }
+
+        if self.have_idat {
+            return Err(DecodingError::Format(
+                FormatErrorInner::AfterIdat { kind: chunk::sBIT }.into(),
+            ));
+        }
+
+        if info.sbit.is_some() {
+            return Err(DecodingError::Format(
+                FormatErrorInner::DuplicateChunk { kind: chunk::sBIT }.into(),
+            ));
+        }
+
+        let (color_type, bit_depth) = { (info.color_type, info.bit_depth) };
+        // The sample depth for color type 3 is fixed at eight bits.
+        let sample_depth = if color_type == ColorType::Indexed {
+            BitDepth::Eight
+        } else {
+            bit_depth
+        };
+        self.limits
+            .reserve_bytes(self.current_chunk.raw_bytes.len())?;
+        let vec = self.current_chunk.raw_bytes.clone();
+        let len = vec.len();
+
+        // expected lenth of the chunk
+        let expected = match color_type {
+            ColorType::Grayscale => 1,
+            ColorType::Rgb | ColorType::Indexed => 3,
+            ColorType::GrayscaleAlpha => 2,
+            ColorType::Rgba => 4,
+        };
+
+        // Check if the sbit chunk size is valid.
+        if expected != len {
+            return Err(DecodingError::Format(
+                FormatErrorInner::InvalidSbitChunkSize {
+                    color_type,
+                    expected,
+                    len,
+                }
+                .into(),
+            ));
+        }
+
+        for sbit in &vec {
+            if *sbit < 1 || *sbit > sample_depth as u8 {
                 return Err(DecodingError::Format(
-                    FormatErrorInner::AfterPlte { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            if self.have_idat {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::AfterIdat { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            if info.sbit.is_some() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::DuplicateChunk { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            let (color_type, bit_depth) = { (info.color_type, info.bit_depth) };
-            // The sample depth for color type 3 is fixed at eight bits.
-            let sample_depth = if color_type == ColorType::Indexed {
-                BitDepth::Eight
-            } else {
-                bit_depth
-            };
-            self.limits
-                .reserve_bytes(self.current_chunk.raw_bytes.len())?;
-            let vec = self.current_chunk.raw_bytes.clone();
-            let len = vec.len();
-
-            // expected lenth of the chunk
-            let expected = match color_type {
-                ColorType::Grayscale => 1,
-                ColorType::Rgb | ColorType::Indexed => 3,
-                ColorType::GrayscaleAlpha => 2,
-                ColorType::Rgba => 4,
-            };
-
-            // Check if the sbit chunk size is valid.
-            if expected != len {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::InvalidSbitChunkSize {
-                        color_type,
-                        expected,
-                        len,
+                    FormatErrorInner::InvalidSbit {
+                        sample_depth,
+                        sbit: *sbit,
                     }
                     .into(),
                 ));
             }
-
-            for sbit in &vec {
-                if *sbit < 1 || *sbit > sample_depth as u8 {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::InvalidSbit {
-                            sample_depth,
-                            sbit: *sbit,
-                        }
-                        .into(),
-                    ));
-                }
-            }
-            info.sbit = Some(Cow::Owned(vec));
-            Ok(Decoded::Nothing)
-        };
-
-        parse().ok();
+        }
+        info.sbit = Some(Cow::Owned(vec));
         Ok(Decoded::Nothing)
     }
 

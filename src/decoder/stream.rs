@@ -1790,12 +1790,17 @@ impl StreamingDecoder {
                     1
                 }
                 ColorType::Grayscale | ColorType::GrayscaleAlpha => 2,
-                ColorType::Rgb | ColorType::Rgba => 6
+                ColorType::Rgb | ColorType::Rgba => 6,
             };
 
             if len != expected {
                 return Err(DecodingError::Format(
-                    FormatErrorInner::InvalidBkgdChunkSize { color_type: info.color_type, expected: expected, len: len }.into(),
+                    FormatErrorInner::InvalidBkgdChunkSize {
+                        color_type: info.color_type,
+                        expected: expected,
+                        len: len,
+                    }
+                    .into(),
                 ));
             }
 

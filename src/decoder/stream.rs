@@ -214,6 +214,11 @@ pub(crate) enum FormatErrorInner {
         expected: usize,
         len: usize,
     },
+    InvalidBkgdChunkSize {
+        color_type: ColorType,
+        expected: usize,
+        len: usize,
+    },
     InvalidSbit {
         sample_depth: BitDepth,
         sbit: u8,
@@ -329,6 +334,11 @@ impl fmt::Display for FormatError {
             InvalidSbitChunkSize {color_type, expected, len} => write!(
                 fmt,
                 "The size of the sBIT chunk should be {} byte(s), but {} byte(s) were provided for the {:?} color type.",
+                expected, len, color_type
+            ),
+            InvalidBkgdChunkSize {color_type, expected, len} => write!(
+                fmt,
+                "The size of the bKGD chunk should be {} byte(s), but {} byte(s) were provided for the {:?} color type.",
                 expected, len, color_type
             ),
             InvalidSbit {sample_depth, sbit} => write!(
@@ -985,6 +995,7 @@ impl StreamingDecoder {
             chunk::fcTL => self.parse_fctl(),
             chunk::cHRM => self.parse_chrm(),
             chunk::sRGB => self.parse_srgb(),
+            chunk::bKGD => self.parse_bkgd(),
             chunk::cICP => Ok(self.parse_cicp()),
             chunk::mDCv => Ok(self.parse_mdcv()),
             chunk::cLLi => Ok(self.parse_clli()),
@@ -1753,6 +1764,44 @@ impl StreamingDecoder {
         );
 
         Ok(Decoded::Nothing)
+    }
+
+    fn parse_bkgd(&mut self) -> Result<Decoded, DecodingError> {
+        let info = self.info.as_mut().unwrap();
+        if self.have_idat {
+            Err(DecodingError::Format(
+                FormatErrorInner::AfterIdat { kind: chunk::bKGD }.into(),
+            ))
+        } else if info.bkgd.is_some() {
+            Err(DecodingError::Format(
+                FormatErrorInner::DuplicateChunk { kind: chunk::bKGD }.into(),
+            ))
+        } else {
+            let vec = self.current_chunk.raw_bytes.clone();
+            let len = vec.len();
+            let expected = match info.color_type {
+                ColorType::Indexed => {
+                    if info.palette.is_none() {
+                        return Err(DecodingError::Format(
+                            FormatErrorInner::BeforePlte { kind: chunk::bKGD }.into(),
+                        ));
+                    }
+
+                    1
+                }
+                ColorType::Grayscale | ColorType::GrayscaleAlpha => 2,
+                ColorType::Rgb | ColorType::Rgba => 6
+            };
+
+            if len != expected {
+                return Err(DecodingError::Format(
+                    FormatErrorInner::InvalidBkgdChunkSize { color_type: info.color_type, expected: expected, len: len }.into(),
+                ));
+            }
+
+            info.bkgd = Some(Cow::Owned(vec));
+            Ok(Decoded::Nothing)
+        }
     }
 }
 

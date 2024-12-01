@@ -318,24 +318,17 @@ impl Default for AdaptiveFilterType {
     }
 }
 
+/// Adapted from stb_image.h 2.30
 fn filter_paeth_decode(a: u8, b: u8, c: u8) -> u8 {
-    // Decoding seems to optimize better with this algorithm
-    let pa = (i16::from(b) - i16::from(c)).abs();
-    let pb = (i16::from(a) - i16::from(c)).abs();
-    let pc = ((i16::from(a) - i16::from(c)) + (i16::from(b) - i16::from(c))).abs();
-
-    let mut out = a;
-    let mut min = pa;
-
-    if pb < min {
-        min = pb;
-        out = b;
-    }
-    if pc < min {
-        out = c;
-    }
-
-    out
+    // This formulation looks very different from the reference in the PNG spec, but is
+    // actually equivalent and has favorable data dependencies and admits straightforward
+    // generation of branch-free code, which helps performance significantly.
+    let thresh = c as i16 * 3 - (a as i16 + b as i16);
+    let lo = a.min(b);
+    let hi = a.max(b);
+    let t0 = if thresh >= hi as i16 { lo } else { c };
+    let t1 = if thresh <= lo as i16 { hi } else { t0 };
+    t1
 }
 
 #[cfg(feature = "unstable")]

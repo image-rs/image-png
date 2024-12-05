@@ -376,7 +376,8 @@ pub enum DeflateCompression {
     /// Flate2 has several backends that make different trade-offs.
     /// See the flate2 documentation for the available backends for more information.
     Flate2(u32),
-    // TODO: Zopfli?
+    
+    // Other variants can be added in the future
 }
 
 impl Default for DeflateCompression {

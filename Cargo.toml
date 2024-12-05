@@ -48,13 +48,18 @@ name = "decoder"
 harness = false
 
 [[bench]]
-path = "benches/unfilter.rs"
-name = "unfilter"
+path = "benches/expand_paletted.rs"
+name = "expand_paletted"
 harness = false
 required-features = ["benchmarks"]
 
 [[bench]]
-path = "benches/expand_paletted.rs"
-name = "expand_paletted"
+path = "benches/next_frame_info.rs"
+name = "next_frame_info"
+harness = false
+
+[[bench]]
+path = "benches/unfilter.rs"
+name = "unfilter"
 harness = false
 required-features = ["benchmarks"]

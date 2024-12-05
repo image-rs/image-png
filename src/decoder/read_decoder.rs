@@ -20,6 +20,7 @@ use crate::common::Info;
 pub(crate) struct ReadDecoder<R: Read> {
     reader: BufReader<R>,
     decoder: StreamingDecoder,
+    state: State,
 }
 
 impl<R: Read> ReadDecoder<R> {
@@ -27,6 +28,7 @@ impl<R: Read> ReadDecoder<R> {
         Self {
             reader: BufReader::with_capacity(CHUNK_BUFFER_SIZE, r),
             decoder: StreamingDecoder::new(),
+            state: State::Initial,
         }
     }
 
@@ -37,6 +39,7 @@ impl<R: Read> ReadDecoder<R> {
         Self {
             reader: BufReader::with_capacity(CHUNK_BUFFER_SIZE, r),
             decoder,
+            state: State::Initial,
         }
     }
 
@@ -106,6 +109,10 @@ impl<R: Read> ReadDecoder<R> {
     ///
     /// Prerequisite: **Not** within `IDAT` / `fdAT` chunk sequence.
     pub fn read_until_image_data(&mut self) -> Result<(), DecodingError> {
+        // Caller should guarantee that we are in a state that meets function prerequisites.
+        debug_assert!(self.state != State::StartOfImageData);
+        debug_assert!(self.state != State::MiddleOfImageData);
+
         loop {
             match self.decode_next_without_image_data()? {
                 Decoded::ChunkBegin(_, chunk::IDAT) | Decoded::ChunkBegin(_, chunk::fdAT) => break,
@@ -119,6 +126,9 @@ impl<R: Read> ReadDecoder<R> {
                 _ => {}
             }
         }
+
+        self.state = State::StartOfImageData;
+        self.decoder.set_skip_frame_decoding(false);
         Ok(())
     }
 
@@ -130,6 +140,13 @@ impl<R: Read> ReadDecoder<R> {
         &mut self,
         image_data: &mut Vec<u8>,
     ) -> Result<ImageDataCompletionStatus, DecodingError> {
+        // Caller should guarantee that we are in a state that meets function prerequisites.
+        debug_assert!(matches!(
+            self.state,
+            State::StartOfImageData | State::MiddleOfImageData
+        ));
+
+        self.state = State::MiddleOfImageData;
         match self.decode_next(image_data)? {
             Decoded::ImageData => Ok(ImageDataCompletionStatus::ExpectingMoreData),
             Decoded::ImageDataFlushed => Ok(ImageDataCompletionStatus::Done),
@@ -148,9 +165,22 @@ impl<R: Read> ReadDecoder<R> {
     ///
     /// Prerequisite: Input is currently positioned within `IDAT` / `fdAT` chunk sequence.
     pub fn finish_decoding_image_data(&mut self) -> Result<(), DecodingError> {
+        match self.state {
+            // If skipping image data from start to end, then bypass decompression.
+            State::StartOfImageData => self.decoder.set_skip_frame_decoding(true),
+
+            // Otherwise, keep passing the remainder of the data to the decompressor
+            // (e.g. to detect adler32 errors if this is what `DecodeOptions` ask for).
+            State::MiddleOfImageData => (),
+
+            // Caller should guarantee that we are in a state that meets function prerequisites.
+            _ => unreachable!(),
+        }
+
         loop {
             let mut to_be_discarded = vec![];
             if let ImageDataCompletionStatus::Done = self.decode_image_data(&mut to_be_discarded)? {
+                self.state = State::OutsideOfImageData;
                 return Ok(());
             }
         }
@@ -160,10 +190,12 @@ impl<R: Read> ReadDecoder<R> {
     ///
     /// Prerequisite: `IEND` chunk hasn't been reached yet.
     pub fn read_until_end_of_input(&mut self) -> Result<(), DecodingError> {
+        debug_assert!(self.state != State::EndOfInput);
         while !matches!(
             self.decode_next_and_discard_image_data()?,
             Decoded::ImageEnd
         ) {}
+        self.state = State::EndOfInput;
         Ok(())
     }
 
@@ -176,4 +208,22 @@ impl<R: Read> ReadDecoder<R> {
 pub(crate) enum ImageDataCompletionStatus {
     ExpectingMoreData,
     Done,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum State {
+    /// Before the first `IDAT`.
+    Initial,
+
+    /// At the start of a new `IDAT` or `fdAT` sequence.
+    StartOfImageData,
+
+    /// In the middle of an `IDAT` or `fdAT` sequence.
+    MiddleOfImageData,
+
+    /// Outside of an `IDAT` or `fdAT` sequence.
+    OutsideOfImageData,
+
+    /// After consuming `IEND`.
+    EndOfInput,
 }

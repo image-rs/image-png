@@ -325,6 +325,12 @@ impl<R: Read> Reader<R> {
     /// Returns a [`ParameterError`] when there are no more animation frames.
     /// To avoid this the caller can check if [`Info::animation_control`] exists
     /// and consult [`AnimationControl::num_frames`].
+    ///
+    /// Note that this method may end up skipping and discarding some image data.
+    /// When the whole image frame is skipped in this way, then (for better runtime
+    /// performance) the image data is not decompressed.  This may result in some
+    /// format errors being undetected (e.g. Adler 32 checksums would not be checked
+    /// in this case).
     pub fn next_frame_info(&mut self) -> Result<&FrameControl, DecodingError> {
         let remaining_frames = if self.subframe.consumed_and_flushed {
             self.remaining_frames

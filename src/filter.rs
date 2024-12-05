@@ -38,7 +38,7 @@ mod simd {
     {
         let mut out = [0; N];
         for i in 0..N {
-            out[i] = super::filter_paeth_i16(a[i].into(), b[i].into(), c[i].into());
+            out[i] = super::filter_paeth_stbi_i16(a[i].into(), b[i].into(), c[i].into());
         }
         out.into()
     }
@@ -55,7 +55,7 @@ mod simd {
     {
         let mut out = [0; N];
         for i in 0..N {
-            out[i] = super::filter_paeth(a[i].into(), b[i].into(), c[i].into());
+            out[i] = super::filter_paeth_stbi(a[i].into(), b[i].into(), c[i].into());
         }
         out.into()
     }
@@ -704,7 +704,7 @@ pub(crate) fn unfilter(
                 }
             }
         },
-        #[allow(dead_code)]
+        #[allow(unreachable_code)]
         Paeth => {
             // Select the fastest Paeth filter implementation based on the target architecture.
             let filter_paeth_decode = if cfg!(target_arch = "x86_64") {

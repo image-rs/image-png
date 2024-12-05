@@ -304,7 +304,7 @@ impl Filter {
     pub(crate) fn from_simple(compression: Compression) -> Self {
         match compression {
             Compression::NoCompression => Filter::NoFilter, // with no DEFLATE filtering would only waste time
-            Compression::Fastest => Filter::Up, // fast and avoids long backreferences in DEFLATE stream
+            Compression::Fastest => Filter::None,
             Compression::Fast => Filter::Adaptive,
             Compression::Balanced => Filter::Adaptive,
             Compression::High => Filter::Adaptive,

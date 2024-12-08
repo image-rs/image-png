@@ -2111,6 +2111,23 @@ mod tests {
     }
 
     #[test]
+    fn test_iccp_roundtrip() {
+        let dummy_icc = b"I'm a profile";
+
+        let mut info = crate::Info::with_size(1, 1);
+        info.icc_profile = Some(dummy_icc.into());
+        let mut encoded_image = Vec::new();
+        let enc = crate::Encoder::with_info(&mut encoded_image, info).unwrap();
+        let mut enc = enc.write_header().unwrap();
+        enc.write_image_data(&[0]).unwrap();
+        enc.finish().unwrap();
+
+        let dec = crate::Decoder::new(encoded_image.as_slice());
+        let dec = dec.read_info().unwrap();
+        assert_eq!(dummy_icc, &**dec.info().icc_profile.as_ref().unwrap());
+    }
+
+    #[test]
     fn test_png_with_broken_iccp() {
         let decoder = crate::Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
         assert!(decoder.read_info().is_ok());

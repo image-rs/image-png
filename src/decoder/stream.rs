@@ -1528,9 +1528,11 @@ impl StreamingDecoder {
         let mut buf = &self.current_chunk.raw_bytes[..];
 
         // read profile name
-        let _: u8 = buf.read_be()?;
-        for _ in 1..80 {
+        for len in 0..=80 {
             let raw: u8 = buf.read_be()?;
+            if (raw == 0 && len == 0) || (raw != 0 && len == 80) {
+                return Err(DecodingError::from(TextDecodingError::InvalidKeywordSize));
+            }
             if raw == 0 {
                 break;
             }

@@ -315,6 +315,8 @@ pub enum Compression {
     /// the encoder can do, but is meant to emulate the `Best` setting in the `Flate2`
     /// library.
     Best,
+    /// Do no compression
+    None,
     #[deprecated(
         since = "0.17.6",
         note = "use one of the other compression levels instead, such as 'fast'"

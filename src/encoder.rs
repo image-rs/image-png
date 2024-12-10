@@ -16,6 +16,7 @@ use crate::text_metadata::{
     encode_iso_8859_1, EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
 use crate::traits::WriteBytesExt;
+use crate::DeflateCompression;
 
 pub type Result<T> = result::Result<T, EncodingError>;
 
@@ -309,11 +310,16 @@ impl<'a, W: Write> Encoder<'a, W> {
     }
 
     /// Set compression parameters.
-    ///
-    /// Accepts a `Compression` or any type that can transform into a `Compression`. Notably `deflate::Compression` and
-    /// `deflate::CompressionOptions` which "just work".
     pub fn set_compression(&mut self, compression: Compression) {
         self.info.compression = compression;
+        self.info.compression_deflate = None;
+    }
+
+    /// Provides in-depth customization of DEFLATE compression options.
+    ///
+    /// For a simpler selection of compression options see [Self::set_compression].
+    pub fn set_deflate_compression(&mut self, compression: DeflateCompression) {
+        self.info.compression_deflate = Some(compression);
     }
 
     /// Set the used filter type.
@@ -495,7 +501,7 @@ struct PartialInfo {
     color_type: ColorType,
     frame_control: Option<FrameControl>,
     animation_control: Option<AnimationControl>,
-    compression: Compression,
+    compression: DeflateCompression,
     has_palette: bool,
 }
 
@@ -508,7 +514,7 @@ impl PartialInfo {
             color_type: info.color_type,
             frame_control: info.frame_control,
             animation_control: info.animation_control,
-            compression: info.compression,
+            compression: info.compression(),
             has_palette: info.palette.is_some(),
         }
     }
@@ -538,7 +544,7 @@ impl PartialInfo {
             color_type: self.color_type,
             frame_control: self.frame_control,
             animation_control: self.animation_control,
-            compression: self.compression,
+            compression_deflate: Some(self.compression),
             ..Default::default()
         }
     }
@@ -694,7 +700,16 @@ impl<W: Write> Writer<W> {
         let adaptive_method = self.options.adaptive_filter;
 
         let zlib_encoded = match self.info.compression {
-            Compression::Fast => {
+            DeflateCompression::NoCompression => {
+                let mut compressor =
+                    fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                for line in data.chunks(in_len) {
+                    compressor.write_data(&[0])?;
+                    compressor.write_data(line)?;
+                }
+                compressor.finish()?.into_inner()
+            }
+            DeflateCompression::FdeflateUltraFast => {
                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
 
                 let mut current = vec![0; in_len + 1];
@@ -720,10 +735,7 @@ impl<W: Write> Writer<W> {
                     // Write uncompressed data since the result from fast compression would take
                     // more space than that.
                     //
-                    // We always use FilterType::NoFilter here regardless of the filter method
-                    // requested by the user. Doing filtering again would only add performance
-                    // cost for both encoding and subsequent decoding, without improving the
-                    // compression ratio.
+                    // This is essentially a fallback to NoCompression.
                     let mut compressor =
                         fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
                     for line in data.chunks(in_len) {
@@ -735,10 +747,10 @@ impl<W: Write> Writer<W> {
                     compressed
                 }
             }
-            _ => {
+            DeflateCompression::Flate2(level) => {
                 let mut current = vec![0; in_len];
 
-                let mut zlib = ZlibEncoder::new(Vec::new(), self.info.compression.to_options());
+                let mut zlib = ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
                 for line in data.chunks(in_len) {
                     let filter_type = filter(
                         filter_method,
@@ -1344,7 +1356,7 @@ pub struct StreamWriter<'a, W: Write> {
     filter: FilterType,
     adaptive_filter: AdaptiveFilterType,
     fctl: Option<FrameControl>,
-    compression: Compression,
+    compression: DeflateCompression,
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
@@ -1367,7 +1379,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let mut chunk_writer = ChunkWriter::new(writer, buf_len);
         let (line_len, to_write) = chunk_writer.next_frame_info();
         chunk_writer.write_header()?;
-        let zlib = ZlibEncoder::new(chunk_writer, compression.to_options());
+        let zlib = ZlibEncoder::new(chunk_writer, compression.closest_flate2_level());
 
         Ok(StreamWriter {
             writer: Wrapper::Zlib(zlib),
@@ -1610,7 +1622,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         // now it can be taken because the next statements cannot cause any errors
         match self.writer.take() {
             Wrapper::Chunk(wrt) => {
-                let encoder = ZlibEncoder::new(wrt, self.compression.to_options());
+                let encoder = ZlibEncoder::new(wrt, self.compression.closest_flate2_level());
                 self.writer = Wrapper::Zlib(encoder);
             }
             _ => unreachable!(),
@@ -1706,25 +1718,6 @@ impl<W: Write> Drop for StreamWriter<'_, W> {
     }
 }
 
-/// Mod to encapsulate the converters depending on the `deflate` crate.
-///
-/// Since this only contains trait impls, there is no need to make this public, they are simply
-/// available when the mod is compiled as well.
-impl Compression {
-    fn to_options(self) -> flate2::Compression {
-        #[allow(deprecated)]
-        match self {
-            Compression::Default => flate2::Compression::default(),
-            Compression::Fast => flate2::Compression::fast(),
-            Compression::Best => flate2::Compression::best(),
-            #[allow(deprecated)]
-            Compression::Huffman => flate2::Compression::none(),
-            #[allow(deprecated)]
-            Compression::Rle => flate2::Compression::none(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1753,30 +1746,34 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                // Encode decoded image
-                let mut out = Vec::new();
-                {
-                    let mut wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut out,
-                    };
+                use DeflateCompression::*;
+                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                    // Encode decoded image
+                    let mut out = Vec::new();
+                    {
+                        let mut wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut out,
+                        };
 
-                    let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
-                    encoder.set_color(info.color_type);
-                    encoder.set_depth(info.bit_depth);
-                    if let Some(palette) = &reader.info().palette {
-                        encoder.set_palette(palette.clone());
+                        let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
+                        encoder.set_color(info.color_type);
+                        encoder.set_depth(info.bit_depth);
+                        encoder.set_deflate_compression(compression);
+                        if let Some(palette) = &reader.info().palette {
+                            encoder.set_palette(palette.clone());
+                        }
+                        let mut encoder = encoder.write_header().unwrap();
+                        encoder.write_image_data(&buf).unwrap();
                     }
-                    let mut encoder = encoder.write_header().unwrap();
-                    encoder.write_image_data(&buf).unwrap();
+                    // Decode encoded decoded image
+                    let decoder = Decoder::new(&*out);
+                    let mut reader = decoder.read_info().unwrap();
+                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    reader.next_frame(&mut buf2).unwrap();
+                    // check if the encoded image is ok:
+                    assert_eq!(buf, buf2);
                 }
-                // Decode encoded decoded image
-                let decoder = Decoder::new(&*out);
-                let mut reader = decoder.read_info().unwrap();
-                let mut buf2 = vec![0; reader.output_buffer_size()];
-                reader.next_frame(&mut buf2).unwrap();
-                // check if the encoded image is ok:
-                assert_eq!(buf, buf2);
             }
         }
     }
@@ -1798,37 +1795,41 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                // Encode decoded image
-                let mut out = Vec::new();
-                {
-                    let mut wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut out,
-                    };
+                use DeflateCompression::*;
+                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                    // Encode decoded image
+                    let mut out = Vec::new();
+                    {
+                        let mut wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut out,
+                        };
 
-                    let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
-                    encoder.set_color(info.color_type);
-                    encoder.set_depth(info.bit_depth);
-                    if let Some(palette) = &reader.info().palette {
-                        encoder.set_palette(palette.clone());
+                        let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
+                        encoder.set_color(info.color_type);
+                        encoder.set_depth(info.bit_depth);
+                        encoder.set_deflate_compression(compression);
+                        if let Some(palette) = &reader.info().palette {
+                            encoder.set_palette(palette.clone());
+                        }
+                        let mut encoder = encoder.write_header().unwrap();
+                        let mut stream_writer = encoder.stream_writer().unwrap();
+
+                        let mut outer_wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut stream_writer,
+                        };
+
+                        outer_wrapper.write_all(&buf).unwrap();
                     }
-                    let mut encoder = encoder.write_header().unwrap();
-                    let mut stream_writer = encoder.stream_writer().unwrap();
-
-                    let mut outer_wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut stream_writer,
-                    };
-
-                    outer_wrapper.write_all(&buf).unwrap();
+                    // Decode encoded decoded image
+                    let decoder = Decoder::new(&*out);
+                    let mut reader = decoder.read_info().unwrap();
+                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    reader.next_frame(&mut buf2).unwrap();
+                    // check if the encoded image is ok:
+                    assert_eq!(buf, buf2);
                 }
-                // Decode encoded decoded image
-                let decoder = Decoder::new(&*out);
-                let mut reader = decoder.read_info().unwrap();
-                let mut buf2 = vec![0; reader.output_buffer_size()];
-                reader.next_frame(&mut buf2).unwrap();
-                // check if the encoded image is ok:
-                assert_eq!(buf, buf2);
             }
         }
     }

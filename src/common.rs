@@ -1,5 +1,5 @@
 //! Common types shared between the encoder and decoder
-use crate::text_metadata::{EncodableTextChunk, ITXtChunk, TEXtChunk, ZTXtChunk};
+use crate::text_metadata::{ITXtChunk, TEXtChunk, ZTXtChunk};
 use crate::{chunk, encoder};
 use io::Write;
 use std::{borrow::Cow, convert::TryFrom, fmt, io};
@@ -76,6 +76,16 @@ impl ColorType {
                 || self == ColorType::GrayscaleAlpha
                 || self == ColorType::Rgba))
             || (bit_depth == BitDepth::Sixteen && self == ColorType::Indexed)
+    }
+
+    pub(crate) fn bits_per_pixel(&self, bit_depth: BitDepth) -> usize {
+        self.samples() * bit_depth as usize
+    }
+
+    pub(crate) fn bytes_per_pixel(&self, bit_depth: BitDepth) -> usize {
+        // If adjusting this for expansion or other transformation passes, remember to keep the old
+        // implementation for bpp_in_prediction, which is internal to the png specification.
+        self.samples() * ((bit_depth as usize + 7) >> 3)
     }
 }
 
@@ -587,7 +597,6 @@ pub struct Info<'a> {
 
     pub frame_control: Option<FrameControl>,
     pub animation_control: Option<AnimationControl>,
-    pub compression: Compression,
     /// Gamma of the source system.
     /// Set by both `gAMA` as well as to a replacement by `sRGB` chunk.
     pub source_gamma: Option<ScaledFloat>,
@@ -633,9 +642,6 @@ impl Default for Info<'_> {
             pixel_dims: None,
             frame_control: None,
             animation_control: None,
-            // Default to `deflate::Compression::Fast` and `filter::FilterType::Sub`
-            // to maintain backward compatible output.
-            compression: Compression::Fast,
             source_gamma: None,
             source_chromaticities: None,
             srgb: None,
@@ -683,14 +689,14 @@ impl Info<'_> {
 
     /// Returns the number of bits per pixel.
     pub fn bits_per_pixel(&self) -> usize {
-        self.color_type.samples() * self.bit_depth as usize
+        self.color_type.bits_per_pixel(self.bit_depth)
     }
 
     /// Returns the number of bytes per pixel.
     pub fn bytes_per_pixel(&self) -> usize {
         // If adjusting this for expansion or other transformation passes, remember to keep the old
         // implementation for bpp_in_prediction, which is internal to the png specification.
-        self.color_type.samples() * ((self.bit_depth as usize + 7) >> 3)
+        self.color_type.bytes_per_pixel(self.bit_depth)
     }
 
     /// Return the number of bytes for this pixel used in prediction.
@@ -725,6 +731,24 @@ impl Info<'_> {
             .raw_row_length_from_width(self.bit_depth, width)
     }
 
+    /// Gamma dependent on sRGB chunk
+    pub fn gamma(&self) -> Option<ScaledFloat> {
+        if self.srgb.is_some() {
+            Some(crate::srgb::substitute_gamma())
+        } else {
+            self.gama_chunk
+        }
+    }
+
+    /// Chromaticities dependent on sRGB chunk
+    pub fn chromaticities(&self) -> Option<SourceChromaticities> {
+        if self.srgb.is_some() {
+            Some(crate::srgb::substitute_chromaticities())
+        } else {
+            self.chrm_chunk
+        }
+    }
+
     /// Mark the image data as conforming to the SRGB color space with the specified rendering intent.
     ///
     /// Any ICC profiles will be ignored.
@@ -734,91 +758,6 @@ impl Info<'_> {
     pub(crate) fn set_source_srgb(&mut self, rendering_intent: SrgbRenderingIntent) {
         self.srgb = Some(rendering_intent);
         self.icc_profile = None;
-    }
-
-    /// Encode this header to the writer.
-    ///
-    /// Note that this does _not_ include the PNG signature, it starts with the IHDR chunk and then
-    /// includes other chunks that were added to the header.
-    #[deprecated(note = "Use Encoder+Writer instead")]
-    pub fn encode<W: Write>(&self, mut w: W) -> encoder::Result<()> {
-        // Encode the IHDR chunk
-        let mut data = [0; 13];
-        data[..4].copy_from_slice(&self.width.to_be_bytes());
-        data[4..8].copy_from_slice(&self.height.to_be_bytes());
-        data[8] = self.bit_depth as u8;
-        data[9] = self.color_type as u8;
-        data[12] = self.interlaced as u8;
-        encoder::write_chunk(&mut w, chunk::IHDR, &data)?;
-
-        // Encode the pHYs chunk
-        if let Some(pd) = self.pixel_dims {
-            let mut phys_data = [0; 9];
-            phys_data[0..4].copy_from_slice(&pd.xppu.to_be_bytes());
-            phys_data[4..8].copy_from_slice(&pd.yppu.to_be_bytes());
-            match pd.unit {
-                Unit::Meter => phys_data[8] = 1,
-                Unit::Unspecified => phys_data[8] = 0,
-            }
-            encoder::write_chunk(&mut w, chunk::pHYs, &phys_data)?;
-        }
-
-        // If specified, the sRGB information overrides the source gamma and chromaticities.
-        if let Some(srgb) = &self.srgb {
-            srgb.encode(&mut w)?;
-
-            // gAMA and cHRM are optional, for backwards compatibility
-            let srgb_gamma = crate::srgb::substitute_gamma();
-            if Some(srgb_gamma) == self.source_gamma {
-                srgb_gamma.encode_gama(&mut w)?
-            }
-            let srgb_chromaticities = crate::srgb::substitute_chromaticities();
-            if Some(srgb_chromaticities) == self.source_chromaticities {
-                srgb_chromaticities.encode(&mut w)?;
-            }
-        } else {
-            if let Some(gma) = self.source_gamma {
-                gma.encode_gama(&mut w)?
-            }
-            if let Some(chrms) = self.source_chromaticities {
-                chrms.encode(&mut w)?;
-            }
-            if let Some(iccp) = &self.icc_profile {
-                encoder::write_iccp_chunk(&mut w, "_", iccp)?
-            }
-        }
-
-        if let Some(exif) = &self.exif_metadata {
-            encoder::write_chunk(&mut w, chunk::eXIf, exif)?;
-        }
-
-        if let Some(actl) = self.animation_control {
-            actl.encode(&mut w)?;
-        }
-
-        // The position of the PLTE chunk is important, it must come before the tRNS chunk and after
-        // many of the other metadata chunks.
-        if let Some(p) = &self.palette {
-            encoder::write_chunk(&mut w, chunk::PLTE, p)?;
-        };
-
-        if let Some(t) = &self.trns {
-            encoder::write_chunk(&mut w, chunk::tRNS, t)?;
-        }
-
-        for text_chunk in &self.uncompressed_latin1_text {
-            text_chunk.encode(&mut w)?;
-        }
-
-        for text_chunk in &self.compressed_latin1_text {
-            text_chunk.encode(&mut w)?;
-        }
-
-        for text_chunk in &self.utf8_text {
-            text_chunk.encode(&mut w)?;
-        }
-
-        Ok(())
     }
 }
 

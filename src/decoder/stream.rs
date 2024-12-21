@@ -62,8 +62,8 @@ enum State {
     /// In this state we are reading chunk data from external input, and appending it to
     /// `ChunkState::raw_bytes`.
     ReadChunkData(ChunkType),
-    /// In this state we check if all chunk data has been already read into `ChunkState::raw_bytes`
-    /// and if so then we parse the chunk.  Otherwise, we go back to the `ReadChunkData` state.
+    /// In this state all chunk data has been already read into `ChunkState::raw_bytes`
+    /// and we parse the chunk.
     ParseChunkData(ChunkType),
     /// In this state we are reading image data from external input and feeding it directly into
     /// `StreamingDecoder::inflater`.
@@ -725,53 +725,40 @@ impl StreamingDecoder {
             }
             ParseChunkData(type_str) => {
                 debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
-                if self.current_chunk.remaining == 0 {
-                    // Got complete chunk.
-                    Ok((0, self.parse_chunk(type_str)?))
-                } else {
-                    // Make sure we have room to read more of the chunk.
-                    // We need it fully before parsing.
-                    self.reserve_current_chunk()?;
-
-                    self.state = Some(ReadChunkData(type_str));
-                    Ok((0, Decoded::PartialChunk(type_str)))
-                }
+                // Got complete chunk.
+                debug_assert_eq!(0, self.current_chunk.remaining);
+                Ok((0, self.parse_chunk(type_str)?))
             }
             ReadChunkData(type_str) => {
                 debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
-                if self.current_chunk.remaining == 0 {
-                    self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
-                    Ok((0, Decoded::Nothing))
+                let ChunkState {
+                    crc,
+                    remaining,
+                    raw_bytes,
+                    type_: _,
+                } = &mut self.current_chunk;
+
+                let n = min(*remaining as usize, buf.len());
+                let buf = &buf[..n];
+
+                // the buffer has been reserved ahead of time
+                if raw_bytes.capacity() - raw_bytes.len() >= buf.len() {
+                    raw_bytes.extend_from_slice(buf);
                 } else {
-                    let ChunkState {
-                        crc,
-                        remaining,
-                        raw_bytes,
-                        type_: _,
-                    } = &mut self.current_chunk;
-
-                    let buf_avail = raw_bytes.capacity() - raw_bytes.len();
-                    let bytes_avail = min(buf.len(), buf_avail);
-                    let n = min(*remaining, bytes_avail as u32);
-                    if buf_avail == 0 {
-                        self.state = Some(ParseChunkData(type_str));
-                        Ok((0, Decoded::Nothing))
-                    } else {
-                        let buf = &buf[..n as usize];
-                        if !self.decode_options.ignore_crc {
-                            crc.update(buf);
-                        }
-                        raw_bytes.extend_from_slice(buf);
-
-                        *remaining -= n;
-                        if *remaining == 0 {
-                            self.state = Some(ParseChunkData(type_str));
-                        } else {
-                            self.state = Some(ReadChunkData(type_str));
-                        }
-                        Ok((n as usize, Decoded::Nothing))
-                    }
+                    debug_assert!(false); // this won't happen, but return optimizes better
+                    return Err(DecodingError::LimitsExceeded);
                 }
+                if !self.decode_options.ignore_crc {
+                    crc.update(buf);
+                }
+
+                *remaining -= n as u32;
+                self.state = Some(if *remaining == 0 {
+                    ParseChunkData(type_str)
+                } else {
+                    ReadChunkData(type_str)
+                });
+                Ok((n, Decoded::Nothing))
             }
             ImageData(type_str) => {
                 debug_assert!(type_str == IDAT || type_str == chunk::fdAT);
@@ -847,6 +834,15 @@ impl StreamingDecoder {
                     });
                     return Ok(Decoded::ImageDataFlushed);
                 }
+
+                self.current_chunk.type_ = type_str;
+                if !self.decode_options.ignore_crc {
+                    self.current_chunk.crc.reset();
+                    self.current_chunk.crc.update(&type_str.0);
+                }
+                self.current_chunk.remaining = length;
+                self.current_chunk.raw_bytes.clear();
+
                 self.state = match type_str {
                     chunk::fdAT => {
                         if !self.ready_for_fdat_chunks {
@@ -876,15 +872,12 @@ impl StreamingDecoder {
                         self.have_idat = true;
                         Some(State::ImageData(type_str))
                     }
-                    _ => Some(State::ReadChunkData(type_str)),
+                    _ => {
+                        // IDAT/fDAT won't use current_chunk.raw_bytes, so it won't need it grown
+                        self.reserve_current_chunk()?;
+                        Some(State::ReadChunkData(type_str))
+                    }
                 };
-                self.current_chunk.type_ = type_str;
-                if !self.decode_options.ignore_crc {
-                    self.current_chunk.crc.reset();
-                    self.current_chunk.crc.update(&type_str.0);
-                }
-                self.current_chunk.remaining = length;
-                self.current_chunk.raw_bytes.clear();
                 Ok(Decoded::ChunkBegin(length, type_str))
             }
             U32ValueKind::Crc(type_str) => {
@@ -957,19 +950,24 @@ impl StreamingDecoder {
     }
 
     fn reserve_current_chunk(&mut self) -> Result<(), DecodingError> {
-        let max = self.limits.bytes;
         let buffer = &mut self.current_chunk.raw_bytes;
 
-        // Double if necessary, but no more than until the limit is reached.
-        let reserve_size = max.saturating_sub(buffer.capacity()).min(buffer.len());
-        self.limits.reserve_bytes(reserve_size)?;
-        buffer.reserve_exact(reserve_size);
+        // reserve before any data is read
+        debug_assert_eq!(0, buffer.len());
 
-        if buffer.capacity() == buffer.len() {
-            Err(DecodingError::LimitsExceeded)
-        } else {
-            Ok(())
+        let required_capacity = self.current_chunk.remaining as usize;
+        let actual_capacity = buffer.capacity();
+
+        if required_capacity <= actual_capacity {
+            return Ok(());
         }
+
+        // try_reserve takes the new size, but limits take only size increase
+        self.limits
+            .reserve_bytes(required_capacity - actual_capacity)?;
+        buffer
+            .try_reserve_exact(required_capacity)
+            .map_err(|_| DecodingError::LimitsExceeded)
     }
 
     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
@@ -1809,7 +1807,7 @@ impl Default for ChunkState {
             type_: ChunkType([0; 4]),
             crc: Crc32::new(),
             remaining: 0,
-            raw_bytes: Vec::with_capacity(CHUNK_BUFFER_SIZE),
+            raw_bytes: Vec::new(),
         }
     }
 }

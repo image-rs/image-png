@@ -205,14 +205,14 @@ pub(crate) enum FormatErrorInner {
     // Errors specific to particular chunk data to be validated.
     /// The palette did not even contain a single pixel data.
     ShortPalette {
-        expected: usize,
-        len: usize,
+        expected: u32,
+        len: u32,
     },
     /// sBIT chunk size based on color type.
     InvalidSbitChunkSize {
         color_type: ColorType,
-        expected: usize,
-        len: usize,
+        expected: u32,
+        len: u32,
     },
     InvalidSbit {
         sample_depth: BitDepth,
@@ -1152,12 +1152,12 @@ impl StreamingDecoder {
             };
 
             // Check if the sbit chunk size is valid.
-            if expected != len {
+            if expected as usize != len {
                 return Err(DecodingError::Format(
                     FormatErrorInner::InvalidSbitChunkSize {
                         color_type,
                         expected,
-                        len,
+                        len: len as _,
                     }
                     .into(),
                 ));
@@ -1198,7 +1198,11 @@ impl StreamingDecoder {
             ColorType::Grayscale => {
                 if len < 2 {
                     return Err(DecodingError::Format(
-                        FormatErrorInner::ShortPalette { expected: 2, len }.into(),
+                        FormatErrorInner::ShortPalette {
+                            expected: 2,
+                            len: len as _,
+                        }
+                        .into(),
                     ));
                 }
                 if bit_depth < 16 {
@@ -1211,7 +1215,11 @@ impl StreamingDecoder {
             ColorType::Rgb => {
                 if len < 6 {
                     return Err(DecodingError::Format(
-                        FormatErrorInner::ShortPalette { expected: 6, len }.into(),
+                        FormatErrorInner::ShortPalette {
+                            expected: 6,
+                            len: len as _,
+                        }
+                        .into(),
                     ));
                 }
                 if bit_depth < 16 {

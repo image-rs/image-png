@@ -1012,7 +1012,10 @@ impl StreamingDecoder {
         self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
         let parse_result = match type_str {
             IHDR => self.parse_ihdr(),
-            chunk::sBIT => self.parse_sbit(),
+            chunk::sBIT => {
+                self.parse_sbit();
+                Ok(Decoded::Nothing)
+            }
             chunk::PLTE => self.parse_plte(),
             chunk::tRNS => self.parse_trns(),
             chunk::pHYs => self.parse_phys(),
@@ -1146,41 +1149,27 @@ impl StreamingDecoder {
         }
     }
 
-    fn parse_sbit(&mut self) -> Result<Decoded, DecodingError> {
-        let mut parse = || {
-            let info = self.info.as_mut().unwrap();
+    fn parse_sbit(&mut self) {
+        let info = self.info.as_mut().unwrap();
+        let raw_bytes = &self.current_chunk.raw_bytes[..];
+        let have_idat = self.have_idat;
+        let parse = || {
             if info.palette.is_some() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::AfterPlte { kind: chunk::sBIT }.into(),
-                ));
+                return Err(FormatErrorInner::AfterPlte { kind: chunk::sBIT }.into());
             }
 
-            if self.have_idat {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::AfterIdat { kind: chunk::sBIT }.into(),
-                ));
+            if have_idat {
+                return Err(FormatErrorInner::AfterIdat { kind: chunk::sBIT }.into());
             }
 
             if info.sbit.is_some() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::DuplicateChunk { kind: chunk::sBIT }.into(),
-                ));
+                return Err(FormatErrorInner::DuplicateChunk { kind: chunk::sBIT }.into());
             }
 
-            let (color_type, bit_depth) = { (info.color_type, info.bit_depth) };
-            // The sample depth for color type 3 is fixed at eight bits.
-            let sample_depth = if color_type == ColorType::Indexed {
-                BitDepth::Eight
-            } else {
-                bit_depth
-            };
-            self.limits
-                .reserve_bytes(self.current_chunk.raw_bytes.len())?;
-            let vec = self.current_chunk.raw_bytes.clone();
-            let len = vec.len();
+            let len = raw_bytes.len();
 
             // expected lenth of the chunk
-            let expected = match color_type {
+            let expected = match info.color_type {
                 ColorType::Grayscale => 1,
                 ColorType::Rgb | ColorType::Indexed => 3,
                 ColorType::GrayscaleAlpha => 2,
@@ -1189,33 +1178,20 @@ impl StreamingDecoder {
 
             // Check if the sbit chunk size is valid.
             if expected as usize != len {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::InvalidSbitChunkSize {
-                        color_type,
-                        expected,
-                        len: len as _,
-                    }
-                    .into(),
-                ));
+                return Err(FormatErrorInner::InvalidSbitChunkSize {
+                    color_type: info.color_type,
+                    expected,
+                    len: len as _,
+                }
+                .into());
             }
 
-            for sbit in &vec {
-                if *sbit < 1 || *sbit > sample_depth as u8 {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::InvalidSbit {
-                            sample_depth,
-                            sbit: *sbit,
-                        }
-                        .into(),
-                    ));
-                }
-            }
-            info.sbit = Some(Cow::Owned(vec));
-            Ok(Decoded::Nothing)
+            let mut sbit = [0; 4];
+            sbit[..len].copy_from_slice(&raw_bytes[..len]);
+            Ok(sbit)
         };
 
-        parse().ok();
-        Ok(Decoded::Nothing)
+        info.sbit = Some(parse());
     }
 
     fn parse_trns(&mut self) -> Result<Decoded, DecodingError> {
@@ -1864,7 +1840,6 @@ mod tests {
     use crate::{Decoder, DecodingError, Reader};
     use approx::assert_relative_eq;
     use byteorder::WriteBytesExt;
-    use std::borrow::Cow;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs::File;
@@ -2101,24 +2076,18 @@ mod tests {
 
     #[test]
     fn image_source_sbit() {
-        fn trial(path: &str, expected: Option<Cow<[u8]>>) {
+        fn trial(path: &str, expected: Option<&[u8]>) {
             let decoder = crate::Decoder::new(File::open(path).unwrap());
             let reader = decoder.read_info().unwrap();
-            let actual: Option<Cow<[u8]>> = reader.info().sbit.clone();
+            let actual = reader.info().sbit().ok().flatten();
             assert!(actual == expected);
         }
 
-        trial("tests/sbit/g.png", Some(Cow::Owned(vec![5u8])));
-        trial("tests/sbit/ga.png", Some(Cow::Owned(vec![5u8, 3u8])));
-        trial(
-            "tests/sbit/indexed.png",
-            Some(Cow::Owned(vec![5u8, 6u8, 5u8])),
-        );
-        trial("tests/sbit/rgb.png", Some(Cow::Owned(vec![5u8, 6u8, 5u8])));
-        trial(
-            "tests/sbit/rgba.png",
-            Some(Cow::Owned(vec![5u8, 6u8, 5u8, 8u8])),
-        );
+        trial("tests/sbit/g.png", Some(&[5u8]));
+        trial("tests/sbit/ga.png", Some(&[5u8, 3u8]));
+        trial("tests/sbit/indexed.png", Some(&[5u8, 6u8, 5u8]));
+        trial("tests/sbit/rgb.png", Some(&[5u8, 6u8, 5u8]));
+        trial("tests/sbit/rgba.png", Some(&[5u8, 6u8, 5u8, 8u8]));
     }
 
     /// Test handling of a PNG file that contains *two* iCCP chunks.

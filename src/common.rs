@@ -1,6 +1,7 @@
 //! Common types shared between the encoder and decoder
+use crate::decoder::stream::{FormatError, FormatErrorInner};
 use crate::text_metadata::{ITXtChunk, TEXtChunk, ZTXtChunk};
-use crate::{chunk, encoder};
+use crate::{chunk, encoder, DecodingError};
 use io::Write;
 use std::{borrow::Cow, convert::TryFrom, fmt, io};
 
@@ -580,7 +581,7 @@ pub struct Info<'a> {
     pub color_type: ColorType,
     pub interlaced: bool,
     /// The image's `sBIT` chunk, if present; contains significant bits of the sample.
-    pub sbit: Option<Cow<'a, [u8]>>,
+    pub(crate) sbit: Option<Result<[u8; 4], FormatErrorInner>>,
     /// The image's `tRNS` chunk, if present; contains the alpha channel of the image's palette, 1 byte per entry.
     pub trns: Option<Cow<'a, [u8]>>,
     pub pixel_dims: Option<PixelDimensions>,
@@ -758,6 +759,44 @@ impl Info<'_> {
     pub(crate) fn set_source_srgb(&mut self, rendering_intent: SrgbRenderingIntent) {
         self.srgb = Some(rendering_intent);
         self.icc_profile = None;
+    }
+
+    /// Number of significant bits per channel, according to sBIT chunk
+    pub fn sbit(&self) -> Result<Option<&[u8]>, DecodingError> {
+        let sbit = match self.sbit.as_ref() {
+            None => return Ok(None),
+            Some(Ok(sbit)) => sbit,
+            Some(Err(e)) => return Err(FormatError::from(e.clone()).into()),
+        };
+
+        let len = match self.color_type {
+            ColorType::Grayscale => 1,
+            ColorType::Rgb | ColorType::Indexed => 3,
+            ColorType::GrayscaleAlpha => 2,
+            ColorType::Rgba => 4,
+        };
+
+        let sbit = &sbit[..len];
+
+        // The sample depth for color type 3 is fixed at eight bits.
+        let sample_depth = if self.color_type == ColorType::Indexed {
+            BitDepth::Eight
+        } else {
+            self.bit_depth
+        };
+
+        for &depth in sbit {
+            if depth < 1 || depth > sample_depth as u8 {
+                return Err(DecodingError::Format(
+                    FormatErrorInner::InvalidSbit {
+                        sample_depth,
+                        sbit: depth,
+                    }
+                    .into(),
+                ));
+            }
+        }
+        Ok(Some(sbit))
     }
 }
 

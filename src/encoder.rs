@@ -719,7 +719,8 @@ impl<W: Write> Writer<W> {
             DeflateCompression::Flate2(level) => {
                 let mut current = vec![0; in_len];
 
-                let mut zlib = ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
+                let mut zlib =
+                    ZlibEncoder::new(Vec::new(), flate2::Compression::new(u32::from(level)));
                 for line in data.chunks(in_len) {
                     let filter_type = filter(filter_method, bpp, prev, line, &mut current);
 

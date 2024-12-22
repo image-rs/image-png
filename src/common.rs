@@ -375,7 +375,7 @@ pub enum DeflateCompression {
     ///
     /// Flate2 has several backends that make different trade-offs.
     /// See the flate2 documentation for the available backends for more information.
-    Flate2(u32),
+    Flate2(u8),
     // Other variants can be added in the future
 }
 
@@ -391,8 +391,8 @@ impl DeflateCompression {
             Compression::NoCompression => Self::NoCompression,
             Compression::Fastest => Self::FdeflateUltraFast,
             Compression::Fast => Self::FdeflateUltraFast,
-            Compression::Balanced => Self::Flate2(flate2::Compression::default().level()),
-            Compression::High => Self::Flate2(flate2::Compression::best().level()),
+            Compression::Balanced => Self::Flate2(flate2::Compression::default().level() as u8),
+            Compression::High => Self::Flate2(flate2::Compression::best().level() as u8),
         }
     }
 
@@ -400,7 +400,7 @@ impl DeflateCompression {
         match self {
             DeflateCompression::NoCompression => flate2::Compression::none(),
             DeflateCompression::FdeflateUltraFast => flate2::Compression::new(1),
-            DeflateCompression::Flate2(level) => flate2::Compression::new(*level),
+            DeflateCompression::Flate2(level) => flate2::Compression::new(u32::from(*level)),
         }
     }
 }

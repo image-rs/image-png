@@ -584,18 +584,6 @@ impl StreamingDecoder {
         }
     }
 
-    /// Resets the StreamingDecoder
-    pub fn reset(&mut self) {
-        self.state = Some(State::new_u32(U32ValueKind::Signature1stU32));
-        self.current_chunk.crc = Crc32::new();
-        self.current_chunk.remaining = 0;
-        self.current_chunk.raw_bytes.clear();
-        self.inflater.reset();
-        self.info = None;
-        self.current_seq_no = None;
-        self.have_idat = false;
-    }
-
     /// Provides access to the inner `info` field
     pub fn info(&self) -> Option<&Info<'static>> {
         self.info.as_ref()

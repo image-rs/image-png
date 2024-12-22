@@ -1128,47 +1128,7 @@ impl StreamingDecoder {
                 ));
             }
 
-            let (color_type, bit_depth) = { (info.color_type, info.bit_depth) };
-            // The sample depth for color type 3 is fixed at eight bits.
-            let sample_depth = if color_type == ColorType::Indexed {
-                BitDepth::Eight
-            } else {
-                bit_depth
-            };
             let vec = mem::take(&mut self.current_chunk.raw_bytes);
-            let len = vec.len();
-
-            // expected lenth of the chunk
-            let expected = match color_type {
-                ColorType::Grayscale => 1,
-                ColorType::Rgb | ColorType::Indexed => 3,
-                ColorType::GrayscaleAlpha => 2,
-                ColorType::Rgba => 4,
-            };
-
-            // Check if the sbit chunk size is valid.
-            if expected != len {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::InvalidSbitChunkSize {
-                        color_type,
-                        expected,
-                        len,
-                    }
-                    .into(),
-                ));
-            }
-
-            for sbit in &vec {
-                if *sbit < 1 || *sbit > sample_depth as u8 {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::InvalidSbit {
-                            sample_depth,
-                            sbit: *sbit,
-                        }
-                        .into(),
-                    ));
-                }
-            }
             info.sbit = Some(Cow::Owned(vec));
             Ok(Decoded::Nothing)
         };

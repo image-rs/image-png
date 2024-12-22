@@ -1,6 +1,7 @@
 //! Common types shared between the encoder and decoder
+use crate::decoder::stream::FormatErrorInner;
 use crate::text_metadata::{ITXtChunk, TEXtChunk, ZTXtChunk};
-use crate::{chunk, encoder};
+use crate::{chunk, encoder, DecodingError};
 use io::Write;
 use std::{borrow::Cow, convert::TryFrom, fmt, io};
 
@@ -758,6 +759,54 @@ impl Info<'_> {
     pub(crate) fn set_source_srgb(&mut self, rendering_intent: SrgbRenderingIntent) {
         self.srgb = Some(rendering_intent);
         self.icc_profile = None;
+    }
+
+    /// Number of significant bits per channel, according to sBIT chunk
+    pub fn sbit(&self) -> Result<Option<&[u8]>, DecodingError> {
+        let Some(sbit) = self.sbit.as_deref() else {
+            return Ok(None);
+        };
+
+        let (color_type, bit_depth) = (self.color_type, self.bit_depth);
+        // The sample depth for color type 3 is fixed at eight bits.
+        let sample_depth = if color_type == ColorType::Indexed {
+            BitDepth::Eight
+        } else {
+            bit_depth
+        };
+
+        // expected lenth of the chunk
+        let expected = match color_type {
+            ColorType::Grayscale => 1,
+            ColorType::Rgb | ColorType::Indexed => 3,
+            ColorType::GrayscaleAlpha => 2,
+            ColorType::Rgba => 4,
+        };
+
+        // Check if the sbit chunk size is valid.
+        if expected != sbit.len() {
+            return Err(DecodingError::Format(
+                FormatErrorInner::InvalidSbitChunkSize {
+                    color_type,
+                    expected,
+                    len: sbit.len(),
+                }
+                .into(),
+            ));
+        }
+
+        for &depth in sbit {
+            if depth < 1 || depth > sample_depth as u8 {
+                return Err(DecodingError::Format(
+                    FormatErrorInner::InvalidSbit {
+                        sample_depth,
+                        sbit: depth,
+                    }
+                    .into(),
+                ));
+            }
+        }
+        Ok(Some(sbit))
     }
 }
 

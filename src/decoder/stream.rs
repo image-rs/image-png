@@ -2,6 +2,7 @@ use std::convert::TryInto;
 use std::error;
 use std::fmt;
 use std::io;
+use std::mem;
 use std::{borrow::Cow, cmp::min};
 
 use crc32fast::Hasher as Crc32;
@@ -1102,9 +1103,7 @@ impl StreamingDecoder {
                 FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
             ))
         } else {
-            self.limits
-                .reserve_bytes(self.current_chunk.raw_bytes.len())?;
-            info.palette = Some(Cow::Owned(self.current_chunk.raw_bytes.clone()));
+            info.palette = Some(Cow::Owned(mem::take(&mut self.current_chunk.raw_bytes)));
             Ok(Decoded::Nothing)
         }
     }
@@ -1189,9 +1188,7 @@ impl StreamingDecoder {
             ));
         }
         let (color_type, bit_depth) = { (info.color_type, info.bit_depth as u8) };
-        self.limits
-            .reserve_bytes(self.current_chunk.raw_bytes.len())?;
-        let mut vec = self.current_chunk.raw_bytes.clone();
+        let mut vec = mem::take(&mut self.current_chunk.raw_bytes);
         let len = vec.len();
         match color_type {
             ColorType::Grayscale => {
@@ -1761,7 +1758,7 @@ impl StreamingDecoder {
                 ColorType::Grayscale | ColorType::GrayscaleAlpha => 2,
                 ColorType::Rgb | ColorType::Rgba => 6,
             };
-            let vec = self.current_chunk.raw_bytes.clone();
+            let vec = mem::take(&mut self.current_chunk.raw_bytes);
             let len = vec.len();
             if len == expected {
                 info.bkgd = Some(Cow::Owned(vec));

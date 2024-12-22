@@ -153,7 +153,7 @@ pub struct FormatError {
     inner: FormatErrorInner,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum FormatErrorInner {
     /// Bad framing.
     CrcMismatch {
@@ -244,7 +244,7 @@ pub(crate) enum FormatErrorInner {
     // Errors specific to the IDAT/fdAT chunks.
     /// The compression of the data stream was faulty.
     CorruptFlateStream {
-        err: fdeflate::DecompressionError,
+        err: CloneDecompressionError,
     },
     /// The image data chunk was too short for the expected pixel count.
     NoMoreImageData,
@@ -267,6 +267,42 @@ pub(crate) enum FormatErrorInner {
     ChunkTooShort {
         kind: ChunkType,
     },
+}
+
+impl From<fdeflate::DecompressionError> for FormatErrorInner {
+    fn from(err: fdeflate::DecompressionError) -> Self {
+        Self::CorruptFlateStream {
+            err: CloneDecompressionError(err),
+        }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug)]
+pub(crate) struct CloneDecompressionError(pub fdeflate::DecompressionError);
+
+impl Clone for CloneDecompressionError {
+    fn clone(&self) -> Self {
+        use fdeflate::DecompressionError::*;
+        Self(match self.0 {
+            BadZlibHeader => BadZlibHeader,
+            InsufficientInput => InsufficientInput,
+            InvalidBlockType => InvalidBlockType,
+            InvalidUncompressedBlockLength => InvalidUncompressedBlockLength,
+            InvalidHlit => InvalidHlit,
+            InvalidHdist => InvalidHdist,
+            InvalidCodeLengthRepeat => InvalidCodeLengthRepeat,
+            BadCodeLengthHuffmanTree => BadCodeLengthHuffmanTree,
+            BadLiteralLengthHuffmanTree => BadLiteralLengthHuffmanTree,
+            BadDistanceHuffmanTree => BadDistanceHuffmanTree,
+            InvalidLiteralLengthCode => InvalidLiteralLengthCode,
+            InvalidDistanceCode => InvalidDistanceCode,
+            InputStartsWithRun => InputStartsWithRun,
+            DistanceTooFarBack => DistanceTooFarBack,
+            WrongChecksum => WrongChecksum,
+            ExtraInput => ExtraInput,
+        })
+    }
 }
 
 impl error::Error for DecodingError {
@@ -1550,9 +1586,7 @@ impl StreamingDecoder {
                 info.icc_profile = Some(Cow::Owned(profile));
             }
             Err(fdeflate::BoundedDecompressionError::DecompressionError { inner: err }) => {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::CorruptFlateStream { err }.into(),
-                ))
+                return Err(DecodingError::Format(FormatErrorInner::from(err).into()))
             }
             Err(fdeflate::BoundedDecompressionError::OutputTooLarge { .. }) => {
                 return Err(DecodingError::LimitsExceeded);

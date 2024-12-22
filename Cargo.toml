@@ -8,8 +8,8 @@ categories = ["multimedia::images"]
 authors = ["The image-rs Developers"]
 repository = "https://github.com/image-rs/image-png"
 
-edition = "2018"
-rust-version = "1.57"
+edition = "2021"
+rust-version = "1.65"
 include = [
     "/LICENSE-MIT",
     "/LICENSE-APACHE",

@@ -152,7 +152,7 @@ pub struct Encoder<'a, W: Write> {
     options: Options,
 }
 
-/// Decoding options, internal type, forwarded to the Writer.
+/// Encoding options, internal type, forwarded to the Writer.
 #[derive(Default)]
 struct Options {
     filter: Filter,

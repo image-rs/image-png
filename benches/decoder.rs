@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, io::Cursor};
 
 use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion, Throughput,
@@ -95,8 +95,8 @@ fn bench_read_row(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: &str) {
     });
 }
 
-fn create_reader(data: &[u8]) -> Reader<&[u8]> {
-    let mut decoder = Decoder::new(data);
+fn create_reader(data: &[u8]) -> Reader<Cursor<&[u8]>> {
+    let mut decoder = Decoder::new(Cursor::new(data));
 
     // Cover default transformations used by the `image` crate when constructing
     // `image::codecs::png::PngDecoder`.

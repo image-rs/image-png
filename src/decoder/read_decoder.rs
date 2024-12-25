@@ -1,9 +1,7 @@
-use super::stream::{
-    DecodeOptions, Decoded, DecodingError, FormatErrorInner, StreamingDecoder, CHUNK_BUFFER_SIZE,
-};
+use super::stream::{DecodeOptions, Decoded, DecodingError, FormatErrorInner, StreamingDecoder};
 use super::Limits;
 
-use std::io::{BufRead, BufReader, ErrorKind, Read};
+use std::io::{BufRead, ErrorKind, Read, Seek};
 
 use crate::chunk;
 use crate::common::Info;
@@ -18,14 +16,14 @@ use crate::common::Info;
 /// * `finish_decoding_image_data()` - discarding remaining data from `IDAT` / `fdAT` sequence
 /// * `read_until_end_of_input()` - reading until `IEND` chunk
 pub(crate) struct ReadDecoder<R: Read> {
-    reader: BufReader<R>,
+    reader: R,
     decoder: StreamingDecoder,
 }
 
-impl<R: Read> ReadDecoder<R> {
+impl<R: BufRead + Seek> ReadDecoder<R> {
     pub fn new(r: R) -> Self {
         Self {
-            reader: BufReader::with_capacity(CHUNK_BUFFER_SIZE, r),
+            reader: r,
             decoder: StreamingDecoder::new(),
         }
     }
@@ -34,10 +32,7 @@ impl<R: Read> ReadDecoder<R> {
         let mut decoder = StreamingDecoder::new_with_options(options);
         decoder.limits = Limits::default();
 
-        Self {
-            reader: BufReader::with_capacity(CHUNK_BUFFER_SIZE, r),
-            decoder,
-        }
+        Self { reader: r, decoder }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {

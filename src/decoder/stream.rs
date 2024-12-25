@@ -1860,15 +1860,18 @@ mod tests {
     use byteorder::WriteBytesExt;
     use std::borrow::Cow;
     use std::cell::RefCell;
-    use std::collections::VecDeque;
+
     use std::fs::File;
-    use std::io::{ErrorKind, Read, Write};
+    use std::io::BufRead;
+    use std::io::Cursor;
+    use std::io::Seek;
+    use std::io::{BufReader, ErrorKind, Read, Write};
     use std::rc::Rc;
 
     #[test]
     fn image_gamma() -> Result<(), ()> {
         fn trial(path: &str, expected: Option<ScaledFloat>) {
-            let decoder = crate::Decoder::new(File::open(path).unwrap());
+            let decoder = crate::Decoder::new(BufReader::new(File::open(path).unwrap()));
             let reader = decoder.read_info().unwrap();
             let actual: Option<ScaledFloat> = reader.info().gamma();
             assert!(actual == expected);
@@ -1909,7 +1912,7 @@ mod tests {
     #[test]
     fn image_source_chromaticities() -> Result<(), ()> {
         fn trial(path: &str, expected: Option<SourceChromaticities>) {
-            let decoder = crate::Decoder::new(File::open(path).unwrap());
+            let decoder = crate::Decoder::new(BufReader::new(File::open(path).unwrap()));
             let reader = decoder.read_info().unwrap();
             let actual: Option<SourceChromaticities> = reader.info().chromaticities();
             assert!(actual == expected);
@@ -2096,7 +2099,7 @@ mod tests {
     #[test]
     fn image_source_sbit() {
         fn trial(path: &str, expected: Option<Cow<[u8]>>) {
-            let decoder = crate::Decoder::new(File::open(path).unwrap());
+            let decoder = crate::Decoder::new(BufReader::new(File::open(path).unwrap()));
             let reader = decoder.read_info().unwrap();
             let actual: Option<Cow<[u8]>> = reader.info().sbit.clone();
             assert!(actual == expected);
@@ -2123,7 +2126,9 @@ mod tests {
         // https://github.com/image-rs/image/issues/1825#issuecomment-1321798639,
         // but the 2nd iCCP chunk has been altered manually (see the 2nd comment below for more
         // details).
-        let decoder = crate::Decoder::new(File::open("tests/bugfixes/issue#1825.png").unwrap());
+        let decoder = crate::Decoder::new(BufReader::new(
+            File::open("tests/bugfixes/issue#1825.png").unwrap(),
+        ));
         let reader = decoder.read_info().unwrap();
         let icc_profile = reader.info().icc_profile.clone().unwrap().into_owned();
 
@@ -2146,7 +2151,7 @@ mod tests {
         enc.write_image_data(&[0]).unwrap();
         enc.finish().unwrap();
 
-        let dec = crate::Decoder::new(encoded_image.as_slice());
+        let dec = crate::Decoder::new(Cursor::new(&encoded_image));
         let dec = dec.read_info().unwrap();
         assert_eq!(dummy_icc, &**dec.info().icc_profile.as_ref().unwrap());
     }
@@ -2190,9 +2195,13 @@ mod tests {
 
     #[test]
     fn test_png_with_broken_iccp() {
-        let decoder = crate::Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
+        let decoder = crate::Decoder::new(BufReader::new(
+            File::open("tests/iccp/broken_iccp.png").unwrap(),
+        ));
         assert!(decoder.read_info().is_ok());
-        let mut decoder = crate::Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
+        let mut decoder = crate::Decoder::new(BufReader::new(
+            File::open("tests/iccp/broken_iccp.png").unwrap(),
+        ));
         decoder.set_ignore_iccp_chunk(true);
         assert!(decoder.read_info().is_ok());
     }
@@ -2200,7 +2209,9 @@ mod tests {
     /// Test handling of `cICP`, `mDCV`, and `cLLI` chunks.
     #[test]
     fn test_cicp_mdcv_and_clli_chunks() {
-        let decoder = crate::Decoder::new(File::open("tests/bugfixes/cicp_pq.png").unwrap());
+        let decoder = crate::Decoder::new(BufReader::new(
+            File::open("tests/bugfixes/cicp_pq.png").unwrap(),
+        ));
         let reader = decoder.read_info().unwrap();
         let info = reader.info();
 
@@ -2243,7 +2254,7 @@ mod tests {
     fn test_finishing_twice() {
         let mut png = Vec::new();
         write_noncompressed_png(&mut png, 16, 1024);
-        let decoder = Decoder::new(png.as_slice());
+        let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
 
         // First call to `finish` - expecting success.
@@ -2331,7 +2342,7 @@ mod tests {
         write_fdat_prefix(&mut png, 2, 8);
         write_chunk(&mut png, b"fdAT", &[]);
 
-        let decoder = Decoder::new(png.as_slice());
+        let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size()];
         reader.next_frame(&mut buf).unwrap();
@@ -2359,7 +2370,7 @@ mod tests {
         write_fdat_prefix(&mut png, 2, 8);
         write_chunk(&mut png, b"fdAT", &[1, 0, 0]);
 
-        let decoder = Decoder::new(png.as_slice());
+        let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size()];
         reader.next_frame(&mut buf).unwrap();
@@ -2397,7 +2408,7 @@ mod tests {
         };
 
         // Start decoding.
-        let decoder = Decoder::new(png.as_slice());
+        let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size()];
         let Some(animation_control) = reader.info().animation_control else {
@@ -2460,7 +2471,7 @@ mod tests {
             write_iend(&mut png);
             png
         };
-        let decoder = Decoder::new(png.as_slice());
+        let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size()];
 
@@ -2478,7 +2489,7 @@ mod tests {
             write_chunk(&mut png, b"IDAT", &[]);
             png
         };
-        let decoder = Decoder::new(png.as_slice());
+        let decoder = Decoder::new(Cursor::new(&png));
         let Err(err) = decoder.read_info() else {
             panic!("Expected an error")
         };
@@ -2497,21 +2508,25 @@ mod tests {
     /// `StreamingInput` can be used by tests to simulate a streaming input
     /// (e.g. a slow http response, where all bytes are not immediately available).
     #[derive(Clone)]
-    struct StreamingInput(Rc<RefCell<StreamingInputState>>);
+    struct StreamingInput {
+        full_input: Vec<u8>,
+        state: Rc<RefCell<StreamingInputState>>,
+    }
 
     struct StreamingInputState {
-        full_input: Vec<u8>,
         current_pos: usize,
         available_len: usize,
     }
 
     impl StreamingInput {
         fn new(full_input: Vec<u8>) -> Self {
-            Self(Rc::new(RefCell::new(StreamingInputState {
+            Self {
                 full_input,
-                current_pos: 0,
-                available_len: 0,
-            })))
+                state: Rc::new(RefCell::new(StreamingInputState {
+                    current_pos: 0,
+                    available_len: 0,
+                })),
+            }
         }
 
         fn with_noncompressed_png(width: u32, idat_size: usize) -> Self {
@@ -2521,14 +2536,14 @@ mod tests {
         }
 
         fn expose_next_byte(&self) {
-            let mut state = self.0.borrow_mut();
-            assert!(state.available_len < state.full_input.len());
+            let mut state = self.state.borrow_mut();
+            assert!(state.available_len < self.full_input.len());
             state.available_len += 1;
         }
 
         fn stream_input_until_reader_is_available(&self) -> Reader<StreamingInput> {
             loop {
-                self.0.borrow_mut().current_pos = 0;
+                self.state.borrow_mut().current_pos = 0;
                 match Decoder::new(self.clone()).read_info() {
                     Ok(reader) => {
                         break reader;
@@ -2543,22 +2558,47 @@ mod tests {
 
         fn decode_full_input<F, R>(&self, f: F) -> R
         where
-            F: FnOnce(Reader<&[u8]>) -> R,
+            F: FnOnce(Reader<Cursor<&[u8]>>) -> R,
         {
-            let state = self.0.borrow();
-            let decoder = Decoder::new(state.full_input.as_slice());
+            let decoder = Decoder::new(Cursor::new(&*self.full_input));
             f(decoder.read_info().unwrap())
         }
     }
 
     impl Read for StreamingInput {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let mut state = self.0.borrow_mut();
-            let mut available_bytes = &state.full_input[state.current_pos..state.available_len];
+            let mut state = self.state.borrow_mut();
+            let mut available_bytes = &self.full_input[state.current_pos..state.available_len];
             let number_of_read_bytes = available_bytes.read(buf)?;
             state.current_pos += number_of_read_bytes;
             assert!(state.current_pos <= state.available_len);
             Ok(number_of_read_bytes)
+        }
+    }
+    impl BufRead for StreamingInput {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            let state = self.state.borrow();
+            Ok(&self.full_input[state.current_pos..state.available_len])
+        }
+
+        fn consume(&mut self, amt: usize) {
+            let mut state = self.state.borrow_mut();
+            state.current_pos += amt;
+            assert!(state.current_pos <= state.available_len);
+        }
+    }
+    impl Seek for StreamingInput {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            let mut state = self.state.borrow_mut();
+            state.current_pos = match pos {
+                std::io::SeekFrom::Start(n) => n as usize,
+                std::io::SeekFrom::End(n) => (self.full_input.len() as i64 + n) as usize,
+                std::io::SeekFrom::Current(n) => (state.current_pos as i64 + n) as usize,
+            } as usize;
+            Ok(state.current_pos as u64)
+        }
+        fn stream_position(&mut self) -> std::io::Result<u64> {
+            Ok(self.state.borrow().current_pos as u64)
         }
     }
 
@@ -2666,25 +2706,25 @@ mod tests {
 
     /// Creates a ready-to-test [`Reader`] which decodes a PNG that contains:
     /// IHDR, IDAT, IEND.
-    fn create_reader_of_ihdr_idat() -> Reader<VecDeque<u8>> {
-        let mut png = VecDeque::new();
+    fn create_reader_of_ihdr_idat() -> Reader<Cursor<Vec<u8>>> {
+        let mut png = Vec::new();
         write_noncompressed_png(&mut png, /* width = */ 16, /* idat_size = */ 1024);
-        Decoder::new(png).read_info().unwrap()
+        Decoder::new(Cursor::new(png)).read_info().unwrap()
     }
 
     /// Creates a ready-to-test [`Reader`] which decodes an animated PNG that contains:
     /// IHDR, acTL, fcTL, IDAT, fcTL, fdAT, IEND.  (i.e. IDAT is part of the animation)
-    fn create_reader_of_ihdr_actl_fctl_idat_fctl_fdat() -> Reader<VecDeque<u8>> {
-        let idat_width = 16;
+    fn create_reader_of_ihdr_actl_fctl_idat_fctl_fdat() -> Reader<Cursor<Vec<u8>>> {
+        let width = 16;
         let mut fctl = crate::FrameControl {
-            width: idat_width,
-            height: idat_width, // same height and width
+            width,
+            height: width,
             ..Default::default()
         };
 
-        let mut png = VecDeque::new();
+        let mut png = Vec::new();
         write_png_sig(&mut png);
-        write_rgba8_ihdr_with_width(&mut png, idat_width);
+        write_rgba8_ihdr_with_width(&mut png, width);
         write_actl(
             &mut png,
             &crate::AnimationControl {
@@ -2711,12 +2751,12 @@ mod tests {
         write_fdat(&mut png, 2, &fdat_data);
         write_iend(&mut png);
 
-        Decoder::new(png).read_info().unwrap()
+        Decoder::new(Cursor::new(png)).read_info().unwrap()
     }
 
     /// Creates a ready-to-test [`Reader`] which decodes an animated PNG that contains: IHDR, acTL,
     /// IDAT, fcTL, fdAT, fcTL, fdAT, IEND.  (i.e. IDAT is *not* part of the animation)
-    fn create_reader_of_ihdr_actl_idat_fctl_fdat_fctl_fdat() -> Reader<VecDeque<u8>> {
+    fn create_reader_of_ihdr_actl_idat_fctl_fdat_fctl_fdat() -> Reader<Cursor<Vec<u8>>> {
         let width = 16;
         let frame_data = generate_rgba8_with_width_and_height(width, width);
         let mut fctl = crate::FrameControl {
@@ -2725,7 +2765,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut png = VecDeque::new();
+        let mut png = Vec::new();
         write_png_sig(&mut png);
         write_rgba8_ihdr_with_width(&mut png, width);
         write_actl(
@@ -2744,10 +2784,10 @@ mod tests {
         write_fdat(&mut png, 3, &frame_data);
         write_iend(&mut png);
 
-        Decoder::new(png).read_info().unwrap()
+        Decoder::new(Cursor::new(png)).read_info().unwrap()
     }
 
-    fn get_fctl_sequence_number(reader: &Reader<impl Read>) -> u32 {
+    fn get_fctl_sequence_number(reader: &Reader<impl BufRead + Seek>) -> u32 {
         reader
             .info()
             .frame_control

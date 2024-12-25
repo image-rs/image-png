@@ -94,7 +94,7 @@ where
 #[test]
 fn render_images() {
     process_images("results.txt", &TEST_SUITES, |path| {
-        let mut decoder = png::Decoder::new(File::open(path)?);
+        let mut decoder = png::Decoder::new(BufReader::new(File::open(path)?));
         decoder.set_transformations(png::Transformations::normalize_to_color8());
         let mut reader = decoder.read_info()?;
         let mut img_data = vec![0; reader.output_buffer_size()];
@@ -117,7 +117,7 @@ fn render_images() {
 #[test]
 fn render_images_identity() {
     process_images("results_identity.txt", &TEST_SUITES, |path| {
-        let decoder = png::Decoder::new(File::open(&path)?);
+        let decoder = png::Decoder::new(BufReader::new(File::open(&path)?));
         let mut reader = decoder.read_info()?;
         let mut img_data = vec![0; reader.output_buffer_size()];
         let info = reader.next_frame(&mut img_data)?;
@@ -142,7 +142,7 @@ fn render_images_identity() {
 #[test]
 fn render_images_alpha() {
     process_images("results_alpha.txt", &TEST_SUITES, |path| {
-        let mut decoder = png::Decoder::new(File::open(&path)?);
+        let mut decoder = png::Decoder::new(BufReader::new(File::open(&path)?));
         decoder.set_transformations(png::Transformations::ALPHA);
         let mut reader = decoder.read_info()?;
         let mut img_data = vec![0; reader.output_buffer_size()];
@@ -183,7 +183,7 @@ fn apng_images() {
             count
         };
 
-        let mut decoder = png::Decoder::new(File::open(&path)?);
+        let mut decoder = png::Decoder::new(BufReader::new(File::open(&path)?));
         decoder.set_transformations(png::Transformations::normalize_to_color8());
         let mut reader = decoder.read_info()?;
         let mut img_data = vec![0; reader.output_buffer_size()];

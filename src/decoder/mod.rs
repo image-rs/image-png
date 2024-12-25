@@ -10,7 +10,7 @@ use self::stream::{DecodeOptions, DecodingError, FormatErrorInner, CHUNK_BUFFER_
 use self::transform::{create_transform_fn, TransformFn};
 use self::unfiltering_buffer::UnfilteringBuffer;
 
-use std::io::Read;
+use std::io::{BufRead, Seek};
 use std::mem;
 
 use crate::adam7::{self, Adam7Info};
@@ -86,7 +86,7 @@ impl Default for Limits {
 }
 
 /// PNG Decoder
-pub struct Decoder<R: Read> {
+pub struct Decoder<R: BufRead + Seek> {
     read_decoder: ReadDecoder<R>,
     /// Output transformations
     transform: Transformations,
@@ -121,7 +121,7 @@ impl<'data> Row<'data> {
     }
 }
 
-impl<R: Read> Decoder<R> {
+impl<R: BufRead + Seek> Decoder<R> {
     /// Create a new decoder configuration with default limits.
     pub fn new(r: R) -> Decoder<R> {
         Decoder::new_with_limits(r, Limits::default())
@@ -159,17 +159,18 @@ impl<R: Read> Decoder<R> {
     ///
     /// ```
     /// use std::fs::File;
+    /// use std::io::BufReader;
     /// use png::{Decoder, Limits};
     /// // This image is 32×32, 1bit per pixel. The reader buffers one row which requires 4 bytes.
     /// let mut limits = Limits::default();
     /// limits.bytes = 3;
-    /// let mut decoder = Decoder::new_with_limits(File::open("tests/pngsuite/basi0g01.png").unwrap(), limits);
+    /// let mut decoder = Decoder::new_with_limits(BufReader::new(File::open("tests/pngsuite/basi0g01.png").unwrap()), limits);
     /// assert!(decoder.read_info().is_err());
     ///
     /// // This image is 32x32 pixels, so the decoder will allocate less than 10Kib
     /// let mut limits = Limits::default();
     /// limits.bytes = 10*1024;
-    /// let mut decoder = Decoder::new_with_limits(File::open("tests/pngsuite/basi0g01.png").unwrap(), limits);
+    /// let mut decoder = Decoder::new_with_limits(BufReader::new(File::open("tests/pngsuite/basi0g01.png").unwrap()), limits);
     /// assert!(decoder.read_info().is_ok());
     /// ```
     pub fn set_limits(&mut self, limits: Limits) {
@@ -248,8 +249,9 @@ impl<R: Read> Decoder<R> {
     /// eg.
     /// ```
     /// use std::fs::File;
+    /// use std::io::BufReader;
     /// use png::Decoder;
-    /// let mut decoder = Decoder::new(File::open("tests/pngsuite/basi0g01.png").unwrap());
+    /// let mut decoder = Decoder::new(BufReader::new(File::open("tests/pngsuite/basi0g01.png").unwrap()));
     /// decoder.set_ignore_text_chunk(true);
     /// assert!(decoder.read_info().is_ok());
     /// ```
@@ -262,8 +264,9 @@ impl<R: Read> Decoder<R> {
     /// eg.
     /// ```
     /// use std::fs::File;
+    /// use std::io::BufReader;
     /// use png::Decoder;
-    /// let mut decoder = Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
+    /// let mut decoder = Decoder::new(BufReader::new(File::open("tests/iccp/broken_iccp.png").unwrap()));
     /// decoder.set_ignore_iccp_chunk(true);
     /// assert!(decoder.read_info().is_ok());
     /// ```
@@ -281,7 +284,7 @@ impl<R: Read> Decoder<R> {
 /// PNG reader (mostly high-level interface)
 ///
 /// Provides a high level that iterates over lines or whole images.
-pub struct Reader<R: Read> {
+pub struct Reader<R: BufRead + Seek> {
     decoder: ReadDecoder<R>,
     bpp: BytesPerPixel,
     subframe: SubframeInfo,
@@ -317,7 +320,7 @@ struct SubframeInfo {
     consumed_and_flushed: bool,
 }
 
-impl<R: Read> Reader<R> {
+impl<R: BufRead + Seek> Reader<R> {
     /// Advances to the start of the next animation frame and
     /// returns a reference to the `FrameControl` info that describes it.
     /// Skips and discards the image data of the previous frame if necessary.

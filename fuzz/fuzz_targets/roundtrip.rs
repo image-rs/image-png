@@ -1,6 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use std::io::Cursor;
 use png::{Filter, ColorType, BitDepth};
 
 fuzz_target!(|data: (u8, u8, u8, u8, u8, Vec<u8>, Vec<u8>)| {
@@ -63,7 +64,7 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
 }
 
 fn decode_png(data: &[u8]) -> (png::OutputInfo, Vec<u8>) {
-    let decoder = png::Decoder::new(data);
+    let decoder = png::Decoder::new(Cursor::new(data));
     let  mut reader = decoder.read_info().unwrap();
 
     let mut img_data = vec![0u8; reader.info().raw_bytes()];

@@ -41,6 +41,13 @@ fn load_all(c: &mut Criterion) {
     bench_noncompressed_png(&mut g, 2048, 0x7fffffff); // 16 MB
     bench_noncompressed_png(&mut g, 12288, 0x7fffffff); // 576 MB
     g.finish();
+
+    // Incremental decoding via `read_row`
+    let mut g = c.benchmark_group("row-by-row");
+    let mut data = Vec::new();
+    test_utils::write_noncompressed_png(&mut data, 128, 4096);
+    bench_read_row(&mut g, data, "128x128-4k-idat");
+    g.finish();
 }
 
 criterion_group! {benches, load_all}
@@ -52,19 +59,10 @@ fn bench_noncompressed_png(g: &mut BenchmarkGroup<WallTime>, size: u32, idat_byt
     bench_file(g, data, format!("{size}x{size}.png"));
 }
 
+/// This benchmarks decoding via a call to `Reader::next_frame`.
 fn bench_file(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: String) {
     if data.len() > 1_000_000 {
         g.sample_size(10);
-    }
-
-    fn create_reader(data: &[u8]) -> Reader<&[u8]> {
-        let mut decoder = Decoder::new(data);
-
-        // Cover default transformations used by the `image` crate when constructing
-        // `image::codecs::png::PngDecoder`.
-        decoder.set_transformations(Transformations::EXPAND);
-
-        decoder.read_info().unwrap()
     }
 
     let mut reader = create_reader(data.as_slice());
@@ -78,4 +76,31 @@ fn bench_file(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: String) {
             reader.next_frame(&mut image).unwrap();
         })
     });
+}
+
+/// This benchmarks decoding via a sequence of `Reader::read_row` calls.
+fn bench_read_row(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: &str) {
+    let reader = create_reader(data.as_slice());
+    let mut image = vec![0; reader.output_buffer_size()];
+    let bytes_per_row = reader.output_line_size(reader.info().width);
+    g.throughput(Throughput::Bytes(image.len() as u64));
+    g.bench_with_input(name, &data, |b, data| {
+        b.iter(|| {
+            let mut reader = create_reader(data.as_slice());
+
+            for output_row in image.chunks_exact_mut(bytes_per_row) {
+                reader.read_row(output_row).unwrap().unwrap();
+            }
+        })
+    });
+}
+
+fn create_reader(data: &[u8]) -> Reader<&[u8]> {
+    let mut decoder = Decoder::new(data);
+
+    // Cover default transformations used by the `image` crate when constructing
+    // `image::codecs::png::PngDecoder`.
+    decoder.set_transformations(Transformations::EXPAND);
+
+    decoder.read_info().unwrap()
 }

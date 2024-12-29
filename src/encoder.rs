@@ -9,11 +9,11 @@ use flate2::write::ZlibEncoder;
 use crate::chunk::{self, ChunkType};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
-    FrameControl, Info, ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat,
+    FrameControl, Info, ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat, Unit,
 };
 use crate::filter::{filter, Filter};
 use crate::text_metadata::{
-    EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
+    encode_iso_8859_1, EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
 use crate::traits::WriteBytesExt;
 use crate::DeflateCompression;
@@ -158,6 +158,7 @@ struct Options {
     filter: Filter,
     sep_def_img: bool,
     validate_sequence: bool,
+    compression: DeflateCompression,
 }
 
 impl<'a, W: Write> Encoder<'a, W> {
@@ -268,9 +269,23 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// Mark the image data as conforming to the SRGB color space with the specified rendering intent.
     ///
     /// Matching source gamma and chromaticities chunks are added automatically.
-    /// Any manually specified source gamma or chromaticities will be ignored.
+    /// Any manually specified source gamma, chromaticities, or ICC profiles will be ignored.
+    #[doc(hidden)]
+    #[deprecated(note = "use set_source_srgb")]
     pub fn set_srgb(&mut self, rendering_intent: super::SrgbRenderingIntent) {
-        self.info.srgb = Some(rendering_intent);
+        self.info.set_source_srgb(rendering_intent);
+        self.info.source_gamma = Some(crate::srgb::substitute_gamma());
+        self.info.source_chromaticities = Some(crate::srgb::substitute_chromaticities());
+    }
+
+    /// Mark the image data as conforming to the SRGB color space with the specified rendering intent.
+    ///
+    /// Any ICC profiles will be ignored.
+    ///
+    /// Source gamma and chromaticities will be written only if they're set to fallback
+    /// values specified in [11.3.2.5](https://www.w3.org/TR/png-3/#sRGB-gAMA-cHRM).
+    pub fn set_source_srgb(&mut self, rendering_intent: super::SrgbRenderingIntent) {
+        self.info.set_source_srgb(rendering_intent);
     }
 
     /// Start encoding by writing the header data.
@@ -304,7 +319,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     ///
     /// For a simpler selection of compression options see [Self::set_compression].
     pub fn set_deflate_compression(&mut self, compression: DeflateCompression) {
-        self.info.compression_deflate = compression;
+        self.options.compression = compression;
     }
 
     /// Set the used filter type.
@@ -316,6 +331,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// and either don't care about compression ratio or know exactly what works best for your images.
     pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
+
     }
 
     /// Set the fraction of time every frame is going to be displayed, in seconds.
@@ -478,7 +494,6 @@ struct PartialInfo {
     color_type: ColorType,
     frame_control: Option<FrameControl>,
     animation_control: Option<AnimationControl>,
-    compression: DeflateCompression,
     has_palette: bool,
 }
 
@@ -491,39 +506,25 @@ impl PartialInfo {
             color_type: info.color_type,
             frame_control: info.frame_control,
             animation_control: info.animation_control,
-            compression: info.compression_deflate,
             has_palette: info.palette.is_some(),
         }
     }
 
     fn bpp_in_prediction(&self) -> BytesPerPixel {
-        // Passthrough
-        self.to_info().bpp_in_prediction()
+        BytesPerPixel::from_usize(self.bytes_per_pixel())
+    }
+
+    fn bytes_per_pixel(&self) -> usize {
+        self.color_type.bytes_per_pixel(self.bit_depth)
     }
 
     fn raw_row_length(&self) -> usize {
-        // Passthrough
-        self.to_info().raw_row_length()
+        self.raw_row_length_from_width(self.width)
     }
 
     fn raw_row_length_from_width(&self, width: u32) -> usize {
-        // Passthrough
-        self.to_info().raw_row_length_from_width(width)
-    }
-
-    /// Converts this partial info to an owned Info struct,
-    /// setting missing values to their defaults
-    fn to_info(&self) -> Info<'static> {
-        Info {
-            width: self.width,
-            height: self.height,
-            bit_depth: self.bit_depth,
-            color_type: self.color_type,
-            frame_control: self.frame_control,
-            animation_control: self.animation_control,
-            compression_deflate: self.compression,
-            ..Default::default()
-        }
+        self.color_type
+            .raw_row_length_from_width(self.bit_depth, width)
     }
 }
 
@@ -572,10 +573,92 @@ impl<W: Write> Writer<W> {
             ));
         }
 
-        self.w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?; // PNG signature
-        info.encode(&mut self.w)?;
+        self.encode_header(info)?;
 
         Ok(self)
+    }
+
+    /// Encode PNG signature, IHDR, and then chunks that were added to the `Info`
+    fn encode_header(&mut self, info: &Info<'_>) -> Result<()> {
+        self.w.write_all(&[137, 80, 78, 71, 13, 10, 26, 10])?; // PNG signature
+
+        // Encode the IHDR chunk
+        let mut data = [0; 13];
+        data[..4].copy_from_slice(&info.width.to_be_bytes());
+        data[4..8].copy_from_slice(&info.height.to_be_bytes());
+        data[8] = info.bit_depth as u8;
+        data[9] = info.color_type as u8;
+        data[12] = info.interlaced as u8;
+        self.write_chunk(chunk::IHDR, &data)?;
+
+        // Encode the pHYs chunk
+        if let Some(pd) = info.pixel_dims {
+            let mut phys_data = [0; 9];
+            phys_data[0..4].copy_from_slice(&pd.xppu.to_be_bytes());
+            phys_data[4..8].copy_from_slice(&pd.yppu.to_be_bytes());
+            match pd.unit {
+                Unit::Meter => phys_data[8] = 1,
+                Unit::Unspecified => phys_data[8] = 0,
+            }
+            self.write_chunk(chunk::pHYs, &phys_data)?;
+        }
+
+        // If specified, the sRGB information overrides the source gamma and chromaticities.
+        if let Some(srgb) = &info.srgb {
+            srgb.encode(&mut self.w)?;
+
+            // gAMA and cHRM are optional, for backwards compatibility
+            let srgb_gamma = crate::srgb::substitute_gamma();
+            if Some(srgb_gamma) == info.source_gamma {
+                srgb_gamma.encode_gama(&mut self.w)?
+            }
+            let srgb_chromaticities = crate::srgb::substitute_chromaticities();
+            if Some(srgb_chromaticities) == info.source_chromaticities {
+                srgb_chromaticities.encode(&mut self.w)?;
+            }
+        } else {
+            if let Some(gma) = info.source_gamma {
+                gma.encode_gama(&mut self.w)?
+            }
+            if let Some(chrms) = info.source_chromaticities {
+                chrms.encode(&mut self.w)?;
+            }
+            if let Some(iccp) = &info.icc_profile {
+                self.write_iccp_chunk("_", iccp)?
+            }
+        }
+
+        if let Some(exif) = &info.exif_metadata {
+            self.write_chunk(chunk::eXIf, exif)?;
+        }
+
+        if let Some(actl) = info.animation_control {
+            actl.encode(&mut self.w)?;
+        }
+
+        // The position of the PLTE chunk is important, it must come before the tRNS chunk and after
+        // many of the other metadata chunks.
+        if let Some(p) = &info.palette {
+            self.write_chunk(chunk::PLTE, p)?;
+        };
+
+        if let Some(t) = &info.trns {
+            self.write_chunk(chunk::tRNS, t)?;
+        }
+
+        for text_chunk in &info.uncompressed_latin1_text {
+            self.write_text_chunk(text_chunk)?;
+        }
+
+        for text_chunk in &info.compressed_latin1_text {
+            self.write_text_chunk(text_chunk)?;
+        }
+
+        for text_chunk in &info.utf8_text {
+            self.write_text_chunk(text_chunk)?;
+        }
+
+        Ok(())
     }
 
     /// Write a raw chunk of PNG data.
@@ -595,6 +678,31 @@ impl<W: Write> Writer<W> {
 
     pub fn write_text_chunk<T: EncodableTextChunk>(&mut self, text_chunk: &T) -> Result<()> {
         text_chunk.encode(&mut self.w)
+    }
+
+    fn write_iccp_chunk(&mut self, profile_name: &str, icc_profile: &[u8]) -> Result<()> {
+        let profile_name = encode_iso_8859_1(profile_name)?;
+        if profile_name.len() < 1 || profile_name.len() > 79 {
+            return Err(TextEncodingError::InvalidKeywordSize.into());
+        }
+
+        let estimated_compressed_size = icc_profile.len() * 3 / 4;
+        let chunk_size = profile_name
+            .len()
+            .checked_add(2) // string NUL + compression type. Checked add optimizes out later Vec reallocations.
+            .and_then(|s| s.checked_add(estimated_compressed_size))
+            .ok_or(EncodingError::LimitsExceeded)?;
+
+        let mut data = Vec::new();
+        data.try_reserve_exact(chunk_size)
+            .map_err(|_| EncodingError::LimitsExceeded)?;
+
+        data.extend(profile_name.into_iter().chain([0, 0]));
+
+        let mut encoder = ZlibEncoder::new(data, flate2::Compression::default());
+        encoder.write_all(icc_profile)?;
+
+        self.write_chunk(chunk::iCCP, &encoder.finish()?)
     }
 
     /// Check if we should allow writing another image.
@@ -675,7 +783,7 @@ impl<W: Write> Writer<W> {
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
 
-        let zlib_encoded = match self.info.compression {
+        let zlib_encoded = match self.options.compression {
             DeflateCompression::NoCompression => {
                 let mut compressor =
                     fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
@@ -1289,13 +1397,13 @@ impl<'a, W: Write> StreamWriter<'a, W> {
             width,
             height,
             frame_control: fctl,
-            compression,
             ..
         } = writer.info;
 
         let bpp = writer.info.bpp_in_prediction();
         let in_len = writer.info.raw_row_length() - 1;
         let filter = writer.options.filter;
+        let compression = writer.options.compression;
         let prev_buf = vec![0; in_len];
         let curr_buf = vec![0; in_len];
 
@@ -1638,9 +1746,18 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn roundtrip() {
+    fn roundtrip1() {
+        roundtrip_inner();
+    }
+
+    #[test]
+    fn roundtrip2() {
+        roundtrip_inner();
+    }
+
+    fn roundtrip_inner() {
         // More loops = more random testing, but also more test wait time
-        for _ in 0..10 {
+        for _ in 0..5 {
             for path in glob::glob("tests/pngsuite/*.png")
                 .unwrap()
                 .map(|r| r.unwrap())
@@ -1688,9 +1805,18 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_stream() {
+    fn roundtrip_stream1() {
+        roundtrip_stream_inner();
+    }
+
+    #[test]
+    fn roundtrip_stream2() {
+        roundtrip_stream_inner();
+    }
+
+    fn roundtrip_stream_inner() {
         // More loops = more random testing, but also more test wait time
-        for _ in 0..10 {
+        for _ in 0..5 {
             for path in glob::glob("tests/pngsuite/*.png")
                 .unwrap()
                 .map(|r| r.unwrap())
@@ -2012,7 +2138,7 @@ mod tests {
             let decoder = crate::Decoder::new(Cursor::new(buffer));
             let mut reader = decoder.read_info()?;
             assert_eq!(
-                reader.info().source_gamma,
+                reader.info().gamma(),
                 gamma,
                 "Deviation with gamma {:?}",
                 gamma

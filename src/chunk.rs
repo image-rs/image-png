@@ -35,12 +35,22 @@ pub const gAMA: ChunkType = ChunkType(*b"gAMA");
 pub const sRGB: ChunkType = ChunkType(*b"sRGB");
 /// ICC profile chunk
 pub const iCCP: ChunkType = ChunkType(*b"iCCP");
+/// Coding-independent code points for video signal type identification chunk
+pub const cICP: ChunkType = ChunkType(*b"cICP");
+/// Mastering Display Color Volume chunk
+pub const mDCV: ChunkType = ChunkType(*b"mDCV");
+/// Content Light Level Information chunk
+pub const cLLI: ChunkType = ChunkType(*b"cLLI");
+/// EXIF metadata chunk
+pub const eXIf: ChunkType = ChunkType(*b"eXIf");
 /// Latin-1 uncompressed textual data
 pub const tEXt: ChunkType = ChunkType(*b"tEXt");
 /// Latin-1 compressed textual data
 pub const zTXt: ChunkType = ChunkType(*b"zTXt");
 /// UTF-8 textual data
 pub const iTXt: ChunkType = ChunkType(*b"iTXt");
+// Significant bits
+pub const sBIT: ChunkType = ChunkType(*b"sBIT");
 
 // -- Extension chunks --
 

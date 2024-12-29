@@ -331,7 +331,6 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// and either don't care about compression ratio or know exactly what works best for your images.
     pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
-
     }
 
     /// Set the fraction of time every frame is going to be displayed, in seconds.

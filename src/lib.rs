@@ -77,7 +77,7 @@ pub use crate::common::*;
 pub use crate::decoder::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
 pub use crate::decoder::{Decoder, InterlaceInfo, InterlacedRow, Limits, OutputInfo, Reader};
 pub use crate::encoder::{Encoder, EncodingError, StreamWriter, Writer};
-pub use crate::filter::{AdaptiveFilterType, FilterType};
+pub use crate::filter::Filter;
 
 #[cfg(test)]
 pub(crate) mod test_utils;

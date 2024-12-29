@@ -1,6 +1,6 @@
 use super::stream::{DecodingError, FormatErrorInner};
 use crate::common::BytesPerPixel;
-use crate::filter::{unfilter, FilterType};
+use crate::filter::{unfilter, RowFilter};
 
 // Buffer for temporarily holding decompressed, not-yet-`unfilter`-ed rows.
 pub(crate) struct UnfilteringBuffer {
@@ -96,7 +96,7 @@ impl UnfilteringBuffer {
         debug_assert!(prev.is_empty() || prev.len() == (rowlen - 1));
 
         // Get the filter type.
-        let filter = FilterType::from_u8(row[0]).ok_or(DecodingError::Format(
+        let filter = RowFilter::from_u8(row[0]).ok_or(DecodingError::Format(
             FormatErrorInner::UnknownFilterMethod(row[0]).into(),
         ))?;
         let row = &mut row[1..rowlen];

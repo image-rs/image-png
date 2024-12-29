@@ -11,11 +11,12 @@ use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
     FrameControl, Info, ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat, Unit,
 };
-use crate::filter::{filter, AdaptiveFilterType, FilterType};
+use crate::filter::{filter, Filter};
 use crate::text_metadata::{
     encode_iso_8859_1, EncodableTextChunk, ITXtChunk, TEXtChunk, TextEncodingError, ZTXtChunk,
 };
 use crate::traits::WriteBytesExt;
+use crate::DeflateCompression;
 
 pub type Result<T> = result::Result<T, EncodingError>;
 
@@ -151,14 +152,13 @@ pub struct Encoder<'a, W: Write> {
     options: Options,
 }
 
-/// Decoding options, internal type, forwarded to the Writer.
+/// Encoding options, internal type, forwarded to the Writer.
 #[derive(Default)]
 struct Options {
-    filter: FilterType,
-    adaptive_filter: AdaptiveFilterType,
+    filter: Filter,
     sep_def_img: bool,
     validate_sequence: bool,
-    compression: Compression,
+    compression: DeflateCompression,
 }
 
 impl<'a, W: Write> Encoder<'a, W> {
@@ -309,31 +309,28 @@ impl<'a, W: Write> Encoder<'a, W> {
         self.info.bit_depth = depth;
     }
 
-    /// Set compression parameters.
-    ///
-    /// Accepts a `Compression` or any type that can transform into a `Compression`. Notably `deflate::Compression` and
-    /// `deflate::CompressionOptions` which "just work".
+    /// Set compression parameters, see [Compression] for the available options.
     pub fn set_compression(&mut self, compression: Compression) {
+        self.set_deflate_compression(DeflateCompression::from_simple(compression));
+        self.set_filter(Filter::from_simple(compression));
+    }
+
+    /// Provides in-depth customization of DEFLATE compression options.
+    ///
+    /// For a simpler selection of compression options see [Self::set_compression].
+    pub fn set_deflate_compression(&mut self, compression: DeflateCompression) {
         self.options.compression = compression;
     }
 
     /// Set the used filter type.
     ///
-    /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
-    /// sample values based on the previous. For a potentially better compression ratio, at the
-    /// cost of more complex processing, try out [`FilterType::Paeth`].
-    pub fn set_filter(&mut self, filter: FilterType) {
-        self.options.filter = filter;
-    }
-
-    /// Set the adaptive filter type.
+    /// The default filter is [`Filter::Adaptive`] which automatically selects the best filter
+    /// for each row of the image.
     ///
-    /// Adaptive filtering attempts to select the best filter for each line
-    /// based on heuristics which minimize the file size for compression rather
-    /// than use a single filter for the entire image. The default method is
-    /// [`AdaptiveFilterType::NonAdaptive`].
-    pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
-        self.options.adaptive_filter = adaptive_filter;
+    /// You should only change this if you are after very fast compression,
+    /// and either don't care about compression ratio or know exactly what works best for your images.
+    pub fn set_filter(&mut self, filter: Filter) {
+        self.options.filter = filter;
     }
 
     /// Set the fraction of time every frame is going to be displayed, in seconds.
@@ -784,22 +781,23 @@ impl<W: Write> Writer<W> {
 
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
-        let adaptive_method = self.options.adaptive_filter;
 
         let zlib_encoded = match self.options.compression {
-            Compression::Fast => {
+            DeflateCompression::NoCompression => {
+                let mut compressor =
+                    fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                for line in data.chunks(in_len) {
+                    compressor.write_data(&[0])?;
+                    compressor.write_data(line)?;
+                }
+                compressor.finish()?.into_inner()
+            }
+            DeflateCompression::FdeflateUltraFast => {
                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
 
                 let mut current = vec![0; in_len + 1];
                 for line in data.chunks(in_len) {
-                    let filter_type = filter(
-                        filter_method,
-                        adaptive_method,
-                        bpp,
-                        prev,
-                        line,
-                        &mut current[1..],
-                    );
+                    let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
 
                     current[0] = filter_type as u8;
                     compressor.write_data(&current)?;
@@ -813,10 +811,7 @@ impl<W: Write> Writer<W> {
                     // Write uncompressed data since the result from fast compression would take
                     // more space than that.
                     //
-                    // We always use FilterType::NoFilter here regardless of the filter method
-                    // requested by the user. Doing filtering again would only add performance
-                    // cost for both encoding and subsequent decoding, without improving the
-                    // compression ratio.
+                    // This is essentially a fallback to NoCompression.
                     let mut compressor =
                         fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
                     for line in data.chunks(in_len) {
@@ -828,19 +823,13 @@ impl<W: Write> Writer<W> {
                     compressed
                 }
             }
-            _ => {
+            DeflateCompression::Flate2(level) => {
                 let mut current = vec![0; in_len];
 
-                let mut zlib = ZlibEncoder::new(Vec::new(), self.options.compression.to_options());
+                let mut zlib =
+                    ZlibEncoder::new(Vec::new(), flate2::Compression::new(u32::from(level)));
                 for line in data.chunks(in_len) {
-                    let filter_type = filter(
-                        filter_method,
-                        adaptive_method,
-                        bpp,
-                        prev,
-                        line,
-                        &mut current,
-                    );
+                    let filter_type = filter(filter_method, bpp, prev, line, &mut current);
 
                     zlib.write_all(&[filter_type as u8])?;
                     zlib.write_all(&current)?;
@@ -910,23 +899,15 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    /// Set the used filter type for the following frames.
+    /// Set the used filter type.
     ///
-    /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
-    /// sample values based on the previous. For a potentially better compression ratio, at the
-    /// cost of more complex processing, try out [`FilterType::Paeth`].
-    pub fn set_filter(&mut self, filter: FilterType) {
+    /// The default filter is [`Filter::Adaptive`] which automatically selects the best filter
+    /// for each row of the image.
+    ///
+    /// You should only change this if you are after very fast compression,
+    /// and either don't care about compression ratio or know exactly what works best for your images.
+    pub fn set_filter(&mut self, filter: Filter) {
         self.options.filter = filter;
-    }
-
-    /// Set the adaptive filter type for the following frames.
-    ///
-    /// Adaptive filtering attempts to select the best filter for each line
-    /// based on heuristics which minimize the file size for compression rather
-    /// than use a single filter for the entire image. The default method is
-    /// [`AdaptiveFilterType::NonAdaptive`].
-    pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
-        self.options.adaptive_filter = adaptive_filter;
     }
 
     /// Set the fraction of time the following frames are going to be displayed,
@@ -1404,10 +1385,9 @@ pub struct StreamWriter<'a, W: Write> {
     height: u32,
 
     bpp: BytesPerPixel,
-    filter: FilterType,
-    adaptive_filter: AdaptiveFilterType,
+    filter: Filter,
     fctl: Option<FrameControl>,
-    compression: Compression,
+    compression: DeflateCompression,
 }
 
 impl<'a, W: Write> StreamWriter<'a, W> {
@@ -1423,14 +1403,13 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let in_len = writer.info.raw_row_length() - 1;
         let filter = writer.options.filter;
         let compression = writer.options.compression;
-        let adaptive_filter = writer.options.adaptive_filter;
         let prev_buf = vec![0; in_len];
         let curr_buf = vec![0; in_len];
 
         let mut chunk_writer = ChunkWriter::new(writer, buf_len);
         let (line_len, to_write) = chunk_writer.next_frame_info();
         chunk_writer.write_header()?;
-        let zlib = ZlibEncoder::new(chunk_writer, compression.to_options());
+        let zlib = ZlibEncoder::new(chunk_writer, compression.closest_flate2_level());
 
         Ok(StreamWriter {
             writer: Wrapper::Zlib(zlib),
@@ -1441,7 +1420,6 @@ impl<'a, W: Write> StreamWriter<'a, W> {
             filter,
             width,
             height,
-            adaptive_filter,
             line_len,
             to_write,
             fctl,
@@ -1449,27 +1427,15 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         })
     }
 
-    /// Set the used filter type for the next frame.
+    /// Set the used filter type.
     ///
-    /// The default filter is [`FilterType::Sub`] which provides a basic prediction algorithm for
-    /// sample values based on the previous.
+    /// The default filter is [`Filter::Adaptive`] which automatically selects the best filter
+    /// for each row of the image.
     ///
-    /// For optimal compression ratio you should enable adaptive filtering
-    /// instead of setting a single filter for the entire image, see
-    /// [set_adaptive_filter](Self::set_adaptive_filter).
-    pub fn set_filter(&mut self, filter: FilterType) {
+    /// You should only change this if you are after very fast compression,
+    /// and either don't care about compression ratio or know exactly what works best for your images.
+    pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
-    }
-
-    /// Set the adaptive filter type for the next frame.
-    ///
-    /// Adaptive filtering attempts to select the best filter for each line
-    /// based on heuristics which minimize the file size for compression rather
-    /// than use a single filter for the entire image.
-    ///
-    /// The default method is [`AdaptiveFilterType::NonAdaptive`].
-    pub fn set_adaptive_filter(&mut self, adaptive_filter: AdaptiveFilterType) {
-        self.adaptive_filter = adaptive_filter;
     }
 
     /// Set the fraction of time the following frames are going to be displayed,
@@ -1673,7 +1639,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         // now it can be taken because the next statements cannot cause any errors
         match self.writer.take() {
             Wrapper::Chunk(wrt) => {
-                let encoder = ZlibEncoder::new(wrt, self.compression.to_options());
+                let encoder = ZlibEncoder::new(wrt, self.compression.closest_flate2_level());
                 self.writer = Wrapper::Zlib(encoder);
             }
             _ => unreachable!(),
@@ -1721,7 +1687,6 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
             let mut filtered = vec![0; self.curr_buf.len()];
             let filter_type = filter(
                 self.filter,
-                self.adaptive_filter,
                 self.bpp,
                 &self.prev_buf,
                 &self.curr_buf,
@@ -1769,25 +1734,6 @@ impl<W: Write> Drop for StreamWriter<'_, W> {
     }
 }
 
-/// Mod to encapsulate the converters depending on the `deflate` crate.
-///
-/// Since this only contains trait impls, there is no need to make this public, they are simply
-/// available when the mod is compiled as well.
-impl Compression {
-    fn to_options(self) -> flate2::Compression {
-        #[allow(deprecated)]
-        match self {
-            Compression::Default => flate2::Compression::default(),
-            Compression::Fast => flate2::Compression::fast(),
-            Compression::Best => flate2::Compression::best(),
-            #[allow(deprecated)]
-            Compression::Huffman => flate2::Compression::none(),
-            #[allow(deprecated)]
-            Compression::Rle => flate2::Compression::none(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1825,30 +1771,34 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                // Encode decoded image
-                let mut out = Vec::new();
-                {
-                    let mut wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut out,
-                    };
+                use DeflateCompression::*;
+                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                    // Encode decoded image
+                    let mut out = Vec::new();
+                    {
+                        let mut wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut out,
+                        };
 
-                    let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
-                    encoder.set_color(info.color_type);
-                    encoder.set_depth(info.bit_depth);
-                    if let Some(palette) = &reader.info().palette {
-                        encoder.set_palette(palette.clone());
+                        let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
+                        encoder.set_color(info.color_type);
+                        encoder.set_depth(info.bit_depth);
+                        encoder.set_deflate_compression(compression);
+                        if let Some(palette) = &reader.info().palette {
+                            encoder.set_palette(palette.clone());
+                        }
+                        let mut encoder = encoder.write_header().unwrap();
+                        encoder.write_image_data(&buf).unwrap();
                     }
-                    let mut encoder = encoder.write_header().unwrap();
-                    encoder.write_image_data(&buf).unwrap();
+                    // Decode encoded decoded image
+                    let decoder = Decoder::new(&*out);
+                    let mut reader = decoder.read_info().unwrap();
+                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    reader.next_frame(&mut buf2).unwrap();
+                    // check if the encoded image is ok:
+                    assert_eq!(buf, buf2);
                 }
-                // Decode encoded decoded image
-                let decoder = Decoder::new(&*out);
-                let mut reader = decoder.read_info().unwrap();
-                let mut buf2 = vec![0; reader.output_buffer_size()];
-                reader.next_frame(&mut buf2).unwrap();
-                // check if the encoded image is ok:
-                assert_eq!(buf, buf2);
             }
         }
     }
@@ -1879,37 +1829,41 @@ mod tests {
                 let mut reader = decoder.read_info().unwrap();
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
-                // Encode decoded image
-                let mut out = Vec::new();
-                {
-                    let mut wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut out,
-                    };
+                use DeflateCompression::*;
+                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                    // Encode decoded image
+                    let mut out = Vec::new();
+                    {
+                        let mut wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut out,
+                        };
 
-                    let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
-                    encoder.set_color(info.color_type);
-                    encoder.set_depth(info.bit_depth);
-                    if let Some(palette) = &reader.info().palette {
-                        encoder.set_palette(palette.clone());
+                        let mut encoder = Encoder::new(&mut wrapper, info.width, info.height);
+                        encoder.set_color(info.color_type);
+                        encoder.set_depth(info.bit_depth);
+                        encoder.set_deflate_compression(compression);
+                        if let Some(palette) = &reader.info().palette {
+                            encoder.set_palette(palette.clone());
+                        }
+                        let mut encoder = encoder.write_header().unwrap();
+                        let mut stream_writer = encoder.stream_writer().unwrap();
+
+                        let mut outer_wrapper = RandomChunkWriter {
+                            rng: thread_rng(),
+                            w: &mut stream_writer,
+                        };
+
+                        outer_wrapper.write_all(&buf).unwrap();
                     }
-                    let mut encoder = encoder.write_header().unwrap();
-                    let mut stream_writer = encoder.stream_writer().unwrap();
-
-                    let mut outer_wrapper = RandomChunkWriter {
-                        rng: thread_rng(),
-                        w: &mut stream_writer,
-                    };
-
-                    outer_wrapper.write_all(&buf).unwrap();
+                    // Decode encoded decoded image
+                    let decoder = Decoder::new(&*out);
+                    let mut reader = decoder.read_info().unwrap();
+                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    reader.next_frame(&mut buf2).unwrap();
+                    // check if the encoded image is ok:
+                    assert_eq!(buf, buf2);
                 }
-                // Decode encoded decoded image
-                let decoder = Decoder::new(&*out);
-                let mut reader = decoder.read_info().unwrap();
-                let mut buf2 = vec![0; reader.output_buffer_size()];
-                reader.next_frame(&mut buf2).unwrap();
-                // check if the encoded image is ok:
-                assert_eq!(buf, buf2);
             }
         }
     }
@@ -2136,7 +2090,7 @@ mod tests {
     fn all_filters_roundtrip() -> io::Result<()> {
         let pixel: Vec<_> = (0..48).collect();
 
-        let roundtrip = |filter: FilterType| -> io::Result<()> {
+        let roundtrip = |filter: Filter| -> io::Result<()> {
             let mut buffer = vec![];
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
@@ -2156,11 +2110,11 @@ mod tests {
             Ok(())
         };
 
-        roundtrip(FilterType::NoFilter)?;
-        roundtrip(FilterType::Sub)?;
-        roundtrip(FilterType::Up)?;
-        roundtrip(FilterType::Avg)?;
-        roundtrip(FilterType::Paeth)?;
+        roundtrip(Filter::NoFilter)?;
+        roundtrip(Filter::Sub)?;
+        roundtrip(Filter::Up)?;
+        roundtrip(Filter::Avg)?;
+        roundtrip(Filter::Paeth)?;
 
         Ok(())
     }
@@ -2174,7 +2128,7 @@ mod tests {
             let mut encoder = Encoder::new(&mut buffer, 4, 4);
             encoder.set_depth(BitDepth::Eight);
             encoder.set_color(ColorType::Rgb);
-            encoder.set_filter(FilterType::Avg);
+            encoder.set_filter(Filter::Avg);
             if let Some(gamma) = gamma {
                 encoder.set_source_gamma(gamma);
             }
@@ -2398,7 +2352,7 @@ mod tests {
 
         let mut encoder = Encoder::new(&mut cursor, 8, 8);
         encoder.set_color(ColorType::Rgba);
-        encoder.set_filter(FilterType::Paeth);
+        encoder.set_filter(Filter::Paeth);
         let mut writer = encoder.write_header()?;
         let mut stream = writer.stream_writer()?;
 

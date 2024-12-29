@@ -1,5 +1,7 @@
 //! Common types shared between the encoder and decoder
 use crate::text_metadata::{ITXtChunk, TEXtChunk, ZTXtChunk};
+#[allow(unused_imports)] // used by doc comments only
+use crate::Filter;
 use crate::{chunk, encoder};
 use io::Write;
 use std::{borrow::Cow, convert::TryFrom, fmt, io};
@@ -313,33 +315,103 @@ impl AnimationControl {
 }
 
 /// The type and strength of applied compression.
+///
+/// This is a simple, high-level interface that will automatically choose
+/// the appropriate DEFLATE compression mode and PNG filter.
+///
+/// If you need more control over the encoding paramters,
+/// you can set the [DeflateCompression] and [Filter] manually.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Compression {
-    /// Default level
-    Default,
-    /// Fast minimal compression
-    Fast,
-    /// Higher compression level
+    /// No compression whatsoever. Fastest, but results in large files.
+    NoCompression,
+    /// Extremely fast but light compression.
+    Fastest,
+    /// Extremely fast compression with a decent compression ratio.
     ///
-    /// Best in this context isn't actually the highest possible level
-    /// the encoder can do, but is meant to emulate the `Best` setting in the `Flate2`
-    /// library.
-    Best,
-    #[deprecated(
-        since = "0.17.6",
-        note = "use one of the other compression levels instead, such as 'fast'"
-    )]
-    Huffman,
-    #[deprecated(
-        since = "0.17.6",
-        note = "use one of the other compression levels instead, such as 'fast'"
-    )]
-    Rle,
+    /// Significantly outperforms libpng and other popular encoders
+    /// by using a [specialized DEFLATE implementation tuned for PNG](https://crates.io/crates/fdeflate),
+    /// while still providing better compression ratio than the fastest modes of other encoders.
+    Fast,
+    /// Balances encoding speed and compression ratio
+    Balanced,
+    /// Spend more time to produce a slightly smaller file than with `Default`
+    High,
 }
 
 impl Default for Compression {
     fn default() -> Self {
-        Self::Default
+        Self::Balanced
+    }
+}
+
+/// Advanced compression settings with more customization options than [Compression].
+///
+/// Note that this setting only affects DEFLATE compression.
+/// Another setting that influences the compression ratio and lets you choose
+/// between encoding speed and compression ratio is the [Filter].
+///
+/// ### Stability guarantees
+///
+/// The implementation details of DEFLATE compression may evolve over time,
+/// even without a semver-breaking change to the version of `png` crate.
+///
+/// If a certain compression setting is superseded by other options,
+/// it may be marked deprecated and remapped to a different option.
+/// You will see a deprecation notice when compiling code relying on such options.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub enum DeflateCompression {
+    /// Do not compress the data at all.
+    ///
+    /// Useful for incompressible images,
+    /// or when speed is paramount and you don't care about size at all.
+    ///
+    /// This mode also disables filters, forcing [Filter::NoFilter].
+    NoCompression,
+
+    /// Excellent for creating lightly compressed PNG images very quickly.
+    ///
+    /// Uses the [fdeflate](https://crates.io/crates/fdeflate) crate under the hood
+    /// to achieve speeds far exceeding what libpng is capable of
+    /// while still providing a decent compression ratio.
+    ///
+    /// Images encoded in this mode can also be decoded by the `png` crate slightly faster than usual.
+    /// Other decoders (e.g. libpng) do not get a decoding speed boost from this mode.
+    FdeflateUltraFast,
+
+    /// Uses [flate2](https://crates.io/crates/flate2) crate with the specified [compression level](flate2::Compression::new).
+    ///
+    /// Flate2 has several backends that make different trade-offs.
+    /// See the flate2 documentation for the available backends for more information.
+    Flate2(u8),
+    // Other variants can be added in the future
+}
+
+impl Default for DeflateCompression {
+    fn default() -> Self {
+        Self::from_simple(Compression::Balanced)
+    }
+}
+
+impl DeflateCompression {
+    pub(crate) fn from_simple(value: Compression) -> Self {
+        match value {
+            Compression::NoCompression => Self::NoCompression,
+            Compression::Fastest => Self::FdeflateUltraFast,
+            Compression::Fast => Self::FdeflateUltraFast,
+            Compression::Balanced => Self::Flate2(flate2::Compression::default().level() as u8),
+            Compression::High => Self::Flate2(flate2::Compression::best().level() as u8),
+        }
+    }
+
+    pub(crate) fn closest_flate2_level(&self) -> flate2::Compression {
+        match self {
+            DeflateCompression::NoCompression => flate2::Compression::none(),
+            DeflateCompression::FdeflateUltraFast => flate2::Compression::new(1),
+            DeflateCompression::Flate2(level) => flate2::Compression::new(u32::from(*level)),
+        }
     }
 }
 

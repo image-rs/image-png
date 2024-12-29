@@ -1,6 +1,6 @@
 use core::convert::TryInto;
 
-use crate::common::BytesPerPixel;
+use crate::{common::BytesPerPixel, Compression};
 
 /// SIMD helpers for `fn unfilter`
 ///
@@ -60,7 +60,7 @@ mod simd {
         out.into()
     }
 
-    /// Memory of previous pixels (as needed to unfilter `FilterType::Paeth`).
+    /// Memory of previous pixels (as needed to unfilter `Filter::Paeth`).
     /// See also https://www.w3.org/TR/png/#filter-byte-positions
     #[derive(Default)]
     struct PaethState<T, const N: usize>
@@ -75,7 +75,7 @@ mod simd {
         a: Simd<T, N>,
     }
 
-    /// Mutates `x` as needed to unfilter `FilterType::Paeth`.
+    /// Mutates `x` as needed to unfilter `Filter::Paeth`.
     ///
     /// `b` is the current pixel in the previous row.  `x` is the current pixel in the current row.
     /// See also https://www.w3.org/TR/png/#filter-byte-positions
@@ -124,7 +124,7 @@ mod simd {
         dest[0..3].copy_from_slice(&src.to_array()[0..3])
     }
 
-    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Three`.
+    /// Undoes `Filter::Paeth` for `BytesPerPixel::Three`.
     pub fn unfilter_paeth3(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 3, 0);
@@ -155,7 +155,7 @@ mod simd {
         store3(x, curr_row);
     }
 
-    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Four` and `BytesPerPixel::Eight`.
+    /// Undoes `Filter::Paeth` for `BytesPerPixel::Four` and `BytesPerPixel::Eight`.
     ///
     /// This function calculates the Paeth predictor entirely in `Simd<u8, N>`
     /// without converting to an intermediate `Simd<i16, N>`. Doing so avoids
@@ -187,7 +187,7 @@ mod simd {
         dest[0..6].copy_from_slice(&src.to_array()[0..6])
     }
 
-    /// Undoes `FilterType::Paeth` for `BytesPerPixel::Six`.
+    /// Undoes `Filter::Paeth` for `BytesPerPixel::Six`.
     pub fn unfilter_paeth6(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
         debug_assert_eq!(prev_row.len(), curr_row.len());
         debug_assert_eq!(prev_row.len() % 6, 0);
@@ -226,9 +226,53 @@ mod simd {
 /// this does not operate on pixels but on raw bytes of a scanline.
 ///
 /// Details on how each filter works can be found in the [PNG Book](http://www.libpng.org/pub/png/book/chapter09.html).
+///
+/// The default filter is `Adaptive`, which uses heuristics to select the best filter for every row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Filter {
+    NoFilter,
+    Sub,
+    Up,
+    Avg,
+    Paeth,
+    Adaptive,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Filter::Adaptive
+    }
+}
+
+impl From<RowFilter> for Filter {
+    fn from(value: RowFilter) -> Self {
+        match value {
+            RowFilter::NoFilter => Filter::NoFilter,
+            RowFilter::Sub => Filter::Sub,
+            RowFilter::Up => Filter::Up,
+            RowFilter::Avg => Filter::Avg,
+            RowFilter::Paeth => Filter::Paeth,
+        }
+    }
+}
+
+impl Filter {
+    pub(crate) fn from_simple(compression: Compression) -> Self {
+        match compression {
+            Compression::NoCompression => Filter::NoFilter, // with no DEFLATE filtering would only waste time
+            Compression::Fastest => Filter::Up, // pairs well with FdeflateUltraFast, producing much smaller files while being very fast
+            Compression::Fast => Filter::Adaptive,
+            Compression::Balanced => Filter::Adaptive,
+            Compression::High => Filter::Adaptive,
+        }
+    }
+}
+
+/// Unlike the public [Filter], does not include the "Adaptive" option
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum FilterType {
+pub(crate) enum RowFilter {
     NoFilter = 0,
     Sub = 1,
     Up = 2,
@@ -236,44 +280,33 @@ pub enum FilterType {
     Paeth = 4,
 }
 
-impl Default for FilterType {
+impl Default for RowFilter {
     fn default() -> Self {
-        FilterType::Sub
+        RowFilter::Up
     }
 }
 
-impl FilterType {
-    /// u8 -> Self. Temporary solution until Rust provides a canonical one.
-    pub fn from_u8(n: u8) -> Option<FilterType> {
+impl RowFilter {
+    pub fn from_u8(n: u8) -> Option<Self> {
         match n {
-            0 => Some(FilterType::NoFilter),
-            1 => Some(FilterType::Sub),
-            2 => Some(FilterType::Up),
-            3 => Some(FilterType::Avg),
-            4 => Some(FilterType::Paeth),
+            0 => Some(Self::NoFilter),
+            1 => Some(Self::Sub),
+            2 => Some(Self::Up),
+            3 => Some(Self::Avg),
+            4 => Some(Self::Paeth),
             _ => None,
         }
     }
-}
 
-/// Adaptive filtering tries every possible filter for each row and uses a heuristic to select the best one.
-/// This improves compression ratio, but makes encoding slightly slower.
-///
-/// It is recommended to use `Adaptive` whenever you care about compression ratio.
-/// Filtering is quite cheap compared to other parts of encoding, but can contribute
-/// to the compression ratio significantly.
-///
-/// `NonAdaptive` filtering is the default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum AdaptiveFilterType {
-    Adaptive,
-    NonAdaptive,
-}
-
-impl Default for AdaptiveFilterType {
-    fn default() -> Self {
-        AdaptiveFilterType::NonAdaptive
+    pub fn from_method(strat: Filter) -> Option<Self> {
+        match strat {
+            Filter::NoFilter => Some(Self::NoFilter),
+            Filter::Sub => Some(Self::Sub),
+            Filter::Up => Some(Self::Up),
+            Filter::Avg => Some(Self::Avg),
+            Filter::Paeth => Some(Self::Paeth),
+            Filter::Adaptive => None,
+        }
     }
 }
 
@@ -370,12 +403,12 @@ fn filter_paeth_fpnge(a: u8, b: u8, c: u8) -> u8 {
 }
 
 pub(crate) fn unfilter(
-    mut filter: FilterType,
+    mut filter: RowFilter,
     tbpp: BytesPerPixel,
     previous: &[u8],
     current: &mut [u8],
 ) {
-    use self::FilterType::*;
+    use self::RowFilter::*;
 
     // If the previous row is empty, then treat it as if it were filled with zeros.
     if previous.is_empty() {
@@ -866,14 +899,14 @@ pub(crate) fn unfilter(
 }
 
 fn filter_internal(
-    method: FilterType,
+    method: RowFilter,
     bpp: usize,
     len: usize,
     previous: &[u8],
     current: &[u8],
     output: &mut [u8],
-) -> FilterType {
-    use self::FilterType::*;
+) -> RowFilter {
+    use self::RowFilter::*;
 
     // This value was chosen experimentally based on what achieved the best performance. The
     // Rust compiler does auto-vectorization, and 32-bytes per loop iteration seems to enable
@@ -1005,24 +1038,20 @@ fn filter_internal(
 }
 
 pub(crate) fn filter(
-    method: FilterType,
-    adaptive: AdaptiveFilterType,
+    method: Filter,
     bpp: BytesPerPixel,
     previous: &[u8],
     current: &[u8],
     output: &mut [u8],
-) -> FilterType {
-    use FilterType::*;
+) -> RowFilter {
+    use RowFilter::*;
     let bpp = bpp.into_usize();
     let len = current.len();
 
-    match adaptive {
-        AdaptiveFilterType::NonAdaptive => {
-            filter_internal(method, bpp, len, previous, current, output)
-        }
-        AdaptiveFilterType::Adaptive => {
+    match method {
+        Filter::Adaptive => {
             let mut min_sum: u64 = u64::MAX;
-            let mut filter_choice = FilterType::NoFilter;
+            let mut filter_choice = RowFilter::NoFilter;
             for &filter in [Sub, Up, Avg, Paeth].iter() {
                 filter_internal(filter, bpp, len, previous, current, output);
                 let sum = sum_buffer(output);
@@ -1036,6 +1065,10 @@ pub(crate) fn filter(
                 filter_internal(filter_choice, bpp, len, previous, current, output);
             }
             filter_choice
+        }
+        _ => {
+            let filter = RowFilter::from_method(method).unwrap();
+            filter_internal(filter, bpp, len, previous, current, output)
         }
     }
 }
@@ -1076,11 +1109,10 @@ mod test {
         let previous: Vec<_> = iter::repeat(1).take(LEN.into()).collect();
         let current: Vec<_> = (0..LEN).collect();
         let expected = current.clone();
-        let adaptive = AdaptiveFilterType::NonAdaptive;
 
-        let roundtrip = |kind, bpp: BytesPerPixel| {
+        let roundtrip = |kind: RowFilter, bpp: BytesPerPixel| {
             let mut output = vec![0; LEN.into()];
-            filter(kind, adaptive, bpp, &previous, &current, &mut output);
+            filter(kind.into(), bpp, &previous, &current, &mut output);
             unfilter(kind, bpp, &previous, &mut output);
             assert_eq!(
                 output, expected,
@@ -1090,11 +1122,11 @@ mod test {
         };
 
         let filters = [
-            FilterType::NoFilter,
-            FilterType::Sub,
-            FilterType::Up,
-            FilterType::Avg,
-            FilterType::Paeth,
+            RowFilter::NoFilter,
+            RowFilter::Sub,
+            RowFilter::Up,
+            RowFilter::Avg,
+            RowFilter::Paeth,
         ];
 
         let bpps = [
@@ -1139,11 +1171,10 @@ mod test {
         let previous: Vec<_> = (0..LEN).collect();
         let current: Vec<_> = (0..LEN).collect();
         let expected = current.clone();
-        let adaptive = AdaptiveFilterType::NonAdaptive;
 
-        let roundtrip = |kind, bpp: BytesPerPixel| {
+        let roundtrip = |kind: RowFilter, bpp: BytesPerPixel| {
             let mut output = vec![0; LEN.into()];
-            filter(kind, adaptive, bpp, &previous, &current, &mut output);
+            filter(kind.into(), bpp, &previous, &current, &mut output);
             unfilter(kind, bpp, &previous, &mut output);
             assert_eq!(
                 output, expected,
@@ -1153,11 +1184,11 @@ mod test {
         };
 
         let filters = [
-            FilterType::NoFilter,
-            FilterType::Sub,
-            FilterType::Up,
-            FilterType::Avg,
-            FilterType::Paeth,
+            RowFilter::NoFilter,
+            RowFilter::Sub,
+            RowFilter::Up,
+            RowFilter::Avg,
+            RowFilter::Paeth,
         ];
 
         let bpps = [

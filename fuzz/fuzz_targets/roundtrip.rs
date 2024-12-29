@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use png::{FilterType, ColorType, BitDepth};
+use png::{Filter, ColorType, BitDepth};
 
 fuzz_target!(|data: (u8, u8, u8, u8, u8, Vec<u8>, Vec<u8>)| {
     if let Some((raw, encoded)) = encode_png(data.0, data.1, data.2, data.3, data.4, &data.5, &data.6) {
@@ -16,7 +16,7 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
     // Convert untyped bytes to the correct types and validate them:
     let width = width as u32;
     if width == 0 { return None };
-    let filter = FilterType::from_u8(filter)?;
+    let filter = filter_from_u8(filter);
     let bit_depth = BitDepth::from_u8(raw_bit_depth)?;
     let max_palette_length = 3 * u32::pow(2, raw_bit_depth as u32) as usize;
     let mut palette = raw_palette;
@@ -29,11 +29,9 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
     }
     // compression
     let compression = match compression {
-        0 => png::Compression::Default,
-        1 => png::Compression::Fast,
-        2 => png::Compression::Best,
-        3 => png::Compression::Huffman,
-        4 => png::Compression::Rle,
+        0 => png::DeflateCompression::NoCompression,
+        level @ 1..=9 => png::DeflateCompression::Flate2(level),
+        10 => png::DeflateCompression::FdeflateUltraFast,
         _ => return None,
     };
 
@@ -52,7 +50,7 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
         encoder.set_depth(bit_depth);
         encoder.set_color(color_type);
         encoder.set_filter(filter);
-        encoder.set_compression(compression);
+        encoder.set_deflate_compression(compression);
         if let ColorType::Indexed = color_type {
             encoder.set_palette(palette)
         }
@@ -73,6 +71,18 @@ fn decode_png(data: &[u8]) -> (png::OutputInfo, Vec<u8>) {
     let info = reader.next_frame(&mut img_data).unwrap();
 
     (info, img_data)
+}
+
+/// Filter::from() doesn't cover the Filter::Adaptive variant, so we roll our own
+fn filter_from_u8(input: u8) -> Filter {
+    match input {
+        0 => Filter::NoFilter,
+        1 => Filter::Sub,
+        2 => Filter::Up,
+        3 => Filter::Avg,
+        4 => Filter::Paeth,
+        _ => Filter::Adaptive,
+    }
 }
 
 // copied from the `png` codebase because it's pub(crate)

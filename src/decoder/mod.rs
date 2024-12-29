@@ -17,7 +17,6 @@ use crate::adam7::{self, Adam7Info};
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
-use crate::filter::{unfilter, RowFilter};
 use crate::FrameControl;
 
 pub use interlace_info::InterlaceInfo;

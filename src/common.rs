@@ -1,5 +1,5 @@
 //! Common types shared between the encoder and decoder
-use crate::text_metadata::{EncodableTextChunk, ITXtChunk, TEXtChunk, ZTXtChunk};
+use crate::text_metadata::{ITXtChunk, TEXtChunk, ZTXtChunk};
 #[allow(unused_imports)] // used by doc comments only
 use crate::Filter;
 use crate::{chunk, encoder};

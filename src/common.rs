@@ -376,9 +376,6 @@ pub enum DeflateCompression {
     /// Uses the [fdeflate](https://crates.io/crates/fdeflate) crate under the hood
     /// to achieve speeds far exceeding what libpng is capable of
     /// while still providing a decent compression ratio.
-    ///
-    /// Images encoded in this mode can also be decoded by the `png` crate slightly faster than usual.
-    /// Other decoders (e.g. libpng) do not get a decoding speed boost from this mode.
     FdeflateUltraFast,
 
     /// Uses [flate2](https://crates.io/crates/flate2) crate with the specified [compression level](flate2::Compression::new).

@@ -39,8 +39,12 @@ rand = "0.8.4"
 term = "1.0.1"
 
 [features]
-unstable = ["crc32fast/nightly"]
+flate2 = [] # Expose flate2 specific functionality
+unstable = ["crc32fast/nightly"] # Enable nightly-only features
 benchmarks = []
+
+[package.metadata.docs.rs]
+features = ["flate2"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

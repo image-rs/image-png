@@ -47,13 +47,31 @@ jobs:
       env:
         FEATURES: ${{ matrix.features }}
   powerpc_cross:
+    # github actions does not support big endian systems directly, but it does support QEMU.
+    # so we install qemu, then build and run the tests in an emulated powerpc system.
+    # note: you can also use this approach to test for big endian locally.
     runs-on: ubuntu-latest
+
+    # we are using the cross project for cross compilation:
+    # https://github.com/cross-rs/cross
     steps:
-    - uses: actions/checkout@v4
-    - name: add_cross_target
-      run: |
-        rustup target add powerpc-unknown-linux-gnu
-        cargo build --target powerpc-unknown-linux-gnu
+      - uses: actions/checkout@v4
+
+      - name: Install or use cached cross-rs/cross
+        uses: baptiste0928/cargo-install@v1
+        with:
+          crate: cross
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Start Docker (required for cross-rs)
+        run: sudo systemctl start docker
+
+      - name: Cross-Run Tests in powerpc-unknown-linux-gnu using Qemu
+        run: cross test --release --target powerpc-unknown-linux-gnu --verbose -v
   test_all:
     strategy:
       matrix:

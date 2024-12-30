@@ -319,7 +319,7 @@ impl AnimationControl {
 /// This is a simple, high-level interface that will automatically choose
 /// the appropriate DEFLATE compression mode and PNG filter.
 ///
-/// If you need more control over the encoding paramters,
+/// If you need more control over the encoding parameters,
 /// you can set the [DeflateCompression] and [Filter] manually.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]

@@ -823,7 +823,7 @@ impl<W: Write> Writer<W> {
                     compressed
                 }
             }
-            DeflateCompression::Flate2(level) => {
+            DeflateCompression::Level(level) => {
                 let mut current = vec![0; in_len];
 
                 let mut zlib =
@@ -1772,7 +1772,7 @@ mod tests {
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
                 use DeflateCompression::*;
-                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                for compression in [NoCompression, FdeflateUltraFast, Level(4)] {
                     // Encode decoded image
                     let mut out = Vec::new();
                     {
@@ -1830,7 +1830,7 @@ mod tests {
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
                 use DeflateCompression::*;
-                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                for compression in [NoCompression, FdeflateUltraFast, Level(4)] {
                     // Encode decoded image
                     let mut out = Vec::new();
                     {

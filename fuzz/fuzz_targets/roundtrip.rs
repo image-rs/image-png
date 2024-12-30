@@ -30,7 +30,7 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
     // compression
     let compression = match compression {
         0 => png::DeflateCompression::NoCompression,
-        level @ 1..=9 => png::DeflateCompression::Flate2(level),
+        level @ 1..=9 => png::DeflateCompression::Level(level),
         10 => png::DeflateCompression::FdeflateUltraFast,
         _ => return None,
     };

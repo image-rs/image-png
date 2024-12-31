@@ -663,9 +663,9 @@ impl<W: Write> Writer<W> {
     /// Write a raw chunk of PNG data.
     ///
     /// This function calculates the required CRC sum so this should not be included in the input
-    /// `data`, otherwise the data is not filtered in any way. This function panics if the length
-    /// of `data` can't be parsed as a `u32` though the length of the chunk data should not exceed
-    /// `i32::MAX` or 2,147,483,647.
+    /// `data`, otherwise the data is not filtered in any way. This function returns an error if
+    /// the length of `data` can't be parsed as a `u32` though the length of the chunk data should
+    /// not exceed `i32::MAX` or 2,147,483,647.
     pub fn write_chunk(&mut self, name: ChunkType, data: &[u8]) -> Result<()> {
         use std::convert::TryFrom;
 

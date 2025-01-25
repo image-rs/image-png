@@ -180,18 +180,6 @@ pub(crate) enum FormatErrorInner {
     AfterIdat {
         kind: ChunkType,
     },
-    // 4.3., Some chunks must be after PLTE.
-    BeforePlte {
-        kind: ChunkType,
-    },
-    /// 4.3., some chunks must be before PLTE.
-    AfterPlte {
-        kind: ChunkType,
-    },
-    /// 4.3., some chunks must be between PLTE and IDAT.
-    OutsidePlteIdat {
-        kind: ChunkType,
-    },
     /// 4.3., some chunks must be unique.
     DuplicateChunk {
         kind: ChunkType,
@@ -204,21 +192,6 @@ pub(crate) enum FormatErrorInner {
         expected: u32,
     },
     // Errors specific to particular chunk data to be validated.
-    /// The palette did not even contain a single pixel data.
-    ShortPalette {
-        expected: usize,
-        len: usize,
-    },
-    /// sBIT chunk size based on color type.
-    InvalidSbitChunkSize {
-        color_type: ColorType,
-        expected: usize,
-        len: usize,
-    },
-    InvalidSbit {
-        sample_depth: BitDepth,
-        sbit: u8,
-    },
     /// A palletized image did not have a palette.
     PaletteRequired,
     /// The color-depth combination is not valid according to Table 11.1.
@@ -226,7 +199,6 @@ pub(crate) enum FormatErrorInner {
         color_type: ColorType,
         bit_depth: BitDepth,
     },
-    ColorWithBadTrns(ColorType),
     /// The image width or height is zero.
     InvalidDimensions,
     InvalidBitDepth(u8),
@@ -309,33 +281,11 @@ impl fmt::Display for FormatError {
             MissingImageData => write!(fmt, "IDAT or fdAT chunk is missing."),
             ChunkBeforeIhdr { kind } => write!(fmt, "{:?} chunk appeared before IHDR chunk", kind),
             AfterIdat { kind } => write!(fmt, "Chunk {:?} is invalid after IDAT chunk.", kind),
-            BeforePlte { kind } => write!(fmt, "Chunk {:?} is invalid before PLTE chunk.", kind),
-            AfterPlte { kind } => write!(fmt, "Chunk {:?} is invalid after PLTE chunk.", kind),
-            OutsidePlteIdat { kind } => write!(
-                fmt,
-                "Chunk {:?} must appear between PLTE and IDAT chunks.",
-                kind
-            ),
             DuplicateChunk { kind } => write!(fmt, "Chunk {:?} must appear at most once.", kind),
             ApngOrder { present, expected } => write!(
                 fmt,
                 "Sequence is not in order, expected #{} got #{}.",
                 expected, present,
-            ),
-            ShortPalette { expected, len } => write!(
-                fmt,
-                "Not enough palette entries, expect {} got {}.",
-                expected, len
-            ),
-            InvalidSbitChunkSize {color_type, expected, len} => write!(
-                fmt,
-                "The size of the sBIT chunk should be {} byte(s), but {} byte(s) were provided for the {:?} color type.",
-                expected, len, color_type
-            ),
-            InvalidSbit {sample_depth, sbit} => write!(
-                fmt,
-                "Invalid sBIT value {}. It must be greater than zero and less than the sample depth {:?}.",
-                sbit, sample_depth
             ),
             PaletteRequired => write!(fmt, "Missing palette of indexed image."),
             InvalidDimensions => write!(fmt, "Invalid image dimensions"),
@@ -346,11 +296,6 @@ impl fmt::Display for FormatError {
                 fmt,
                 "Invalid color/depth combination in header: {:?}/{:?}",
                 color_type, bit_depth,
-            ),
-            ColorWithBadTrns(color_type) => write!(
-                fmt,
-                "Transparency chunk found for color type {:?}.",
-                color_type
             ),
             InvalidBitDepth(nr) => write!(fmt, "Invalid bit depth {}.", nr),
             InvalidColorType(nr) => write!(fmt, "Invalid color type {}.", nr),
@@ -981,17 +926,17 @@ impl StreamingDecoder {
             chunk::PLTE => self.parse_plte(),
             chunk::tRNS => self.parse_trns(),
             chunk::pHYs => self.parse_phys(),
-            chunk::gAMA => self.parse_gama(),
+            chunk::gAMA => Ok(self.parse_gama()),
             chunk::acTL => self.parse_actl(),
             chunk::fcTL => self.parse_fctl(),
-            chunk::cHRM => self.parse_chrm(),
+            chunk::cHRM => Ok(self.parse_chrm()),
             chunk::sRGB => self.parse_srgb(),
             chunk::cICP => Ok(self.parse_cicp()),
             chunk::mDCV => Ok(self.parse_mdcv()),
             chunk::cLLI => Ok(self.parse_clli()),
             chunk::eXIf => Ok(self.parse_exif()),
             chunk::bKGD => Ok(self.parse_bkgd()),
-            chunk::iCCP if !self.decode_options.ignore_iccp_chunk => self.parse_iccp(),
+            chunk::iCCP if !self.decode_options.ignore_iccp_chunk => Ok(self.parse_iccp()),
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
             chunk::iTXt if !self.decode_options.ignore_text_chunk => self.parse_itxt(),
@@ -1113,83 +1058,49 @@ impl StreamingDecoder {
     }
 
     fn parse_sbit(&mut self) -> Result<Decoded, DecodingError> {
-        let mut parse = || {
-            let info = self.info.as_mut().unwrap();
-            if info.palette.is_some() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::AfterPlte { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            if self.have_idat {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::AfterIdat { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            if info.sbit.is_some() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::DuplicateChunk { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            let (color_type, bit_depth) = { (info.color_type, info.bit_depth) };
+        fn check(raw_bytes: &[u8], color_type: ColorType, bit_depth: BitDepth) -> Result<(), ()> {
             // The sample depth for color type 3 is fixed at eight bits.
             let sample_depth = if color_type == ColorType::Indexed {
                 BitDepth::Eight
             } else {
                 bit_depth
             };
-            self.limits
-                .reserve_bytes(self.current_chunk.raw_bytes.len())?;
-            let vec = self.current_chunk.raw_bytes.clone();
-            let len = vec.len();
 
-            // expected lenth of the chunk
-            let expected = match color_type {
+            // Check if the sbit chunk size is valid.
+            let expected_len = match color_type {
                 ColorType::Grayscale => 1,
                 ColorType::Rgb | ColorType::Indexed => 3,
                 ColorType::GrayscaleAlpha => 2,
                 ColorType::Rgba => 4,
             };
-
-            // Check if the sbit chunk size is valid.
-            if expected != len {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::InvalidSbitChunkSize {
-                        color_type,
-                        expected,
-                        len,
-                    }
-                    .into(),
-                ));
+            if expected_len != raw_bytes.len() {
+                return Err(());
             }
 
-            for sbit in &vec {
+            for sbit in raw_bytes {
                 if *sbit < 1 || *sbit > sample_depth as u8 {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::InvalidSbit {
-                            sample_depth,
-                            sbit: *sbit,
-                        }
-                        .into(),
-                    ));
+                    return Err(());
                 }
             }
-            info.sbit = Some(Cow::Owned(vec));
-            Ok(Decoded::Nothing)
-        };
+            Ok(())
+        }
 
-        parse().ok();
+        let info = self.info.as_mut().unwrap();
+        if info.palette.is_none() && !self.have_idat && info.sbit.is_none() {
+            let raw_bytes = self.current_chunk.raw_bytes.as_slice();
+            if check(raw_bytes, info.color_type, info.bit_depth).is_ok() {
+                self.limits.reserve_bytes(raw_bytes.len())?;
+                info.sbit = Some(Cow::Owned(raw_bytes.to_vec()));
+            }
+        }
         Ok(Decoded::Nothing)
     }
 
     fn parse_trns(&mut self) -> Result<Decoded, DecodingError> {
         let info = self.info.as_mut().unwrap();
         if info.trns.is_some() {
-            return Err(DecodingError::Format(
-                FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
-            ));
+            // Mimicking how `png_handle_tRNS` in `libpng` treats this as a benign error.
+            return Ok(Decoded::Nothing);
         }
         let (color_type, bit_depth) = { (info.color_type, info.bit_depth as u8) };
         self.limits
@@ -1199,9 +1110,8 @@ impl StreamingDecoder {
         match color_type {
             ColorType::Grayscale => {
                 if len < 2 {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::ShortPalette { expected: 2, len }.into(),
-                    ));
+                    // Mimicking how `png_handle_tRNS` in `libpng` treats this as a benign error.
+                    return Ok(Decoded::Nothing);
                 }
                 if bit_depth < 16 {
                     vec[0] = vec[1];
@@ -1212,9 +1122,8 @@ impl StreamingDecoder {
             }
             ColorType::Rgb => {
                 if len < 6 {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::ShortPalette { expected: 6, len }.into(),
-                    ));
+                    // Mimicking how `png_handle_tRNS` in `libpng` treats this as a benign error.
+                    return Ok(Decoded::Nothing);
                 }
                 if bit_depth < 16 {
                     vec[0] = vec[1];
@@ -1228,35 +1137,23 @@ impl StreamingDecoder {
             ColorType::Indexed => {
                 // The transparency chunk must be after the palette chunk and
                 // before the data chunk.
-                if info.palette.is_none() {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::BeforePlte { kind: chunk::tRNS }.into(),
-                    ));
-                } else if self.have_idat {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::OutsidePlteIdat { kind: chunk::tRNS }.into(),
-                    ));
+                if info.palette.is_some() && !self.have_idat {
+                    info.trns = Some(Cow::Owned(vec));
                 }
-
-                info.trns = Some(Cow::Owned(vec));
                 Ok(Decoded::Nothing)
             }
-            c => Err(DecodingError::Format(
-                FormatErrorInner::ColorWithBadTrns(c).into(),
-            )),
+            _ => {
+                // Mimicking how `png_handle_tRNS` in `libpng` treats this as a benign error.
+                Ok(Decoded::Nothing)
+            }
         }
     }
 
     fn parse_phys(&mut self) -> Result<Decoded, DecodingError> {
         let info = self.info.as_mut().unwrap();
-        if self.have_idat {
-            Err(DecodingError::Format(
-                FormatErrorInner::AfterIdat { kind: chunk::pHYs }.into(),
-            ))
-        } else if info.pixel_dims.is_some() {
-            Err(DecodingError::Format(
-                FormatErrorInner::DuplicateChunk { kind: chunk::pHYs }.into(),
-            ))
+        if self.have_idat || info.pixel_dims.is_some() {
+            // Mimicking how `png_handle_pHYs` in `libpng` handles these scenarios.
+            Ok(Decoded::Nothing)
         } else {
             let mut buf = &self.current_chunk.raw_bytes[..];
             let xppu = buf.read_be()?;
@@ -1276,26 +1173,18 @@ impl StreamingDecoder {
         }
     }
 
-    fn parse_chrm(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_chrm(&mut self) -> Decoded {
         let info = self.info.as_mut().unwrap();
-        if self.have_idat {
-            Err(DecodingError::Format(
-                FormatErrorInner::AfterIdat { kind: chunk::cHRM }.into(),
-            ))
-        } else if info.chrm_chunk.is_some() {
-            Err(DecodingError::Format(
-                FormatErrorInner::DuplicateChunk { kind: chunk::cHRM }.into(),
-            ))
-        } else {
-            let mut buf = &self.current_chunk.raw_bytes[..];
-            let white_x: u32 = buf.read_be()?;
-            let white_y: u32 = buf.read_be()?;
-            let red_x: u32 = buf.read_be()?;
-            let red_y: u32 = buf.read_be()?;
-            let green_x: u32 = buf.read_be()?;
-            let green_y: u32 = buf.read_be()?;
-            let blue_x: u32 = buf.read_be()?;
-            let blue_y: u32 = buf.read_be()?;
+        let mut buf = &self.current_chunk.raw_bytes[..];
+        if !self.have_idat && info.chrm_chunk.is_none() && buf.len() >= 32 {
+            let white_x: u32 = buf.read_be().unwrap();
+            let white_y: u32 = buf.read_be().unwrap();
+            let red_x: u32 = buf.read_be().unwrap();
+            let red_y: u32 = buf.read_be().unwrap();
+            let green_x: u32 = buf.read_be().unwrap();
+            let green_y: u32 = buf.read_be().unwrap();
+            let blue_x: u32 = buf.read_be().unwrap();
+            let blue_y: u32 = buf.read_be().unwrap();
 
             let source_chromaticities = SourceChromaticities {
                 white: (
@@ -1317,51 +1206,35 @@ impl StreamingDecoder {
             };
 
             info.chrm_chunk = Some(source_chromaticities);
-            Ok(Decoded::Nothing)
         }
+        Decoded::Nothing
     }
 
-    fn parse_gama(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_gama(&mut self) -> Decoded {
         let info = self.info.as_mut().unwrap();
-        if self.have_idat {
-            Err(DecodingError::Format(
-                FormatErrorInner::AfterIdat { kind: chunk::gAMA }.into(),
-            ))
-        } else if info.gama_chunk.is_some() {
-            Err(DecodingError::Format(
-                FormatErrorInner::DuplicateChunk { kind: chunk::gAMA }.into(),
-            ))
-        } else {
-            let mut buf = &self.current_chunk.raw_bytes[..];
-            let source_gamma: u32 = buf.read_be()?;
+        let mut buf = &self.current_chunk.raw_bytes[..];
+        if !self.have_idat && info.gama_chunk.is_none() && buf.len() >= 4 {
+            let source_gamma: u32 = buf.read_be().unwrap();
             let source_gamma = ScaledFloat::from_scaled(source_gamma);
 
             info.gama_chunk = Some(source_gamma);
-            Ok(Decoded::Nothing)
         }
+        Decoded::Nothing
     }
 
     fn parse_srgb(&mut self) -> Result<Decoded, DecodingError> {
         let info = self.info.as_mut().unwrap();
-        if self.have_idat {
-            Err(DecodingError::Format(
-                FormatErrorInner::AfterIdat { kind: chunk::acTL }.into(),
-            ))
-        } else if info.srgb.is_some() {
-            Err(DecodingError::Format(
-                FormatErrorInner::DuplicateChunk { kind: chunk::sRGB }.into(),
-            ))
-        } else {
-            let mut buf = &self.current_chunk.raw_bytes[..];
-            let raw: u8 = buf.read_be()?; // BE is is nonsense for single bytes, but this way the size is checked.
+        let buf = &self.current_chunk.raw_bytes[..];
+        if !self.have_idat && info.srgb.is_none() && buf.len() >= 1 {
+            let raw = buf[0];
             let rendering_intent = crate::SrgbRenderingIntent::from_raw(raw).ok_or_else(|| {
                 FormatError::from(FormatErrorInner::InvalidSrgbRenderingIntent(raw))
             })?;
 
             // Set srgb and override source gamma and chromaticities.
             info.srgb = Some(rendering_intent);
-            Ok(Decoded::Nothing)
         }
+        Ok(Decoded::Nothing)
     }
 
     // NOTE: This function cannot return `DecodingError` and handles parsing
@@ -1498,29 +1371,12 @@ impl StreamingDecoder {
         Decoded::Nothing
     }
 
-    fn parse_iccp(&mut self) -> Result<Decoded, DecodingError> {
-        if self.have_idat {
-            Err(DecodingError::Format(
-                FormatErrorInner::AfterIdat { kind: chunk::iCCP }.into(),
-            ))
-        } else if self.have_iccp {
-            // We have already encountered an iCCP chunk before.
-            //
-            // Section "4.2.2.4. iCCP Embedded ICC profile" of the spec says:
-            //   > A file should contain at most one embedded profile,
-            //   > whether explicit like iCCP or implicit like sRGB.
-            // but
-            //   * This is a "should", not a "must"
-            //   * The spec also says that "All ancillary chunks are optional, in the sense that
-            //     [...] decoders can ignore them."
-            //   * The reference implementation (libpng) ignores the subsequent iCCP chunks
-            //     (treating them as a benign error).
-            Ok(Decoded::Nothing)
-        } else {
+    fn parse_iccp(&mut self) -> Decoded {
+        if !self.have_idat && !self.have_iccp {
             self.have_iccp = true;
             let _ = self.parse_iccp_raw();
-            Ok(Decoded::Nothing)
         }
+        Decoded::Nothing
     }
 
     fn parse_iccp_raw(&mut self) -> Result<(), DecodingError> {
@@ -2075,7 +1931,10 @@ mod tests {
             let decoder = crate::Decoder::new(File::open(path).unwrap());
             let reader = decoder.read_info().unwrap();
             let actual: Option<Cow<[u8]>> = reader.info().sbit.clone();
-            assert!(actual == expected);
+            assert!(
+                actual == expected,
+                "actual={actual:?} != expected={expected:?} for path={path}"
+            );
         }
 
         trial("tests/sbit/g.png", Some(Cow::Owned(vec![5u8])));

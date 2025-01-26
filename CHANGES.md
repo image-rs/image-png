@@ -1,3 +1,15 @@
+## 0.17.16
+
+* Make gAMA and cHRM fallback optional for sRGB ([#547])
+* Pass through nightly feature to crc32fast crate to get SIMD crc32 on Aarch64 ([#545])
+* Fix bug in iCCP chunk encoding ([#458])
+* Deprecate Info::encode ([#550])
+
+[#545]: https://github.com/image-rs/image-png/pull/545
+[#458]: https://github.com/image-rs/image-png/pull/548
+[#550]: https://github.com/image-rs/image-png/pull/550
+[#547]: https://github.com/image-rs/image-png/pull/547
+
 ## 0.17.15
 
 ### Added
@@ -7,7 +19,7 @@
 * Add support for parsing the sBIT chunk ([#524])
 * Add support for parsing the bKGD chunk ([#538])
 * Add support for parsing the cICP chunk ([#529])
-* Add support for parsing mDCv and cLLi chunks ([#528], ([#543]))
+* Add support for parsing mDCV and cLLI chunks ([#528], ([#543]))
 
 ### Changed
 

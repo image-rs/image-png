@@ -1831,7 +1831,7 @@ mod tests {
     use super::ScaledFloat;
     use super::SourceChromaticities;
     use crate::test_utils::*;
-    use crate::{Decoder, DecodingError, Reader};
+    use crate::{Decoder, DecodingError, Reader, SrgbRenderingIntent, Unit};
     use approx::assert_relative_eq;
     use byteorder::WriteBytesExt;
     use std::borrow::Cow;
@@ -2128,6 +2128,43 @@ mod tests {
     }
 
     #[test]
+    fn test_phys_roundtrip() {
+        let mut info = crate::Info::with_size(1, 1);
+        info.pixel_dims = Some(crate::PixelDimensions {
+            xppu: 12,
+            yppu: 34,
+            unit: Unit::Meter,
+        });
+        let mut encoded_image = Vec::new();
+        let enc = crate::Encoder::with_info(&mut encoded_image, info).unwrap();
+        let mut enc = enc.write_header().unwrap();
+        enc.write_image_data(&[0]).unwrap();
+        enc.finish().unwrap();
+
+        let dec = crate::Decoder::new(encoded_image.as_slice());
+        let dec = dec.read_info().unwrap();
+        let phys = dec.info().pixel_dims.as_ref().unwrap();
+        assert_eq!(phys.xppu, 12);
+        assert_eq!(phys.yppu, 34);
+        assert_eq!(phys.unit, Unit::Meter);
+    }
+
+    #[test]
+    fn test_srgb_roundtrip() {
+        let mut info = crate::Info::with_size(1, 1);
+        info.srgb = Some(SrgbRenderingIntent::Saturation);
+        let mut encoded_image = Vec::new();
+        let enc = crate::Encoder::with_info(&mut encoded_image, info).unwrap();
+        let mut enc = enc.write_header().unwrap();
+        enc.write_image_data(&[0]).unwrap();
+        enc.finish().unwrap();
+
+        let dec = crate::Decoder::new(encoded_image.as_slice());
+        let dec = dec.read_info().unwrap();
+        assert_eq!(dec.info().srgb.unwrap(), SrgbRenderingIntent::Saturation);
+    }
+
+    #[test]
     fn test_png_with_broken_iccp() {
         let decoder = crate::Decoder::new(File::open("tests/iccp/broken_iccp.png").unwrap());
         assert!(decoder.read_info().is_ok());
@@ -2136,9 +2173,9 @@ mod tests {
         assert!(decoder.read_info().is_ok());
     }
 
-    /// Test handling of `mDCV` and `cLLI` chunks.
+    /// Test handling of `cICP`, `mDCV`, and `cLLI` chunks.
     #[test]
-    fn test_mdcv_and_clli_chunks() {
+    fn test_cicp_mdcv_and_clli_chunks() {
         let decoder = crate::Decoder::new(File::open("tests/bugfixes/cicp_pq.png").unwrap());
         let reader = decoder.read_info().unwrap();
         let info = reader.info();

@@ -784,7 +784,15 @@ impl<W: Write> Writer<W> {
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
 
-        let zlib_encoded = match self.options.compression {
+        #[allow(unused_mut)]
+        let mut compression = self.options.compression;
+
+        #[cfg(feature = "flate2")]
+        if let DeflateCompression::Flate2(level) = compression {
+            compression = DeflateCompression::Level(level);
+        }
+
+        let zlib_encoded = match compression {
             DeflateCompression::NoCompression => {
                 let mut compressor =
                     fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
@@ -825,7 +833,7 @@ impl<W: Write> Writer<W> {
                     compressed
                 }
             }
-            DeflateCompression::Flate2(level) => {
+            DeflateCompression::Level(level) => {
                 let mut current = vec![0; in_len];
 
                 let mut zlib =
@@ -838,6 +846,10 @@ impl<W: Write> Writer<W> {
                     prev = line;
                 }
                 zlib.finish()?
+            }
+            #[cfg(feature = "flate2")]
+            DeflateCompression::Flate2(level) => {
+                unreachable!("Flate2 is handled by the Level variant")
             }
         };
 
@@ -1774,7 +1786,7 @@ mod tests {
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
                 use DeflateCompression::*;
-                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                for compression in [NoCompression, FdeflateUltraFast, Level(4)] {
                     // Encode decoded image
                     let mut out = Vec::new();
                     {
@@ -1832,7 +1844,7 @@ mod tests {
                 let mut buf = vec![0; reader.output_buffer_size()];
                 let info = reader.next_frame(&mut buf).unwrap();
                 use DeflateCompression::*;
-                for compression in [NoCompression, FdeflateUltraFast, Flate2(4)] {
+                for compression in [NoCompression, FdeflateUltraFast, Level(4)] {
                     // Encode decoded image
                     let mut out = Vec::new();
                     {

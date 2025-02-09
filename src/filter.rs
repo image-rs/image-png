@@ -346,7 +346,7 @@ fn filter_paeth_stbi(a: u8, b: u8, c: u8) -> u8 {
     let hi = a.max(b);
     let t0 = if hi as i16 <= thresh { lo } else { c };
     let t1 = if thresh <= lo as i16 { hi } else { t0 };
-    return t1;
+    t1
 }
 
 #[cfg(any(test, all(feature = "unstable", target_arch = "x86_64")))]

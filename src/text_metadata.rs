@@ -5,9 +5,9 @@
 //! chunks. There are three kinds of text chunks.
 //!  -   `tEXt`: This has a `keyword` and `text` field, and is ISO 8859-1 encoded.
 //!  -   `zTXt`: This is semantically the same as `tEXt`, i.e. it has the same fields and
-//!       encoding, but the `text` field is compressed before being written into the PNG file.
+//!      encoding, but the `text` field is compressed before being written into the PNG file.
 //!  -   `iTXt`: This chunk allows for its `text` field to be any valid UTF-8, and supports
-//!        compression of the text field as well.
+//!      compression of the text field as well.
 //!
 //!  The `ISO 8859-1` encoding technically doesn't allow any control characters
 //!  to be used, but in practice these values are encountered anyway. This can

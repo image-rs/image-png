@@ -975,7 +975,7 @@ impl StreamingDecoder {
 
     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
         self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
-        let parse_result = match type_str {
+        let mut parse_result = match type_str {
             IHDR => self.parse_ihdr(),
             chunk::sBIT => self.parse_sbit(),
             chunk::PLTE => self.parse_plte(),
@@ -998,8 +998,7 @@ impl StreamingDecoder {
             _ => Ok(Decoded::PartialChunk(type_str)),
         };
 
-        parse_result.map_err(|e| {
-            self.state = None;
+        parse_result = parse_result.map_err(|e| {
             match e {
                 // `parse_chunk` is invoked after gathering **all** bytes of a chunk, so
                 // `UnexpectedEof` from something like `read_be` is permanent and indicates an
@@ -1012,7 +1011,37 @@ impl StreamingDecoder {
                 }
                 e => e,
             }
-        })
+        });
+
+        // Ignore benign errors in some auxiliary chunks.  `LimitsExceeded`, `Parameter`
+        // and other error kinds are *not* treated as benign.  We only ignore errors in *some*
+        // auxiliary chunks (i.e. we don't use `chunk::is_critical`), because for chunks like
+        // `fcTL` or `fdAT` the fallback to the static/non-animated image has to be implemented
+        // *on top* of the `StreamingDecoder` API.
+        //
+        // TODO: Consider supporting a strict mode where even benign errors are reported up.
+        // See https://github.com/image-rs/image-png/pull/569#issuecomment-2642062285
+        if matches!(parse_result.as_ref(), Err(DecodingError::Format(_)))
+            && matches!(
+                type_str,
+                chunk::cHRM
+                    | chunk::gAMA
+                    | chunk::iCCP
+                    | chunk::pHYs
+                    | chunk::sBIT
+                    | chunk::sRGB
+                    | chunk::tRNS
+            )
+        {
+            parse_result = Ok(Decoded::Nothing);
+        }
+
+        // Clear the parsing state to enforce that parsing can't continue after an error.
+        if parse_result.is_err() {
+            self.state = None;
+        }
+
+        parse_result
     }
 
     fn parse_fctl(&mut self) -> Result<Decoded, DecodingError> {
@@ -1113,74 +1142,69 @@ impl StreamingDecoder {
     }
 
     fn parse_sbit(&mut self) -> Result<Decoded, DecodingError> {
-        let mut parse = || {
-            let info = self.info.as_mut().unwrap();
-            if info.palette.is_some() {
+        let info = self.info.as_mut().unwrap();
+        if info.palette.is_some() {
+            return Err(DecodingError::Format(
+                FormatErrorInner::AfterPlte { kind: chunk::sBIT }.into(),
+            ));
+        }
+
+        if self.have_idat {
+            return Err(DecodingError::Format(
+                FormatErrorInner::AfterIdat { kind: chunk::sBIT }.into(),
+            ));
+        }
+
+        if info.sbit.is_some() {
+            return Err(DecodingError::Format(
+                FormatErrorInner::DuplicateChunk { kind: chunk::sBIT }.into(),
+            ));
+        }
+
+        let (color_type, bit_depth) = { (info.color_type, info.bit_depth) };
+        // The sample depth for color type 3 is fixed at eight bits.
+        let sample_depth = if color_type == ColorType::Indexed {
+            BitDepth::Eight
+        } else {
+            bit_depth
+        };
+        self.limits
+            .reserve_bytes(self.current_chunk.raw_bytes.len())?;
+        let vec = self.current_chunk.raw_bytes.clone();
+        let len = vec.len();
+
+        // expected lenth of the chunk
+        let expected = match color_type {
+            ColorType::Grayscale => 1,
+            ColorType::Rgb | ColorType::Indexed => 3,
+            ColorType::GrayscaleAlpha => 2,
+            ColorType::Rgba => 4,
+        };
+
+        // Check if the sbit chunk size is valid.
+        if expected != len {
+            return Err(DecodingError::Format(
+                FormatErrorInner::InvalidSbitChunkSize {
+                    color_type,
+                    expected,
+                    len,
+                }
+                .into(),
+            ));
+        }
+
+        for sbit in &vec {
+            if *sbit < 1 || *sbit > sample_depth as u8 {
                 return Err(DecodingError::Format(
-                    FormatErrorInner::AfterPlte { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            if self.have_idat {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::AfterIdat { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            if info.sbit.is_some() {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::DuplicateChunk { kind: chunk::sBIT }.into(),
-                ));
-            }
-
-            let (color_type, bit_depth) = { (info.color_type, info.bit_depth) };
-            // The sample depth for color type 3 is fixed at eight bits.
-            let sample_depth = if color_type == ColorType::Indexed {
-                BitDepth::Eight
-            } else {
-                bit_depth
-            };
-            self.limits
-                .reserve_bytes(self.current_chunk.raw_bytes.len())?;
-            let vec = self.current_chunk.raw_bytes.clone();
-            let len = vec.len();
-
-            // expected lenth of the chunk
-            let expected = match color_type {
-                ColorType::Grayscale => 1,
-                ColorType::Rgb | ColorType::Indexed => 3,
-                ColorType::GrayscaleAlpha => 2,
-                ColorType::Rgba => 4,
-            };
-
-            // Check if the sbit chunk size is valid.
-            if expected != len {
-                return Err(DecodingError::Format(
-                    FormatErrorInner::InvalidSbitChunkSize {
-                        color_type,
-                        expected,
-                        len,
+                    FormatErrorInner::InvalidSbit {
+                        sample_depth,
+                        sbit: *sbit,
                     }
                     .into(),
                 ));
             }
-
-            for sbit in &vec {
-                if *sbit < 1 || *sbit > sample_depth as u8 {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::InvalidSbit {
-                            sample_depth,
-                            sbit: *sbit,
-                        }
-                        .into(),
-                    ));
-                }
-            }
-            info.sbit = Some(Cow::Owned(vec));
-            Ok(Decoded::Nothing)
-        };
-
-        parse().ok();
+        }
+        info.sbit = Some(Cow::Owned(vec));
         Ok(Decoded::Nothing)
     }
 
@@ -2962,5 +2986,29 @@ mod tests {
             "Unexpected kind of error: {:?}",
             &err,
         );
+    }
+
+    #[test]
+    fn test_incorrect_trns_chunk_is_ignored() {
+        let png = {
+            let mut png = Vec::new();
+            write_png_sig(&mut png);
+            write_rgba8_ihdr_with_width(&mut png, 8);
+            write_chunk(&mut png, b"tRNS", &[12, 34, 56]);
+            write_chunk(
+                &mut png,
+                b"IDAT",
+                &generate_rgba8_with_width_and_height(8, 8),
+            );
+            write_iend(&mut png);
+            png
+        };
+        let decoder = Decoder::new(png.as_slice());
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        assert!(reader.info().trns.is_none());
+        reader.next_frame(&mut buf).unwrap();
+        assert_eq!(3093270825, crc32fast::hash(&buf));
+        assert!(reader.info().trns.is_none());
     }
 }

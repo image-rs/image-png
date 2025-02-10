@@ -378,11 +378,15 @@ pub enum DeflateCompression {
     /// while still providing a decent compression ratio.
     FdeflateUltraFast,
 
-    /// Uses [flate2](https://crates.io/crates/flate2) crate with the specified [compression level](flate2::Compression::new).
+    /// Compression level between 1 and 9, where higher values mean better compression at the cost of
+    /// speed.
     ///
-    /// Flate2 has several backends that make different trade-offs.
-    /// See the flate2 documentation for the available backends for more information.
-    Flate2(u8),
+    /// This is currently implemented via [flate2](https://crates.io/crates/flate2) crate
+    /// by passing through the [compression level](flate2::Compression::new).
+    ///
+    /// The implementation details and the exact meaning of each level may change in the future,
+    /// including in semver-compatible releases.
+    Level(u8),
     // Other variants can be added in the future
 }
 
@@ -398,8 +402,8 @@ impl DeflateCompression {
             Compression::NoCompression => Self::NoCompression,
             Compression::Fastest => Self::FdeflateUltraFast,
             Compression::Fast => Self::FdeflateUltraFast,
-            Compression::Balanced => Self::Flate2(flate2::Compression::default().level() as u8),
-            Compression::High => Self::Flate2(flate2::Compression::best().level() as u8),
+            Compression::Balanced => Self::Level(flate2::Compression::default().level() as u8),
+            Compression::High => Self::Level(flate2::Compression::best().level() as u8),
         }
     }
 
@@ -407,7 +411,7 @@ impl DeflateCompression {
         match self {
             DeflateCompression::NoCompression => flate2::Compression::none(),
             DeflateCompression::FdeflateUltraFast => flate2::Compression::new(1),
-            DeflateCompression::Flate2(level) => flate2::Compression::new(u32::from(*level)),
+            DeflateCompression::Level(level) => flate2::Compression::new(u32::from(*level)),
         }
     }
 }

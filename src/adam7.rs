@@ -226,10 +226,38 @@ pub fn expand_pass(
         let bytes_pp = bits_pp / 8;
 
         for (bitpos, px) in bit_indices.zip(interlaced_row.chunks(bytes_pp)) {
-            for (offset, val) in px.iter().enumerate() {
-                img[bitpos / 8 + offset] = *val;
-            }
+            let start_byte = bitpos / 8;
+            splat_expand(img, interlace_info, start_byte, px, img_row_stride, bytes_pp);
         }
+    }
+}
+
+fn copy_n_bytes_m_times(dst: &mut [u8], src: &[u8], n: usize, m: usize) {
+    assert!(n * m <= dst.len(), "Destination buffer is too small!");
+
+    for i in 0..m {
+        let start = i * n;
+        let end = start + n;
+        dst[start..end].copy_from_slice(src);
+    }
+}
+
+fn splat_expand(img: &mut [u8], interlace_info: &Adam7Info, start_byte: usize, px: &[u8], img_row_stride: usize, bytes_pp: usize) {
+    // Pairs are (x_wide_copy, y_wide_copy)
+    static COPY: &[(usize, usize)] = &[
+        (8, 8),
+        (4, 8),
+        (4, 4),
+        (2, 4),
+        (2, 2),
+        (1, 2),
+        (1, 1)
+    ];
+
+    let (x_repeat, y_repeat) = COPY[interlace_info.pass as usize - 1];
+    for i in 0..y_repeat {
+        let offset = start_byte + i * img_row_stride;
+        copy_n_bytes_m_times(&mut img[offset..], px, bytes_pp, x_repeat);
     }
 }
 

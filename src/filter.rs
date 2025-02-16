@@ -804,11 +804,9 @@ pub(crate) fn unfilter(
                     }
                 }
                 BytesPerPixel::Four => {
-                    #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
-                    {
-                        simd::unfilter_paeth_u8::<4>(previous, current);
-                        return;
-                    }
+                    // Using the `simd` module here has no effect on Linux
+                    // and appears to regress performance on Windows, so we don't use it here.
+                    // See https://github.com/image-rs/image-png/issues/567
 
                     let mut a_bpp = [0; 4];
                     let mut c_bpp = [0; 4];

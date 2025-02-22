@@ -2170,7 +2170,7 @@ mod tests {
         enc.write_image_data(&[0]).unwrap();
         enc.finish().unwrap();
 
-        let dec = crate::Decoder::new(encoded_image.as_slice());
+        let dec = crate::Decoder::new(Cursor::new(&encoded_image));
         let dec = dec.read_info().unwrap();
         let phys = dec.info().pixel_dims.as_ref().unwrap();
         assert_eq!(phys.xppu, 12);
@@ -2188,7 +2188,7 @@ mod tests {
         enc.write_image_data(&[0]).unwrap();
         enc.finish().unwrap();
 
-        let dec = crate::Decoder::new(encoded_image.as_slice());
+        let dec = crate::Decoder::new(Cursor::new(&encoded_image));
         let dec = dec.read_info().unwrap();
         assert_eq!(dec.info().srgb.unwrap(), SrgbRenderingIntent::Saturation);
     }
@@ -2241,8 +2241,9 @@ mod tests {
     /// Test handling of `eXIf` chunk.
     #[test]
     fn test_exif_chunk() {
-        let decoder =
-            crate::Decoder::new(File::open("tests/bugfixes/F-exif-chunk-early.png").unwrap());
+        let decoder = crate::Decoder::new(BufReader::new(
+            File::open("tests/bugfixes/F-exif-chunk-early.png").unwrap(),
+        ));
         let reader = decoder.read_info().unwrap();
         let info = reader.info();
         let exif = info.exif_metadata.as_ref().unwrap().as_ref();
@@ -3043,7 +3044,7 @@ mod tests {
             write_iend(&mut png);
             png
         };
-        let decoder = Decoder::new(png.as_slice());
+        let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size()];
         assert!(reader.info().trns.is_none());

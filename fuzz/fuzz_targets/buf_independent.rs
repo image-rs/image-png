@@ -26,28 +26,45 @@
 use libfuzzer_sys::fuzz_target;
 
 use std::fmt::Debug;
-use std::io::Read;
+use std::io::{BufRead, Seek, Cursor};
 
 mod smal_buf {
+    use std::io::{BufRead, Read, Seek, Cursor};
 
-    use std::io::Read;
-
-    /// A reader that reads at most `n` bytes.
-    pub struct SmalBuf<R: Read> {
-        inner: R,
-        cap: usize,
+    /// A reader that returns at most 1 byte in a single call to `read`.
+    pub struct SmalBuf {
+        inner: Cursor<Vec<u8>>,
     }
 
-    impl<R: Read> SmalBuf<R> {
-        pub fn new(inner: R, cap: usize) -> Self {
-            SmalBuf { inner, cap }
+    impl SmalBuf {
+        pub fn new(inner: Vec<u8>) -> Self {
+            SmalBuf {
+                inner: Cursor::new(inner),
+            }
         }
     }
 
-    impl<R: Read> Read for SmalBuf<R> {
+    impl Read for SmalBuf {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let len = buf.len().min(self.cap);
-            self.inner.read(&mut buf[..len])
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            self.inner.read(&mut buf[..1])
+        }
+    }
+    impl BufRead for SmalBuf {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            let buf = self.inner.fill_buf()?;
+            Ok(&buf[..buf.len().min(1)])
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.inner.consume(amt);
+        }
+    }
+    impl Seek for SmalBuf {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
         }
     }
 }
@@ -55,12 +72,12 @@ mod smal_buf {
 mod intermittent_eofs {
 
     use std::cell::Cell;
-    use std::io::Read;
+    use std::io::{BufRead, Read, Seek};
     use std::rc::Rc;
 
     /// A reader that returns `std::io::ErrorKind::UnexpectedEof` errors in every other read.
     /// EOFs can be temporarily disabled and re-enabled later using the associated `EofController`.
-    pub struct IntermittentEofs<R: Read> {
+    pub struct IntermittentEofs<R: BufRead + Seek> {
         inner: R,
 
         /// Controls whether intermittent EOFs happen at all.
@@ -71,7 +88,7 @@ mod intermittent_eofs {
         eof_soon: bool,
     }
 
-    impl<R: Read> IntermittentEofs<R> {
+    impl<R: BufRead + Seek> IntermittentEofs<R> {
         pub fn new(inner: R) -> Self {
             Self {
                 inner,
@@ -85,7 +102,7 @@ mod intermittent_eofs {
         }
     }
 
-    impl<R: Read> Read for IntermittentEofs<R> {
+    impl<R: BufRead + Seek> Read for IntermittentEofs<R> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.controller.are_intermittent_eofs_enabled() && self.eof_soon {
                 self.eof_soon = false;
@@ -99,6 +116,20 @@ mod intermittent_eofs {
             }
 
             inner_result
+        }
+    }
+    impl<R: BufRead + Seek> BufRead for IntermittentEofs<R> {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.inner.fill_buf()
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.inner.consume(amt);
+        }
+    }
+    impl<R: BufRead + Seek> Seek for IntermittentEofs<R> {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
         }
     }
 
@@ -141,15 +172,19 @@ fuzz_target!(|data: &[u8]| {
     let _ = test_data(data);
 });
 
+trait BufReadSeek: BufRead + Seek {}
+impl<T> BufReadSeek for T where T: BufRead + Seek {}
+
 #[inline(always)]
 fn test_data<'a>(data: &'a [u8]) -> Result<(), ()> {
-    let baseline_reader = Box::new(data);
-    let byte_by_byte_reader = Box::new(smal_buf::SmalBuf::new(data, 1));
+
+    let baseline_reader = Box::new(Cursor::new(data));
+    let byte_by_byte_reader = Box::new(smal_buf::SmalBuf::new(data.to_owned()));
     let intermittent_eofs_reader = Box::new(intermittent_eofs::IntermittentEofs::new(
-        smal_buf::SmalBuf::new(data, 1),
+        smal_buf::SmalBuf::new(data.to_owned()),
     ));
     let intermittent_eofs_controller = intermittent_eofs_reader.controller();
-    let data_readers: Vec<Box<dyn Read + 'a>> = vec![
+    let data_readers: Vec<Box<dyn BufReadSeek + 'a>> = vec![
         baseline_reader,
         byte_by_byte_reader,
         intermittent_eofs_reader,
@@ -196,8 +231,14 @@ fn test_data<'a>(data: &'a [u8]) -> Result<(), ()> {
             .zip(buffers.iter_mut())
             .enumerate()
             .map(|(i, (png_reader, buffer))| {
-                let eof_controller = if i == 2 { Some(&intermittent_eofs_controller) } else { None };
-                retry_after_eofs(eof_controller, || png_reader.next_frame(buffer.as_mut_slice()))
+                let eof_controller = if i == 2 {
+                    Some(&intermittent_eofs_controller)
+                } else {
+                    None
+                };
+                retry_after_eofs(eof_controller, || {
+                    png_reader.next_frame(buffer.as_mut_slice())
+                })
             })
             .assert_all_results_are_consistent()
             .collect::<Result<Vec<_>, _>>()
@@ -222,7 +263,7 @@ fn retry_after_eofs<T>(
                         }
                     }
                 }
-            },
+            }
             _ => (),
         }
         break result;

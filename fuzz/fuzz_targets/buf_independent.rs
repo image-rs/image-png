@@ -26,10 +26,10 @@
 use libfuzzer_sys::fuzz_target;
 
 use std::fmt::Debug;
-use std::io::{BufRead, Seek, Cursor};
+use std::io::{BufRead, BufReader, Cursor, Seek};
 
 mod smal_buf {
-    use std::io::{BufRead, Read, Seek, Cursor};
+    use std::io::{BufRead, Cursor, Read, Seek};
 
     /// A reader that returns at most 1 byte in a single call to `read`.
     pub struct SmalBuf {
@@ -177,17 +177,19 @@ impl<T> BufReadSeek for T where T: BufRead + Seek {}
 
 #[inline(always)]
 fn test_data<'a>(data: &'a [u8]) -> Result<(), ()> {
-
     let baseline_reader = Box::new(Cursor::new(data));
     let byte_by_byte_reader = Box::new(smal_buf::SmalBuf::new(data.to_owned()));
     let intermittent_eofs_reader = Box::new(intermittent_eofs::IntermittentEofs::new(
         smal_buf::SmalBuf::new(data.to_owned()),
     ));
     let intermittent_eofs_controller = intermittent_eofs_reader.controller();
-    let data_readers: Vec<Box<dyn BufReadSeek + 'a>> = vec![
-        baseline_reader,
-        byte_by_byte_reader,
-        intermittent_eofs_reader,
+
+    // `Decoder` used to internally wrap the provided reader with a `BufReader`. Now that it has
+    // been removed, fuzzing would be far too slow if we didn't use a BufReader here.
+    let data_readers: Vec<BufReader<Box<dyn BufReadSeek>>> = vec![
+        BufReader::new(baseline_reader),
+        BufReader::new(byte_by_byte_reader),
+        BufReader::new(intermittent_eofs_reader),
     ];
 
     let decoders = data_readers

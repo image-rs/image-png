@@ -1,3 +1,18 @@
+## 0.18.0
+
+### API Breaking Changes
+
+* Removed deprecated `Info::encode` method.
+* Improved the compression settings API.
+* `Decoder` now requires a reader that implements `Seek` and `BufRead` traits.
+* Bump bitflags dependency to 2.0.
+
+### Other additions
+
+* Added `Reader::read_row` method.
+* Add support for parsing eXIf chunk.
+* Treat most auxiliary chunk errors as benign.
+
 ## 0.17.16
 
 * Make gAMA and cHRM fallback optional for sRGB ([#547])

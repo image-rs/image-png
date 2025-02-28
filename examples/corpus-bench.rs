@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io::Cursor, path::PathBuf};
 
 use clap::Parser;
 use png::Decoder;
@@ -62,7 +62,7 @@ fn run_encode(
 
 #[inline(never)]
 fn run_decode(image: &[u8], output: &mut [u8]) {
-    let mut reader = Decoder::new(image).read_info().unwrap();
+    let mut reader = Decoder::new(Cursor::new(image)).read_info().unwrap();
     reader.next_frame(output).unwrap();
 }
 
@@ -107,7 +107,7 @@ fn main() {
 
             // Parse
             let data = fs::read(entry.path()).unwrap();
-            let mut decoder = Decoder::new(&*data);
+            let mut decoder = Decoder::new(Cursor::new(&*data));
             if decoder.read_header_info().ok().map(|h| h.color_type)
                 == Some(png::ColorType::Indexed)
             {

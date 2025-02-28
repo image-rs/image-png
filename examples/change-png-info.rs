@@ -1,7 +1,7 @@
 /// Tests "editing"/re-encoding of an image:
 /// decoding, editing, re-encoding
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter};
 use std::path::Path;
 pub type BoxResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -11,7 +11,7 @@ fn main() -> BoxResult<()> {
     let path_in = Path::new(r"./tests/pngsuite/basi0g01.png");
     // The decoder is a build for reader and can be used to set various decoding options
     // via `Transformations`. The default output transformation is `Transformations::IDENTITY`.
-    let decoder = png::Decoder::new(File::open(path_in)?);
+    let decoder = png::Decoder::new(BufReader::new(File::open(path_in)?));
     let mut reader = decoder.read_info()?;
     // Allocate the output buffer.
     let png_info = reader.info();

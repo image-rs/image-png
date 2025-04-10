@@ -321,12 +321,8 @@ fn copy_nbits_mtimes(img: &mut [u8], bit_pos: usize, bits_pp: usize, px: u8, m: 
 }
 
 fn copy_nbytes_mtimes(dst: &mut [u8], src: &[u8], n: usize, m: usize) {
-    assert!(n * m <= dst.len(), "Destination buffer is too small!");
-
-    for i in 0..m {
-        let start = i * n;
-        let end = start + n;
-        dst[start..end].copy_from_slice(src);
+    for dst in dst[..n * m].chunks_exact_mut(n) {
+        dst.copy_from_slice(src);
     }
 }
 
@@ -522,7 +518,7 @@ fn test_splat_expand_pass_within_8x8() {
     );
     assert_eq!(actual_img, expected_img);
 
-    // Third pass
+    // Third pass.  (Not "second pass" because for a 4-pixel-wide image `Adam7Iterator` will skip the no-op 2nd pass.)
     expected_img[16..20].copy_from_slice(&vec![51, 51, 51, 51]);
     repeat_nth_row_mtimes(expected_img, img_row_stride, 4, 1);
 
@@ -811,6 +807,30 @@ fn test_splat_expand_pass() {
 }
 
 #[test]
+fn test_multibyte_expand_pass() {
+    // width - odd, height - odd
+    multibyte_expand_pass_test_helper(3, 11, 16);
+    // width - odd, height - even
+    multibyte_expand_pass_test_helper(7, 14, 24);
+    // width - even, height - odd
+    multibyte_expand_pass_test_helper(4, 9, 8);
+    // width - even, height - even
+    multibyte_expand_pass_test_helper(6, 12, 48);
+}
+
+#[test]
+fn test_multibit_expand_pass() {
+    // width - odd, height - odd
+    multibit_expand_pass_test_helper(3, 11, 1);
+    // width - odd, height - even
+    multibit_expand_pass_test_helper(7, 14, 2);
+    // width - even, height - odd
+    multibit_expand_pass_test_helper(4, 9, 4);
+    // width - even, height - even
+    multibit_expand_pass_test_helper(6, 12, 2);
+}
+
+#[test]
 fn test_subbyte_pixels() {
     let scanline = &[0b10101010, 0b10101010];
 
@@ -1067,4 +1087,53 @@ fn repeat_nth_row_mtimes(img: &mut Vec<u8>, width: usize, n: usize, m: usize) {
         let copy_start = src_start + (i + 1) * width;
         img.copy_within(src_start..src_end, copy_start);
     }
+}
+
+#[cfg(test)]
+fn multibyte_expand_pass_test_helper(width: usize, height: usize, bits_pp: u8) {
+    use rand::Rng;
+
+    let bytes_pp = bits_pp / 8;
+    let size = width * height * bytes_pp as usize;
+    let splat_img = &mut vec![0u8; size];
+    let non_splat_img = &mut vec![0u8; size];
+    let img_row_stride = width * bytes_pp as usize;
+    let mut rng = rand::thread_rng();
+
+    for it in Adam7Iterator::new(width as u32, height as u32).into_iter() {
+        let interlace_size = it.width * (bytes_pp as u32);
+        let interlaced_row: Vec<_> = (0..interlace_size).map(|_| rng.gen::<u8>()).collect();
+        splat_expand_pass(splat_img, img_row_stride, &interlaced_row, &it, bits_pp);
+
+        expand_pass(non_splat_img, img_row_stride, &interlaced_row, &it, bits_pp);
+    }
+
+    assert_eq!(splat_img, non_splat_img);
+}
+
+#[cfg(test)]
+fn multibit_expand_pass_test_helper(width: usize, height: usize, bits_pp: u8) {
+    use rand::Rng;
+
+    let stride_bits = width * bits_pp as usize;
+    let stride = (stride_bits + 7) / 8;
+    // let bytes_pp = bits_pp / 8;
+    let size = stride * height;
+    let splat_img = &mut vec![0u8; size];
+    let non_splat_img = &mut vec![0u8; size];
+    let mut rng = rand::thread_rng();
+
+    println!("{} {} {}", size, stride_bits, stride);
+
+    for it in Adam7Iterator::new(width as u32, height as u32).into_iter() {
+        let interlace_bits = it.width * bits_pp as u32;
+        let interlace_size = (interlace_bits + 7) / 8;
+        let interlaced_row: Vec<_> = (0..interlace_size).map(|_| rng.gen::<u8>()).collect();
+        splat_expand_pass(splat_img, stride, &interlaced_row, &it, bits_pp);
+
+        expand_pass(non_splat_img, stride, &interlaced_row, &it, bits_pp);
+        println!("{:?} {:?} {:?}", splat_img, non_splat_img, interlaced_row);
+    }
+
+    assert_eq!(splat_img, non_splat_img);
 }

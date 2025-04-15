@@ -9,14 +9,14 @@
 use std::cmp::min;
 
 struct PassConstants {
-    line_mul: u8,
-    line_off: u8,
-    samp_mul: u8,
-    samp_off: u8,
+    line_mul: usize,
+    line_off: usize,
+    samp_mul: usize,
+    samp_off: usize,
 }
 
 impl PassConstants {
-    const fn new(line_mul: u8, line_off: u8, samp_mul: u8, samp_off: u8) -> Self {
+    const fn new(line_mul: usize, line_off: usize, samp_mul: usize, samp_off: usize) -> Self {
         Self {
             line_mul,
             line_off,
@@ -24,10 +24,10 @@ impl PassConstants {
             samp_off,
         }
     }
-    const fn x_repeat(&self) -> u8 {
+    const fn x_repeat(&self) -> usize {
         self.samp_mul - self.samp_off
     }
-    const fn y_repeat(&self) -> u8 {
+    const fn y_repeat(&self) -> usize {
         self.line_mul - self.line_off
     }
 }
@@ -188,22 +188,12 @@ fn expand_adam7_bits(
     let pass = info.pass;
     let interlaced_width = info.width as usize;
 
-    let (line_mul, line_off, samp_mul, samp_off) = {
-        // The pass values range from 1 to 7, need to adjust them to start
-        // from 0 to 6.
-        let PassConstants {
-            line_mul,
-            line_off,
-            samp_mul,
-            samp_off,
-        } = PASS_CONSTANTS[pass as usize - 1];
-        (
-            line_mul as usize,
-            line_off as usize,
-            samp_mul as usize,
-            samp_off as usize,
-        )
-    };
+    let PassConstants {
+        line_mul,
+        line_off,
+        samp_mul,
+        samp_off,
+    } = PASS_CONSTANTS[pass as usize - 1];
 
     // the equivalent line number in progressive scan
     let prog_line = line_mul * line_no + line_off;
@@ -280,7 +270,7 @@ pub fn expand_pass(
 // Should we have a separate function, or can we use an enum to determine whether
 // to use default or splat?
 //
-// |width_in_pixels| is only needed for bit splat expand, but currently it's
+// |frame_width_in_pixels| is only needed for bit splat expand, but currently it's
 // required as a parameter for both splat expand types. Would it be possible to
 // pass the width only when it's a bit splat expand? Or is there an alternative
 // way to retrieve the width without passing it explicitly?
@@ -315,7 +305,7 @@ pub fn splat_expand_pass(
     interlaced_row: &[u8],
     interlace_info: &Adam7Info,
     bits_per_pixel: u8,
-    width_in_pixels: usize,
+    frame_width_in_pixels: usize,
 ) {
     let bits_pp = bits_per_pixel as usize;
 
@@ -330,7 +320,7 @@ pub fn splat_expand_pass(
                 interlace_info,
                 bits_pp,
                 pos,
-                width_in_pixels * bits_pp,
+                frame_width_in_pixels * bits_pp,
             );
         }
     } else {
@@ -359,22 +349,19 @@ fn bit_splat_expand(
     info: &Adam7Info,
     bits_pp: usize,
     bit_pos: usize,
-    img_width_in_bits: usize,
+    frame_width_in_bits: usize,
 ) {
     assert!(
-        img_width_in_bits <= stride_in_bits,
-        "The image width should be less than or equal to the row length."
+        frame_width_in_bits <= stride_in_bits,
+        "The frame width should be less than or equal to the row length."
     );
     let height = (img.len() * 8 - bit_pos + stride_in_bits - 1) / stride_in_bits;
     let pass_const = &PASS_CONSTANTS[info.pass as usize - 1];
-    let (x_repeat, y_repeat) = (
-        pass_const.x_repeat() as usize,
-        pass_const.y_repeat() as usize,
-    );
+    let (x_repeat, y_repeat) = (pass_const.x_repeat(), pass_const.y_repeat());
     for i in 0..min(y_repeat, height) {
         let offset = bit_pos + i * stride_in_bits;
         let max_fill = min(
-            (img_width_in_bits - bit_pos % stride_in_bits) / bits_pp,
+            (frame_width_in_bits - bit_pos % stride_in_bits) / bits_pp,
             x_repeat,
         );
         copy_nbits_mtimes(img, offset, bits_pp, px, max_fill);
@@ -391,10 +378,7 @@ fn byte_splat_expand(
 ) {
     let height = (img.len() - start_byte + stride - 1) / stride;
     let pass_const = &PASS_CONSTANTS[info.pass as usize - 1];
-    let (x_repeat, y_repeat) = (
-        pass_const.x_repeat() as usize,
-        pass_const.y_repeat() as usize,
-    );
+    let (x_repeat, y_repeat) = (pass_const.x_repeat(), pass_const.y_repeat());
     for i in 0..min(y_repeat, height) {
         let offset = start_byte + i * stride;
         let max_fill = min((stride - start_byte % stride) / bytes_pp, x_repeat);

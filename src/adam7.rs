@@ -8,15 +8,46 @@
 /// See also [Reader.next_interlaced_row](crate::decoder::Reader::next_interlaced_row).
 use std::cmp::min;
 
+struct PassConstants {
+    line_mul: u8,
+    line_off: u8,
+    samp_mul: u8,
+    samp_off: u8,
+}
+
+impl PassConstants {
+    const fn new(line_mul: u8, line_off: u8, samp_mul: u8, samp_off: u8) -> Self {
+        Self {
+            line_mul,
+            line_off,
+            samp_mul,
+            samp_off,
+        }
+    }
+    const fn x_repeat(&self) -> u8 {
+        self.samp_mul - self.samp_off
+    }
+    const fn y_repeat(&self) -> u8 {
+        self.line_mul - self.line_off
+    }
+}
+
+const PASS_CONSTANTS: [PassConstants; 7] = [
+    PassConstants::new(8, 0, 8, 0),
+    PassConstants::new(8, 0, 8, 4),
+    PassConstants::new(8, 4, 4, 0),
+    PassConstants::new(4, 0, 4, 2),
+    PassConstants::new(4, 2, 2, 0),
+    PassConstants::new(2, 0, 2, 1),
+    PassConstants::new(2, 1, 1, 0),
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Adam7Info {
     pub(crate) pass: u8,
     pub(crate) line: u32,
     pub(crate) width: u32,
 }
-
-// Pairs are (x_repeat, y_repeat)
-static SPLAT_EXPAND: &[(usize, usize)] = &[(8, 8), (4, 8), (4, 4), (2, 4), (2, 2), (1, 2), (1, 1)];
 
 impl Adam7Info {
     /// Creates a new `Adam7Info`.  May panic if the arguments are out of range (e.g. if `pass` is
@@ -83,16 +114,21 @@ impl Adam7Iterator {
     fn init_pass(&mut self) {
         let w = f64::from(self.width);
         let h = f64::from(self.height);
-        let (line_width, lines) = match self.current_pass {
-            1 => (w / 8.0, h / 8.0),
-            2 => ((w - 4.0) / 8.0, h / 8.0),
-            3 => (w / 4.0, (h - 4.0) / 8.0),
-            4 => ((w - 2.0) / 4.0, h / 4.0),
-            5 => (w / 2.0, (h - 2.0) / 4.0),
-            6 => ((w - 1.0) / 2.0, h / 2.0),
-            7 => (w, (h - 1.0) / 2.0),
-            _ => unreachable!(),
+        let (line_mul, line_off, samp_mul, samp_off) = {
+            let PassConstants {
+                line_mul,
+                line_off,
+                samp_mul,
+                samp_off,
+            } = PASS_CONSTANTS[self.current_pass as usize - 1];
+            (
+                line_mul as f64,
+                line_off as f64,
+                samp_mul as f64,
+                samp_off as f64,
+            )
         };
+        let (line_width, lines) = ((w - samp_off) / samp_mul, (h - line_off) / line_mul);
         self.line_width = line_width.ceil() as u32;
         self.lines = lines.ceil() as u32;
         self.line = 0;
@@ -152,19 +188,21 @@ fn expand_adam7_bits(
     let pass = info.pass;
     let interlaced_width = info.width as usize;
 
-    let (line_mul, line_off, samp_mul, samp_off) = match pass {
-        1 => (8, 0, 8, 0),
-        2 => (8, 0, 8, 4),
-        3 => (8, 4, 4, 0),
-        4 => (4, 0, 4, 2),
-        5 => (4, 2, 2, 0),
-        6 => (2, 0, 2, 1),
-        7 => (2, 1, 1, 0),
-        _ => {
-            // `Adam7Info.pass` is a non-`pub`lic field.  `InterlaceInfo` is expected
-            // to maintain an invariant that `pass` is valid.
-            panic!("Invalid `Adam7Info.pass`");
-        }
+    let (line_mul, line_off, samp_mul, samp_off) = {
+        // The pass values range from 1 to 7, need to adjust them to start
+        // from 0 to 6.
+        let PassConstants {
+            line_mul,
+            line_off,
+            samp_mul,
+            samp_off,
+        } = PASS_CONSTANTS[pass as usize - 1];
+        (
+            line_mul as usize,
+            line_off as usize,
+            samp_mul as usize,
+            samp_off as usize,
+        )
     };
 
     // the equivalent line number in progressive scan
@@ -303,7 +341,11 @@ fn bit_splat_expand(
         "The image width should be less than or equal to the row length."
     );
     let height = ((img.len() * 8 - bit_pos) as f32 / stride as f32).ceil() as usize;
-    let (x_repeat, y_repeat) = SPLAT_EXPAND[info.pass as usize - 1];
+    let pass_const = &PASS_CONSTANTS[info.pass as usize - 1];
+    let (x_repeat, y_repeat) = (
+        pass_const.x_repeat() as usize,
+        pass_const.y_repeat() as usize,
+    );
     for i in 0..min(y_repeat, height) {
         let offset = bit_pos + i * stride;
         let max_fill = min((img_width_in_bits - bit_pos % stride) / bits_pp, x_repeat);
@@ -320,7 +362,11 @@ fn byte_splat_expand(
     start_byte: usize,
 ) {
     let height = ((img.len() - start_byte) as f32 / stride as f32).ceil() as usize;
-    let (x_repeat, y_repeat) = SPLAT_EXPAND[info.pass as usize - 1];
+    let pass_const = &PASS_CONSTANTS[info.pass as usize - 1];
+    let (x_repeat, y_repeat) = (
+        pass_const.x_repeat() as usize,
+        pass_const.y_repeat() as usize,
+    );
     for i in 0..min(y_repeat, height) {
         let offset = start_byte + i * stride;
         let max_fill = min((stride - start_byte % stride) / bytes_pp, x_repeat);

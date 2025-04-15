@@ -241,12 +241,18 @@ pub fn expand_pass(
 // TODO: Export this function in lib.rs.
 // Should we have a separate function, or can we use an enum to determine whether
 // to use default or splat?
+//
+// |width_in_pixels| is only needed for bit splat expand, but currently it's
+// required as a parameter for both splat expand types. Would it be possible to
+// pass the width only when it's a bit splat expand? Or is there an alternative
+// way to retrieve the width without passing it explicitly?
 pub fn splat_expand_pass(
     img: &mut [u8],
     img_row_stride: usize,
     interlaced_row: &[u8],
     interlace_info: &Adam7Info,
     bits_per_pixel: u8,
+    width_in_pixels: usize,
 ) {
     let bits_pp = bits_per_pixel as usize;
 
@@ -254,7 +260,15 @@ pub fn splat_expand_pass(
 
     if bits_pp < 8 {
         for (pos, px) in bit_indices.zip(subbyte_pixels(interlaced_row, bits_pp)) {
-            bit_splat_expand(img, img_row_stride * 8, px, interlace_info, bits_pp, pos);
+            bit_splat_expand(
+                img,
+                img_row_stride * 8,
+                px,
+                interlace_info,
+                bits_pp,
+                pos,
+                width_in_pixels * bits_pp,
+            );
         }
     } else {
         let bytes_pp = bits_pp / 8;
@@ -282,12 +296,17 @@ fn bit_splat_expand(
     info: &Adam7Info,
     bits_pp: usize,
     bit_pos: usize,
+    img_width_in_bits: usize,
 ) {
+    assert!(
+        img_width_in_bits <= stride,
+        "The image width should be less than or equal to the row length."
+    );
     let height = ((img.len() * 8 - bit_pos) as f32 / stride as f32).ceil() as usize;
     let (x_repeat, y_repeat) = SPLAT_EXPAND[info.pass as usize - 1];
     for i in 0..min(y_repeat, height) {
         let offset = bit_pos + i * stride;
-        let max_fill = min((stride - bit_pos % stride) / bits_pp, x_repeat);
+        let max_fill = min((img_width_in_bits - bit_pos % stride) / bits_pp, x_repeat);
         copy_nbits_mtimes(img, offset, bits_pp, px, max_fill);
     }
 }
@@ -394,21 +413,35 @@ fn test_splat_expand_pass_subbyte() {
     */
 
     let img = &mut [0u8; 16];
-    let width = 16;
-    let stride = width / 8;
+    let width = 8;
     let bits_pp = 2;
-    let mut it = Adam7Iterator::new(8, 8);
+    let stride = (width * bits_pp as usize) / 8;
+    let mut it = Adam7Iterator::new(width as u32, 8);
 
     let expected_img = &mut [0u8; 16];
 
     // First pass
-    splat_expand_pass(img, stride, &[0b10000000u8], &it.next().unwrap(), bits_pp);
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b10000000u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
     copy_nbytes_mtimes(expected_img, &[0b10101010], 1, 16);
 
     assert_eq!(img, expected_img);
 
     // Second pass
-    splat_expand_pass(img, stride, &[0b11000000u8], &it.next().unwrap(), bits_pp);
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b11000000u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
     for i in (1..16).step_by(2) {
         expected_img[i] = 0b11111111u8;
     }
@@ -416,32 +449,95 @@ fn test_splat_expand_pass_subbyte() {
     assert_eq!(img, expected_img);
 
     // Third pass
-    splat_expand_pass(img, stride, &[0b01100000u8], &it.next().unwrap(), bits_pp);
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b01100000u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
     copy_nbytes_mtimes(&mut expected_img[8..], &[0b01010101, 0b10101010], 2, 4);
 
     assert_eq!(img, expected_img);
 
     // Fourth pass
-    splat_expand_pass(img, stride, &[0b00010000u8], &it.next().unwrap(), bits_pp);
-    splat_expand_pass(img, stride, &[0b10110000u8], &it.next().unwrap(), bits_pp);
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b00010000u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b10110000u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
     copy_nbytes_mtimes(expected_img, &[0b10100000, 0b11110101], 2, 4);
     copy_nbytes_mtimes(&mut expected_img[8..], &[0b01011010, 0b10101111], 2, 4);
 
     assert_eq!(img, expected_img);
 
     // Fifth pass
-    splat_expand_pass(img, stride, &[0b00011011u8], &it.next().unwrap(), bits_pp);
-    splat_expand_pass(img, stride, &[0b11100100u8], &it.next().unwrap(), bits_pp);
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b00011011u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b11100100u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
     copy_nbytes_mtimes(&mut expected_img[4..], &[0b00000101, 0b10101111], 2, 2);
     copy_nbytes_mtimes(&mut expected_img[12..], &[0b11111010, 0b01010000], 2, 2);
 
     assert_eq!(img, expected_img);
 
     // Sixth pass
-    splat_expand_pass(img, stride, &[0b00011011u8], &it.next().unwrap(), bits_pp);
-    splat_expand_pass(img, stride, &[0b11100100u8], &it.next().unwrap(), bits_pp);
-    splat_expand_pass(img, stride, &[0b00011011u8], &it.next().unwrap(), bits_pp);
-    splat_expand_pass(img, stride, &[0b11100100u8], &it.next().unwrap(), bits_pp);
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b00011011u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b11100100u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b00011011u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
+    splat_expand_pass(
+        img,
+        stride,
+        &[0b11100100u8],
+        &it.next().unwrap(),
+        bits_pp,
+        width,
+    );
     copy_nbytes_mtimes(expected_img, &[0b10000001, 0b11100111], 2, 2);
     copy_nbytes_mtimes(&mut expected_img[4..], &[0b00110110, 0b10011100], 2, 2);
     copy_nbytes_mtimes(&mut expected_img[8..], &[0b01001001, 0b10101111], 2, 2);
@@ -456,6 +552,7 @@ fn test_splat_expand_pass_subbyte() {
         &[0b00011011u8, 0b00011011u8],
         &it.next().unwrap(),
         bits_pp,
+        width,
     );
     splat_expand_pass(
         img,
@@ -463,6 +560,7 @@ fn test_splat_expand_pass_subbyte() {
         &[0b11100100u8, 0b11100100u8],
         &it.next().unwrap(),
         bits_pp,
+        width,
     );
     splat_expand_pass(
         img,
@@ -470,6 +568,7 @@ fn test_splat_expand_pass_subbyte() {
         &[0b00011011u8, 0b00011011u8],
         &it.next().unwrap(),
         bits_pp,
+        width,
     );
     splat_expand_pass(
         img,
@@ -477,6 +576,7 @@ fn test_splat_expand_pass_subbyte() {
         &[0b11100100u8, 0b11100100u8],
         &it.next().unwrap(),
         bits_pp,
+        width,
     );
     copy_nbytes_mtimes(&mut expected_img[2..], &[0b00011011u8, 0b00011011u8], 2, 1);
     copy_nbytes_mtimes(&mut expected_img[6..], &[0b11100100u8, 0b11100100u8], 2, 1);
@@ -500,10 +600,11 @@ fn test_splat_expand_pass_within_8x8() {
 
     let actual_img = &mut vec![0u8; 24];
     let expected_img = &mut vec![0u8; 24];
-    let img_row_stride = 4;
     let bp_pixel = 8;
+    let width = 4;
+    let img_row_stride = width;
 
-    let mut it = Adam7Iterator::new(4, 6);
+    let mut it = Adam7Iterator::new(width as u32, 6);
 
     // First pass
     expected_img[0..4].copy_from_slice(&vec![11, 11, 11, 11]);
@@ -515,6 +616,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[11],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -528,6 +630,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[51],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -543,6 +646,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[13],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -550,6 +654,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[53],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -563,6 +668,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[31, 33],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -580,6 +686,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[12, 14],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -587,6 +694,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[32, 34],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -594,6 +702,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[52, 54],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -604,6 +713,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[21, 22, 23, 24],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -611,6 +721,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[41, 42, 43, 44],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -618,6 +729,7 @@ fn test_splat_expand_pass_within_8x8() {
         &[61, 62, 63, 64],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
 
     let test_img = &mut create_test_img(4, 6);
@@ -645,10 +757,10 @@ fn test_splat_expand_pass() {
 
     let actual_img = &mut vec![0u8; 72];
     let expected_img = &mut vec![0u8; 72];
-    let img_row_stride = 9;
     let bp_pixel = 8;
-
-    let mut it = Adam7Iterator::new(9, 8);
+    let width = 9;
+    let img_row_stride = width;
+    let mut it = Adam7Iterator::new(width as u32, 8);
 
     // After first pass
     expected_img[0..9].copy_from_slice(&vec![11, 11, 11, 11, 11, 11, 11, 11, 19]);
@@ -659,6 +771,7 @@ fn test_splat_expand_pass() {
         &[11, 19],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -672,6 +785,7 @@ fn test_splat_expand_pass() {
         &[15],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -685,6 +799,7 @@ fn test_splat_expand_pass() {
         &[51, 55, 59],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     assert_eq!(actual_img, expected_img);
 
@@ -700,6 +815,7 @@ fn test_splat_expand_pass() {
         &[13, 17],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -707,6 +823,7 @@ fn test_splat_expand_pass() {
         &[53, 57],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
 
     assert_eq!(actual_img, expected_img);
@@ -723,6 +840,7 @@ fn test_splat_expand_pass() {
         &[31, 33, 35, 37, 39],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -730,6 +848,7 @@ fn test_splat_expand_pass() {
         &[71, 73, 75, 77, 79],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
 
     assert_eq!(actual_img, expected_img);
@@ -747,6 +866,7 @@ fn test_splat_expand_pass() {
         &[12, 14, 16, 18],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -754,6 +874,7 @@ fn test_splat_expand_pass() {
         &[32, 34, 36, 38],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -761,6 +882,7 @@ fn test_splat_expand_pass() {
         &[52, 54, 56, 58],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -768,6 +890,7 @@ fn test_splat_expand_pass() {
         &[72, 74, 76, 78],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
 
     assert_eq!(actual_img, test_img);
@@ -780,6 +903,7 @@ fn test_splat_expand_pass() {
         &[21, 22, 23, 24, 25, 26, 27, 28, 29],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -787,6 +911,7 @@ fn test_splat_expand_pass() {
         &[41, 42, 43, 44, 45, 46, 47, 48, 49],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -794,6 +919,7 @@ fn test_splat_expand_pass() {
         &[61, 62, 63, 64, 65, 66, 67, 68, 69],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
     splat_expand_pass(
         actual_img,
@@ -801,6 +927,7 @@ fn test_splat_expand_pass() {
         &[81, 82, 83, 84, 85, 86, 87, 88, 89],
         &it.next().unwrap(),
         bp_pixel,
+        width,
     );
 
     assert_eq!(actual_img, test_img);
@@ -1103,7 +1230,14 @@ fn multibyte_expand_pass_test_helper(width: usize, height: usize, bits_pp: u8) {
     for it in Adam7Iterator::new(width as u32, height as u32).into_iter() {
         let interlace_size = it.width * (bytes_pp as u32);
         let interlaced_row: Vec<_> = (0..interlace_size).map(|_| rng.gen::<u8>()).collect();
-        splat_expand_pass(splat_img, img_row_stride, &interlaced_row, &it, bits_pp);
+        splat_expand_pass(
+            splat_img,
+            img_row_stride,
+            &interlaced_row,
+            &it,
+            bits_pp,
+            width,
+        );
 
         expand_pass(non_splat_img, img_row_stride, &interlaced_row, &it, bits_pp);
     }
@@ -1117,22 +1251,18 @@ fn multibit_expand_pass_test_helper(width: usize, height: usize, bits_pp: u8) {
 
     let stride_bits = width * bits_pp as usize;
     let stride = (stride_bits + 7) / 8;
-    // let bytes_pp = bits_pp / 8;
     let size = stride * height;
     let splat_img = &mut vec![0u8; size];
     let non_splat_img = &mut vec![0u8; size];
     let mut rng = rand::thread_rng();
 
-    println!("{} {} {}", size, stride_bits, stride);
-
     for it in Adam7Iterator::new(width as u32, height as u32).into_iter() {
         let interlace_bits = it.width * bits_pp as u32;
         let interlace_size = (interlace_bits + 7) / 8;
         let interlaced_row: Vec<_> = (0..interlace_size).map(|_| rng.gen::<u8>()).collect();
-        splat_expand_pass(splat_img, stride, &interlaced_row, &it, bits_pp);
+        splat_expand_pass(splat_img, stride, &interlaced_row, &it, bits_pp, width);
 
         expand_pass(non_splat_img, stride, &interlaced_row, &it, bits_pp);
-        println!("{:?} {:?} {:?}", splat_img, non_splat_img, interlaced_row);
     }
 
     assert_eq!(splat_img, non_splat_img);

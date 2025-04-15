@@ -284,6 +284,31 @@ pub fn expand_pass(
 // required as a parameter for both splat expand types. Would it be possible to
 // pass the width only when it's a bit splat expand? Or is there an alternative
 // way to retrieve the width without passing it explicitly?
+//
+// The `splat_expand_pass` fills pixels in a splatted way, unlike `expand_pass`
+// which only writes to specific required positions (byte or bit). It splats the
+// pixel value without leaving any pixels empty, helping to produce smoother
+// animation for interlaced images.
+// For example, after the 3rd pass using expand_pass, the image for an 8x8 size
+// would look like this:
+//   1 - - - 2 - - -
+//   - - - - - - - -
+//   - - - - - - - -
+//   - - - - - - - -
+//   3 - - - 3 - - -
+//   - - - - - - - -
+//   - - - - - - - -
+//   - - - - - - - -
+// On the other hand, after the 3rd pass using splat_expand_pass, the image
+// would look like this:
+//   1 1 1 1 2 2 2 2
+//   1 1 1 1 2 2 2 2
+//   1 1 1 1 2 2 2 2
+//   1 1 1 1 2 2 2 2
+//   3 3 3 3 3 3 3 3
+//   3 3 3 3 3 3 3 3
+//   3 3 3 3 3 3 3 3
+//   3 3 3 3 3 3 3 3
 pub fn splat_expand_pass(
     img: &mut [u8],
     img_row_stride: usize,
@@ -325,11 +350,11 @@ pub fn splat_expand_pass(
     }
 }
 
-// TODO: Can we eliminate the duplicate code in |bit_splat_expand| and |byte_splat_expand|?
-// |stride| is bit-count here, unlike in |byte_splat_expand|, where it is byte-count.
+// TODO: Eliminate the duplicate code in |bit_splat_expand| and
+// |byte_splat_expand|, if possible.
 fn bit_splat_expand(
     img: &mut [u8],
-    stride: usize,
+    stride_in_bits: usize,
     px: u8,
     info: &Adam7Info,
     bits_pp: usize,
@@ -337,18 +362,21 @@ fn bit_splat_expand(
     img_width_in_bits: usize,
 ) {
     assert!(
-        img_width_in_bits <= stride,
+        img_width_in_bits <= stride_in_bits,
         "The image width should be less than or equal to the row length."
     );
-    let height = ((img.len() * 8 - bit_pos) as f32 / stride as f32).ceil() as usize;
+    let height = (img.len() * 8 - bit_pos + stride_in_bits - 1) / stride_in_bits;
     let pass_const = &PASS_CONSTANTS[info.pass as usize - 1];
     let (x_repeat, y_repeat) = (
         pass_const.x_repeat() as usize,
         pass_const.y_repeat() as usize,
     );
     for i in 0..min(y_repeat, height) {
-        let offset = bit_pos + i * stride;
-        let max_fill = min((img_width_in_bits - bit_pos % stride) / bits_pp, x_repeat);
+        let offset = bit_pos + i * stride_in_bits;
+        let max_fill = min(
+            (img_width_in_bits - bit_pos % stride_in_bits) / bits_pp,
+            x_repeat,
+        );
         copy_nbits_mtimes(img, offset, bits_pp, px, max_fill);
     }
 }
@@ -361,7 +389,7 @@ fn byte_splat_expand(
     bytes_pp: usize,
     start_byte: usize,
 ) {
-    let height = ((img.len() - start_byte) as f32 / stride as f32).ceil() as usize;
+    let height = (img.len() - start_byte + stride - 1) / stride;
     let pass_const = &PASS_CONSTANTS[info.pass as usize - 1];
     let (x_repeat, y_repeat) = (
         pass_const.x_repeat() as usize,
@@ -375,6 +403,8 @@ fn byte_splat_expand(
 }
 
 fn copy_nbits_mtimes(img: &mut [u8], bit_pos: usize, bits_pp: usize, px: u8, m: usize) {
+    debug_assert_eq!(bit_pos % bits_pp, 0);
+    debug_assert!(bits_pp == 1 || bits_pp == 2 || bits_pp == 4);
     for i in 0..m {
         let pos = bit_pos + i * bits_pp;
         let rem = 8 - pos % 8 - bits_pp;
@@ -781,10 +811,6 @@ fn test_splat_expand_pass_within_8x8() {
     let test_img = &mut create_test_img(4, 6);
     assert_eq!(actual_img, test_img);
 }
-
-// TODO: Write at least three test cases for multi-byte/bit pixel scenarios in splat_expand_pass,
-// ensuring that the expected image is obtained after the seventh pass without verifying all
-// intermediate passes.
 
 #[test]
 fn test_splat_expand_pass() {

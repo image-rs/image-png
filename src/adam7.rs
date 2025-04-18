@@ -275,30 +275,30 @@ pub fn expand_pass(
 // pass the width only when it's a bit splat expand? Or is there an alternative
 // way to retrieve the width without passing it explicitly?
 //
-// The `splat_expand_pass` fills pixels in a splatted way, unlike `expand_pass`
-// which only writes to specific required positions (byte or bit). It splats the
-// pixel value without leaving any pixels empty, helping to produce smoother
-// animation for interlaced images.
-// For example, after the 3rd pass using expand_pass, the image for an 8x8 size
-// would look like this:
-//   1 - - - 2 - - -
-//   - - - - - - - -
-//   - - - - - - - -
-//   - - - - - - - -
-//   3 - - - 3 - - -
-//   - - - - - - - -
-//   - - - - - - - -
-//   - - - - - - - -
-// On the other hand, after the 3rd pass using splat_expand_pass, the image
-// would look like this:
-//   1 1 1 1 2 2 2 2
-//   1 1 1 1 2 2 2 2
-//   1 1 1 1 2 2 2 2
-//   1 1 1 1 2 2 2 2
-//   3 3 3 3 3 3 3 3
-//   3 3 3 3 3 3 3 3
-//   3 3 3 3 3 3 3 3
-//   3 3 3 3 3 3 3 3
+/// The `splat_expand_pass` fills pixels in a splatted way, unlike `expand_pass`
+/// which only writes to specific required positions (byte or bit). It splats the
+/// pixel value without leaving any pixels empty, helping to produce smoother
+/// animation for interlaced images.
+/// For example, after the 3rd pass using expand_pass, the image for an 8x8 size
+/// would look like this:
+///   1 - - - 2 - - -
+///   - - - - - - - -
+///   - - - - - - - -
+///   - - - - - - - -
+///   3 - - - 3 - - -
+///   - - - - - - - -
+///   - - - - - - - -
+///   - - - - - - - -
+/// On the other hand, after the 3rd pass using splat_expand_pass, the image
+/// would look like this:
+///   1 1 1 1 2 2 2 2
+///   1 1 1 1 2 2 2 2
+///   1 1 1 1 2 2 2 2
+///   1 1 1 1 2 2 2 2
+///   3 3 3 3 3 3 3 3
+///   3 3 3 3 3 3 3 3
+///   3 3 3 3 3 3 3 3
+///   3 3 3 3 3 3 3 3
 pub fn splat_expand_pass(
     img: &mut [u8],
     img_row_stride: usize,
@@ -329,12 +329,11 @@ pub fn splat_expand_pass(
         for (bitpos, px) in bit_indices.zip(interlaced_row.chunks(bytes_pp)) {
             let start_byte = bitpos / 8;
             byte_splat_expand(
-                img,
+                &mut img[start_byte..],
                 img_row_stride,
                 px,
                 interlace_info,
                 bytes_pp,
-                start_byte,
             );
         }
     }
@@ -368,20 +367,20 @@ fn bit_splat_expand(
     }
 }
 
-fn byte_splat_expand(
-    img: &mut [u8],
-    stride: usize,
-    px: &[u8],
-    info: &Adam7Info,
-    bytes_pp: usize,
-    start_byte: usize,
-) {
-    let height = (img.len() - start_byte + stride - 1) / stride;
+fn byte_splat_expand(img: &mut [u8], stride: usize, px: &[u8], info: &Adam7Info, bytes_pp: usize) {
+    let height = (img.len() + stride - 1) / stride;
     let pass_const = &PASS_CONSTANTS[info.pass as usize - 1];
     let (x_repeat, y_repeat) = (pass_const.x_repeat(), pass_const.y_repeat());
     for i in 0..min(y_repeat, height) {
-        let offset = start_byte + i * stride;
-        let max_fill = min((stride - start_byte % stride) / bytes_pp, x_repeat);
+        let offset = i * stride;
+        let mut max_fill_bytes = img.len() % stride;
+        // `max_fill_bytes` can't be zero here; if it is, we should fill up to the full `stride` length.
+        max_fill_bytes = if max_fill_bytes == 0 {
+            stride
+        } else {
+            max_fill_bytes
+        };
+        let max_fill = min(max_fill_bytes / bytes_pp, x_repeat);
         copy_nbytes_mtimes(&mut img[offset..], px, bytes_pp, max_fill);
     }
 }

@@ -671,7 +671,7 @@ impl<W: Write> Writer<W> {
 
     fn write_iccp_chunk(&mut self, profile_name: &str, icc_profile: &[u8]) -> Result<()> {
         let profile_name = encode_iso_8859_1(profile_name)?;
-        if profile_name.len() < 1 || profile_name.len() > 79 {
+        if profile_name.is_empty() || profile_name.len() > 79 {
             return Err(TextEncodingError::InvalidKeywordSize.into());
         }
 

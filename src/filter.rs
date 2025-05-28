@@ -2,223 +2,6 @@ use core::convert::TryInto;
 
 use crate::{common::BytesPerPixel, Compression};
 
-/// SIMD helpers for `fn unfilter`
-///
-/// TODO(https://github.com/rust-lang/rust/issues/86656): Stop gating this module behind the
-/// "unstable" feature of the `png` crate.  This should be possible once the "portable_simd"
-/// feature of Rust gets stabilized.
-///
-/// This is only known to help on x86, with no change measured on most benchmarks on ARM,
-/// and even severely regressing some of them.
-/// So despite the code being portable, we only enable this for x86.
-/// We can add more platforms once this code is proven to be beneficial for them.
-#[cfg(all(feature = "unstable", target_arch = "x86_64"))]
-mod simd {
-    use std::simd::num::{SimdInt, SimdUint};
-    use std::simd::{u8x4, u8x8, LaneCount, Simd, SimdElement, SupportedLaneCount};
-
-    /// Scalar Paeth function wrapped in SIMD scaffolding.
-    ///
-    /// This is needed because simply running the function on the inputs
-    /// makes the compiler think our inputs are too short
-    /// to benefit from vectorization.
-    /// Putting it in SIMD scaffolding fixes that.
-    /// https://github.com/image-rs/image-png/issues/511
-    ///
-    /// Funnily, the autovectorizer does a better job here
-    /// than a handwritten algorithm using std::simd!
-    /// We used to have a handwritten one but this is just faster.
-    fn paeth_predictor<const N: usize>(
-        a: Simd<i16, N>,
-        b: Simd<i16, N>,
-        c: Simd<i16, N>,
-    ) -> Simd<i16, N>
-    where
-        LaneCount<N>: SupportedLaneCount,
-    {
-        let mut out = [0; N];
-        for i in 0..N {
-            out[i] = super::filter_paeth_stbi_i16(a[i].into(), b[i].into(), c[i].into());
-        }
-        out.into()
-    }
-
-    /// Functionally equivalent to `simd::paeth_predictor` but does not temporarily convert
-    /// the SIMD elements to `i16`.
-    fn paeth_predictor_u8<const N: usize>(
-        a: Simd<u8, N>,
-        b: Simd<u8, N>,
-        c: Simd<u8, N>,
-    ) -> Simd<u8, N>
-    where
-        LaneCount<N>: SupportedLaneCount,
-    {
-        let mut out = [0; N];
-        for i in 0..N {
-            out[i] = super::filter_paeth_stbi(a[i].into(), b[i].into(), c[i].into());
-        }
-        out.into()
-    }
-
-    /// Memory of previous pixels (as needed to unfilter `Filter::Paeth`).
-    /// See also https://www.w3.org/TR/png/#filter-byte-positions
-    #[derive(Default)]
-    struct PaethState<T, const N: usize>
-    where
-        T: SimdElement,
-        LaneCount<N>: SupportedLaneCount,
-    {
-        /// Previous pixel in the previous row.
-        c: Simd<T, N>,
-
-        /// Previous pixel in the current row.
-        a: Simd<T, N>,
-    }
-
-    /// Mutates `x` as needed to unfilter `Filter::Paeth`.
-    ///
-    /// `b` is the current pixel in the previous row.  `x` is the current pixel in the current row.
-    /// See also https://www.w3.org/TR/png/#filter-byte-positions
-    fn paeth_step<const N: usize>(
-        state: &mut PaethState<i16, N>,
-        b: Simd<u8, N>,
-        x: &mut Simd<u8, N>,
-    ) where
-        LaneCount<N>: SupportedLaneCount,
-    {
-        // Storing the inputs.
-        let b = b.cast::<i16>();
-
-        // Calculating the new value of the current pixel.
-        let predictor = paeth_predictor(state.a, b, state.c);
-        *x += predictor.cast::<u8>();
-
-        // Preparing for the next step.
-        state.c = b;
-        state.a = x.cast::<i16>();
-    }
-
-    /// Computes the Paeth predictor without converting `u8` to `i16`.
-    ///
-    /// See `simd::paeth_step`.
-    fn paeth_step_u8<const N: usize>(
-        state: &mut PaethState<u8, N>,
-        b: Simd<u8, N>,
-        x: &mut Simd<u8, N>,
-    ) where
-        LaneCount<N>: SupportedLaneCount,
-    {
-        // Calculating the new value of the current pixel.
-        *x += paeth_predictor_u8(state.a, b, state.c);
-
-        // Preparing for the next step.
-        state.c = b;
-        state.a = *x;
-    }
-
-    fn load3(src: &[u8]) -> u8x4 {
-        u8x4::from_array([src[0], src[1], src[2], 0])
-    }
-
-    fn store3(src: u8x4, dest: &mut [u8]) {
-        dest[0..3].copy_from_slice(&src.to_array()[0..3])
-    }
-
-    /// Undoes `Filter::Paeth` for `BytesPerPixel::Three`.
-    pub fn unfilter_paeth3(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
-        debug_assert_eq!(prev_row.len(), curr_row.len());
-        debug_assert_eq!(prev_row.len() % 3, 0);
-
-        let mut state = PaethState::<i16, 4>::default();
-        while prev_row.len() >= 4 {
-            // `u8x4` requires working with `[u8;4]`, but we can just load and ignore the first
-            // byte from the next triple.  This optimization technique mimics the algorithm found
-            // in
-            // https://github.com/glennrp/libpng/blob/f8e5fa92b0e37ab597616f554bee254157998227/intel/filter_sse2_intrinsics.c#L130-L131
-            let b = u8x4::from_slice(prev_row);
-            let mut x = u8x4::from_slice(curr_row);
-
-            paeth_step(&mut state, b, &mut x);
-
-            // We can speculate that writing 4 bytes might be more efficient (just as with using
-            // `u8x4::from_slice` above), but we can't use that here, because we can't clobber the
-            // first byte of the next pixel in the `curr_row`.
-            store3(x, curr_row);
-
-            prev_row = &prev_row[3..];
-            curr_row = &mut curr_row[3..];
-        }
-        // Can't use `u8x4::from_slice` for the last `[u8;3]`.
-        let b = load3(prev_row);
-        let mut x = load3(curr_row);
-        paeth_step(&mut state, b, &mut x);
-        store3(x, curr_row);
-    }
-
-    /// Undoes `Filter::Paeth` for `BytesPerPixel::Four` and `BytesPerPixel::Eight`.
-    ///
-    /// This function calculates the Paeth predictor entirely in `Simd<u8, N>`
-    /// without converting to an intermediate `Simd<i16, N>`. Doing so avoids
-    /// paying a small performance penalty converting between types.
-    pub fn unfilter_paeth_u8<const N: usize>(prev_row: &[u8], curr_row: &mut [u8])
-    where
-        LaneCount<N>: SupportedLaneCount,
-    {
-        debug_assert_eq!(prev_row.len(), curr_row.len());
-        debug_assert_eq!(prev_row.len() % N, 0);
-        assert!(matches!(N, 4 | 8));
-
-        let mut state = PaethState::<u8, N>::default();
-        for (prev_row, curr_row) in prev_row.chunks_exact(N).zip(curr_row.chunks_exact_mut(N)) {
-            let b = Simd::from_slice(prev_row);
-            let mut x = Simd::from_slice(curr_row);
-
-            paeth_step_u8(&mut state, b, &mut x);
-
-            curr_row[..N].copy_from_slice(&x.to_array()[..N]);
-        }
-    }
-
-    fn load6(src: &[u8]) -> u8x8 {
-        u8x8::from_array([src[0], src[1], src[2], src[3], src[4], src[5], 0, 0])
-    }
-
-    fn store6(src: u8x8, dest: &mut [u8]) {
-        dest[0..6].copy_from_slice(&src.to_array()[0..6])
-    }
-
-    /// Undoes `Filter::Paeth` for `BytesPerPixel::Six`.
-    pub fn unfilter_paeth6(mut prev_row: &[u8], mut curr_row: &mut [u8]) {
-        debug_assert_eq!(prev_row.len(), curr_row.len());
-        debug_assert_eq!(prev_row.len() % 6, 0);
-
-        let mut state = PaethState::<i16, 8>::default();
-        while prev_row.len() >= 8 {
-            // `u8x8` requires working with `[u8;8]`, but we can just load and ignore the first two
-            // bytes from the next pixel.  This optimization technique mimics the algorithm found
-            // in
-            // https://github.com/glennrp/libpng/blob/f8e5fa92b0e37ab597616f554bee254157998227/intel/filter_sse2_intrinsics.c#L130-L131
-            let b = u8x8::from_slice(prev_row);
-            let mut x = u8x8::from_slice(curr_row);
-
-            paeth_step(&mut state, b, &mut x);
-
-            // We can speculate that writing 8 bytes might be more efficient (just as with using
-            // `u8x8::from_slice` above), but we can't use that here, because we can't clobber the
-            // first bytes of the next pixel in the `curr_row`.
-            store6(x, curr_row);
-
-            prev_row = &prev_row[6..];
-            curr_row = &mut curr_row[6..];
-        }
-        // Can't use `u8x8::from_slice` for the last `[u8;6]`.
-        let b = load6(prev_row);
-        let mut x = load6(curr_row);
-        paeth_step(&mut state, b, &mut x);
-        store6(x, curr_row);
-    }
-}
-
 /// The byte level filter applied to scanlines to prepare them for compression.
 ///
 /// Compression in general benefits from repetitive data. The filter is a content-aware method of
@@ -349,18 +132,6 @@ fn filter_paeth_stbi(a: u8, b: u8, c: u8) -> u8 {
     t1
 }
 
-#[cfg(any(test, all(feature = "unstable", target_arch = "x86_64")))]
-fn filter_paeth_stbi_i16(a: i16, b: i16, c: i16) -> i16 {
-    // Like `filter_paeth_stbi` but vectorizes better when wrapped in SIMD types.
-    // Used for bpp=3 and bpp=6
-    let thresh = c * 3 - (a + b);
-    let lo = a.min(b);
-    let hi = a.max(b);
-    let t0 = if hi <= thresh { lo } else { c };
-    let t1 = if thresh <= lo { hi } else { t0 };
-    return t1;
-}
-
 fn filter_paeth_fpnge(a: u8, b: u8, c: u8) -> u8 {
     // This is an optimized version of the paeth filter from the PNG specification, proposed by
     // Luca Versari for [FPNGE](https://www.lucaversari.it/FJXL_and_FPNGE.pdf). It operates
@@ -419,6 +190,9 @@ pub(crate) fn unfilter(
         }
     }
 
+    // Auto-vectorization notes
+    // ========================
+    //
     // [2023/01 @okaneco] - Notes on optimizing decoding filters
     //
     // Links:
@@ -499,6 +273,27 @@ pub(crate) fn unfilter(
     // array operations and performing them component-wise may unlock previously
     // unavailable optimizations from the compiler, even when using the
     // `chunks_exact` methods for their potential auto-vectorization benefits.
+    //
+    // `std::simd` notes
+    // =================
+    //
+    // In the past we have experimented with `std::simd` for unfiltering.  This
+    // experiment was removed in https://github.com/image-rs/image-png/pull/585
+    // because:
+    //
+    // * The crate's microbenchmarks showed that `std::simd` didn't have a
+    //   significant advantage over auto-vectorization for most filters, except
+    //   for Paeth unfiltering - see
+    //   https://github.com/image-rs/image-png/pull/414#issuecomment-1736655668
+    // * In the crate's microbenchmarks `std::simd` seemed to help with Paeth
+    //   unfiltering only on x86/x64, with mixed results on ARM - see
+    //   https://github.com/image-rs/image-png/pull/539#issuecomment-2512748043
+    // * In Chromium end-to-end microbenchmarks `std::simd` either didn't help
+    //   or resulted in a small regression (as measured on x64).  See
+    //   https://crrev.com/c/6090592.
+    // * Field trial data from some "real world" scenarios shows that
+    //   performance can be quite good without relying on `std::simd` - see
+    //   https://github.com/image-rs/image-png/discussions/562#discussioncomment-13303307
     match filter {
         NoFilter => {}
         Sub => match tbpp {
@@ -779,13 +574,6 @@ pub(crate) fn unfilter(
                     }
                 }
                 BytesPerPixel::Three => {
-                    // Do not enable this algorithm on ARM, that would be a big performance hit
-                    #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
-                    {
-                        simd::unfilter_paeth3(previous, current);
-                        return;
-                    }
-
                     let mut a_bpp = [0; 3];
                     let mut c_bpp = [0; 3];
                     for (chunk, b_bpp) in current.chunks_exact_mut(3).zip(previous.chunks_exact(3))
@@ -828,12 +616,6 @@ pub(crate) fn unfilter(
                     }
                 }
                 BytesPerPixel::Six => {
-                    #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
-                    {
-                        simd::unfilter_paeth6(previous, current);
-                        return;
-                    }
-
                     let mut a_bpp = [0; 6];
                     let mut c_bpp = [0; 6];
                     for (chunk, b_bpp) in current.chunks_exact_mut(6).zip(previous.chunks_exact(6))
@@ -858,12 +640,6 @@ pub(crate) fn unfilter(
                     }
                 }
                 BytesPerPixel::Eight => {
-                    #[cfg(all(feature = "unstable", target_arch = "x86_64"))]
-                    {
-                        simd::unfilter_paeth_u8::<8>(previous, current);
-                        return;
-                    }
-
                     let mut a_bpp = [0; 8];
                     let mut c_bpp = [0; 8];
                     for (chunk, b_bpp) in current.chunks_exact_mut(8).zip(previous.chunks_exact(8))
@@ -1152,11 +928,9 @@ mod test {
                     let baseline = filter_paeth(a, b, c);
                     let fpnge = filter_paeth_fpnge(a, b, c);
                     let stbi = filter_paeth_stbi(a, b, c);
-                    let stbi_i16 = filter_paeth_stbi_i16(a as i16, b as i16, c as i16);
 
                     assert_eq!(baseline, fpnge);
                     assert_eq!(baseline, stbi);
-                    assert_eq!(baseline as i16, stbi_i16);
                 }
             }
         }

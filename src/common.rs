@@ -406,14 +406,6 @@ impl DeflateCompression {
             Compression::High => Self::Level(flate2::Compression::best().level() as u8),
         }
     }
-
-    pub(crate) fn closest_flate2_level(&self) -> flate2::Compression {
-        match self {
-            DeflateCompression::NoCompression => flate2::Compression::none(),
-            DeflateCompression::FdeflateUltraFast => flate2::Compression::new(1),
-            DeflateCompression::Level(level) => flate2::Compression::new(u32::from(*level)),
-        }
-    }
 }
 
 /// An unsigned integer scaled version of a floating point value,

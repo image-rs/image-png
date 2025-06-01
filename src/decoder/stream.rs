@@ -691,12 +691,21 @@ impl StreamingDecoder {
                 mut accumulated_count,
             } => {
                 debug_assert!(accumulated_count <= 4);
-                if accumulated_count == 0 && buf.len() >= 4 {
-                    // Handling these `accumulated_count` and `buf.len()` values in a separate `if`
-                    // branch is not strictly necessary - the `else` statement below is already
-                    // capable of handling these values.  The main reason for special-casing these
-                    // values is that they occur fairly frequently and special-casing them results
-                    // in performance gains.
+                // Handling these `accumulated_count` and `buf.len()` values in a separate `if`
+                // branch is not strictly necessary - the `else` statement below is already
+                // capable of handling these values.  The main reason for special-casing these
+                // values is that they occur fairly frequently and special-casing them results
+                // in performance gains.
+                if accumulated_count == 0 && buf.len() >= 8 && matches!(kind, U32ValueKind::Length)
+                {
+                    const CONSUMED_BYTES: usize = 8;
+                    self.start_chunk(
+                        ChunkType(buf[4..8].try_into().unwrap()),
+                        u32::from_be_bytes(buf[0..4].try_into().unwrap()),
+                        image_data,
+                    )
+                    .map(|decoded| (CONSUMED_BYTES, decoded))
+                } else if accumulated_count == 0 && buf.len() >= 4 {
                     const CONSUMED_BYTES: usize = 4;
                     self.parse_u32(kind, &buf[0..4], image_data)
                         .map(|decoded| (CONSUMED_BYTES, decoded))
@@ -828,65 +837,7 @@ impl StreamingDecoder {
             }
             U32ValueKind::Type { length } => {
                 let type_str = ChunkType(bytes);
-                if self.info.is_none() && type_str != IHDR {
-                    return Err(DecodingError::Format(
-                        FormatErrorInner::ChunkBeforeIhdr { kind: type_str }.into(),
-                    ));
-                }
-                if type_str != self.current_chunk.type_
-                    && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
-                {
-                    self.current_chunk.type_ = type_str;
-                    self.inflater.finish_compressed_chunks(image_data)?;
-                    self.inflater.reset();
-                    self.ready_for_idat_chunks = false;
-                    self.ready_for_fdat_chunks = false;
-                    self.state = Some(State::U32 {
-                        kind,
-                        bytes,
-                        accumulated_count: 4,
-                    });
-                    return Ok(Decoded::ImageDataFlushed);
-                }
-                self.state = match type_str {
-                    chunk::fdAT => {
-                        if !self.ready_for_fdat_chunks {
-                            return Err(DecodingError::Format(
-                                FormatErrorInner::UnexpectedRestartOfDataChunkSequence {
-                                    kind: chunk::fdAT,
-                                }
-                                .into(),
-                            ));
-                        }
-                        if length < 4 {
-                            return Err(DecodingError::Format(
-                                FormatErrorInner::FdatShorterThanFourBytes.into(),
-                            ));
-                        }
-                        Some(State::new_u32(U32ValueKind::ApngSequenceNumber))
-                    }
-                    IDAT => {
-                        if !self.ready_for_idat_chunks {
-                            return Err(DecodingError::Format(
-                                FormatErrorInner::UnexpectedRestartOfDataChunkSequence {
-                                    kind: IDAT,
-                                }
-                                .into(),
-                            ));
-                        }
-                        self.have_idat = true;
-                        Some(State::ImageData(type_str))
-                    }
-                    _ => Some(State::ReadChunkData(type_str)),
-                };
-                self.current_chunk.type_ = type_str;
-                if !self.decode_options.ignore_crc {
-                    self.current_chunk.crc.reset();
-                    self.current_chunk.crc.update(&type_str.0);
-                }
-                self.current_chunk.remaining = length;
-                self.current_chunk.raw_bytes.clear();
-                Ok(Decoded::ChunkBegin(length, type_str))
+                self.start_chunk(type_str, length, image_data)
             }
             U32ValueKind::Crc(type_str) => {
                 // If ignore_crc is set, do not calculate CRC. We set
@@ -955,6 +906,77 @@ impl StreamingDecoder {
                 Ok(Decoded::PartialChunk(chunk::fdAT))
             }
         }
+    }
+
+    fn start_chunk(
+        &mut self,
+        type_str: ChunkType,
+        length: u32,
+        image_data: &mut Vec<u8>,
+    ) -> Result<Decoded, DecodingError> {
+        if self.info.is_none() && type_str != IHDR {
+            return Err(DecodingError::Format(
+                FormatErrorInner::ChunkBeforeIhdr { kind: type_str }.into(),
+            ));
+        }
+
+        // Image data is flushed in the next chunk, as we detect that the sequence of IDAT/fdAT
+        // ends only when encountering a different chunk. In this case we need to go again.
+        if type_str != self.current_chunk.type_
+            && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
+        {
+            self.current_chunk.type_ = type_str;
+            self.inflater.finish_compressed_chunks(image_data)?;
+            self.inflater.reset();
+            self.ready_for_idat_chunks = false;
+            self.ready_for_fdat_chunks = false;
+            self.state = Some(State::U32 {
+                kind: U32ValueKind::Type { length },
+                bytes: type_str.0,
+                accumulated_count: 4,
+            });
+            return Ok(Decoded::ImageDataFlushed);
+        }
+
+        self.state = match type_str {
+            chunk::fdAT => {
+                if !self.ready_for_fdat_chunks {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::UnexpectedRestartOfDataChunkSequence {
+                            kind: chunk::fdAT,
+                        }
+                        .into(),
+                    ));
+                }
+                if length < 4 {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::FdatShorterThanFourBytes.into(),
+                    ));
+                }
+                Some(State::new_u32(U32ValueKind::ApngSequenceNumber))
+            }
+            IDAT => {
+                if !self.ready_for_idat_chunks {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::UnexpectedRestartOfDataChunkSequence { kind: IDAT }
+                            .into(),
+                    ));
+                }
+                self.have_idat = true;
+                Some(State::ImageData(type_str))
+            }
+            _ => Some(State::ReadChunkData(type_str)),
+        };
+
+        self.current_chunk.type_ = type_str;
+        if !self.decode_options.ignore_crc {
+            self.current_chunk.crc.reset();
+            self.current_chunk.crc.update(&type_str.0);
+        }
+
+        self.current_chunk.remaining = length;
+        self.current_chunk.raw_bytes.clear();
+        Ok(Decoded::ChunkBegin(length, type_str))
     }
 
     fn reserve_current_chunk(&mut self) -> Result<(), DecodingError> {

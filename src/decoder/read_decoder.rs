@@ -156,8 +156,7 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
                         decompress.pending_idat_bytes = consumed;
                         break;
                     }
-                    Decoded::ImageEnd|
-                    Decoded::ImageDataFlushed => {
+                    Decoded::ImageEnd | Decoded::ImageDataFlushed => {
                         decompress.more_data = false;
                         self.reader.consume(consumed);
                         break;

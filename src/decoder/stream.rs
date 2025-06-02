@@ -626,10 +626,7 @@ impl StreamingDecoder {
     /// Allows to stream partial data to the encoder. Returns a tuple containing the bytes that have
     /// been consumed from the input buffer and the current decoding result. If the decoded chunk
     /// was an image data chunk, it also appends the read data to `image_data`.
-    pub fn update<'a>(
-        &mut self,
-        mut buf: &'a [u8],
-    ) -> Result<(usize, Decoded), DecodingError> {
+    pub fn update<'a>(&mut self, mut buf: &'a [u8]) -> Result<(usize, Decoded), DecodingError> {
         if self.state.is_none() {
             return Err(DecodingError::Parameter(
                 ParameterErrorKind::PolledAfterFatalError.into(),
@@ -653,10 +650,7 @@ impl StreamingDecoder {
         Ok((len - buf.len(), Decoded::Nothing))
     }
 
-    fn next_state(
-        &mut self,
-        buf: &[u8],
-    ) -> Result<(usize, Decoded), DecodingError> {
+    fn next_state(&mut self, buf: &[u8]) -> Result<(usize, Decoded), DecodingError> {
         use self::State::*;
 
         // Driver should ensure that state is never None

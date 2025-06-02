@@ -69,16 +69,17 @@ impl UnfilteringBuffer {
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn uncompress_buffer(&mut self) -> (&mut [u8], usize) {
-        // // Opportunistically compact the current buffer by discarding bytes
-        // // before `prev_start`.
-        // if self.prev_start > 0 {
-        //     self.data_stream.copy_within(self.prev_start.., 0);
-        //     self.data_stream
-        //         .truncate(self.data_stream.len() - self.prev_start);
-        //     self.current_start -= self.prev_start;
-        //     self.prev_start = 0;
-        //     self.debug_assert_invariants();
-        // }
+        // Opportunistically compact the current buffer by discarding bytes
+        // before `prev_start`.
+        if self.prev_start > 128 * 1024 {
+            self.data_stream.copy_within(self.prev_start.., 0);
+            self.data_stream
+                .truncate(self.data_stream.len() - self.prev_start);
+            self.current_start -= self.prev_start;
+            self.unfilled_start -= self.prev_start;
+            self.prev_start = 0;
+            self.debug_assert_invariants();
+        }
 
         if self.unfilled_start + 8 * 1024 > self.data_stream.len() {
             self.data_stream.resize(self.unfilled_start + 8 * 1024, 0);

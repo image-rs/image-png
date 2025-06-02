@@ -642,7 +642,14 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Unfilter the next raw interlaced row into `self.unfiltering_buffer`.
     fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
         // Read image data until we have at least one full row (but possibly more than one).
-        while self.unfiltering_buffer.curr_row_len() < rowlen {
+        loop {
+            if self.unfiltering_buffer.curr_row_len() >= rowlen + 32 * 1024
+                || (self.subframe.consumed_and_flushed
+                    && self.unfiltering_buffer.curr_row_len() >= rowlen)
+            {
+                break;
+            }
+
             if self.subframe.consumed_and_flushed {
                 return Err(DecodingError::Format(
                     FormatErrorInner::NoMoreImageData.into(),

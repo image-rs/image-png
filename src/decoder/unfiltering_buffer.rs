@@ -66,16 +66,16 @@ impl UnfilteringBuffer {
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
-        // Opportunistically compact the current buffer by discarding bytes
-        // before `prev_start`.
-        if self.prev_start > 0 {
-            self.data_stream.copy_within(self.prev_start.., 0);
-            self.data_stream
-                .truncate(self.data_stream.len() - self.prev_start);
-            self.current_start -= self.prev_start;
-            self.prev_start = 0;
-            self.debug_assert_invariants();
-        }
+        // // Opportunistically compact the current buffer by discarding bytes
+        // // before `prev_start`.
+        // if self.prev_start > 0 {
+        //     self.data_stream.copy_within(self.prev_start.., 0);
+        //     self.data_stream
+        //         .truncate(self.data_stream.len() - self.prev_start);
+        //     self.current_start -= self.prev_start;
+        //     self.prev_start = 0;
+        //     self.debug_assert_invariants();
+        // }
 
         &mut self.data_stream
     }

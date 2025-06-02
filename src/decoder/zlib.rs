@@ -10,16 +10,6 @@ pub(super) struct ZlibStream {
     state: Box<fdeflate::Decompressor>,
     /// If there has been a call to decompress already.
     started: bool,
-    /// Remaining buffered decoded bytes.
-    /// The decoder sometimes wants inspect some already finished bytes for further decoding. So we
-    /// keep a total of 32KB of decoded data available as long as more data may be appended.
-    out_buffer: Vec<u8>,
-    /// The first index of `out_buffer` where new data can be written.
-    out_pos: usize,
-    /// The first index of `out_buffer` that hasn't yet been passed to our client
-    /// (i.e. not yet appended to the `image_data` parameter of `fn decompress` or `fn
-    /// finish_compressed_chunks`).
-    read_pos: usize,
     /// Limit on how many bytes can be decompressed in total.  This field is mostly used for
     /// performance optimizations (e.g. to avoid allocating and zeroing out large buffers when only
     /// a small image is being decoded).
@@ -37,9 +27,9 @@ impl ZlibStream {
         ZlibStream {
             state: Box::new(Decompressor::new()),
             started: false,
-            out_buffer: Vec::new(),
-            out_pos: 0,
-            read_pos: 0,
+            // out_buffer: Vec::new(),
+            // out_pos: 0,
+            // read_pos: 0,
             max_total_output: usize::MAX,
             ignore_adler32: true,
         }
@@ -47,10 +37,6 @@ impl ZlibStream {
 
     pub(crate) fn reset(&mut self) {
         self.started = false;
-        self.out_buffer.clear();
-        self.out_pos = 0;
-        self.read_pos = 0;
-        self.max_total_output = usize::MAX;
         *self.state = Decompressor::new();
     }
 
@@ -93,23 +79,32 @@ impl ZlibStream {
             return Ok(data.len());
         }
 
-        self.prepare_vec_for_appending();
+        // self.prepare_vec_for_appending();
 
         if !self.started && self.ignore_adler32 {
             self.state.ignore_adler32();
         }
 
+        let old_len = image_data.len();
+        image_data.resize(
+            (old_len + OUT_BUFFER_CHUNK_SIZE).min(self.max_total_output),
+            0,
+        );
+
         let (in_consumed, out_consumed) = self
             .state
-            .read(data, self.out_buffer.as_mut_slice(), self.out_pos, false)
+            .read(data, image_data, old_len, false)
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
             })?;
 
         self.started = true;
-        self.out_pos += out_consumed;
-        self.transfer_finished_data(image_data);
-        self.compact_out_buffer_if_needed();
+
+        image_data.resize(old_len + out_consumed, 0);
+
+        // self.out_pos += out_consumed;
+        // self.transfer_finished_data(image_data);
+        // self.compact_out_buffer_if_needed();
 
         Ok(in_consumed)
     }
@@ -127,106 +122,20 @@ impl ZlibStream {
             return Ok(());
         }
 
-        while !self.state.is_done() {
-            self.prepare_vec_for_appending();
-            let (_in_consumed, out_consumed) = self
-                .state
-                .read(&[], self.out_buffer.as_mut_slice(), self.out_pos, true)
+        let old_len = image_data.len();
+        image_data.resize(
+            (old_len + OUT_BUFFER_CHUNK_SIZE).min(self.max_total_output),
+            0,
+        );
+
+        let (_in_consumed, out_consumed) =
+            self.state
+                .read(&[], image_data, old_len, true)
                 .map_err(|err| {
                     DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
                 })?;
 
-            self.out_pos += out_consumed;
-
-            if !self.state.is_done() {
-                let transferred = self.transfer_finished_data(image_data);
-                assert!(
-                    transferred > 0 || out_consumed > 0,
-                    "No more forward progress made in stream decoding."
-                );
-                self.compact_out_buffer_if_needed();
-            }
-        }
-
-        self.transfer_finished_data(image_data);
-        self.out_buffer.clear();
+        image_data.resize(old_len + out_consumed, 0);
         Ok(())
-    }
-
-    /// Resize the vector to allow allocation of more data.
-    fn prepare_vec_for_appending(&mut self) {
-        // The `debug_assert` below explains why we can use `>=` instead of `>` in the condition
-        // that compares `self.out_post >= self.max_total_output` in the next `if` statement.
-        debug_assert!(!self.state.is_done());
-        if self.out_pos >= self.max_total_output {
-            // This can happen when the `max_total_output` was miscalculated (e.g.
-            // because the `IHDR` chunk was malformed and didn't match the `IDAT` chunk).  In
-            // this case, let's reset `self.max_total_output` before further calculations.
-            self.max_total_output = usize::MAX;
-        }
-
-        let current_len = self.out_buffer.len();
-        let desired_len = self
-            .out_pos
-            .saturating_add(OUT_BUFFER_CHUNK_SIZE)
-            .min(self.max_total_output);
-        if current_len >= desired_len {
-            return;
-        }
-
-        let buffered_len = self.decoding_size(self.out_buffer.len());
-        debug_assert!(self.out_buffer.len() <= buffered_len);
-        self.out_buffer.resize(buffered_len, 0u8);
-    }
-
-    fn decoding_size(&self, len: usize) -> usize {
-        // Allocate one more chunk size than currently or double the length while ensuring that the
-        // allocation is valid and that any cursor within it will be valid.
-        len
-            // This keeps the buffer size a power-of-two, required by miniz_oxide.
-            .saturating_add(OUT_BUFFER_CHUNK_SIZE.max(len))
-            // Ensure all buffer indices are valid cursor positions.
-            // Note: both cut off and zero extension give correct results.
-            .min(u64::MAX as usize)
-            // Ensure the allocation request is valid.
-            // TODO: maximum allocation limits?
-            .min(isize::MAX as usize)
-            // Don't unnecessarily allocate more than `max_total_output`.
-            .min(self.max_total_output)
-    }
-
-    fn transfer_finished_data(&mut self, image_data: &mut Vec<u8>) -> usize {
-        let transferred = &self.out_buffer[self.read_pos..self.out_pos];
-        image_data.extend_from_slice(transferred);
-        self.read_pos = self.out_pos;
-        transferred.len()
-    }
-
-    fn compact_out_buffer_if_needed(&mut self) {
-        // [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
-        // "deflate/inflate compression with a sliding window (which is an upper bound on the
-        // distances appearing in the deflate stream) of at most 32768 bytes".
-        //
-        // `fdeflate` requires that we keep this many most recently decompressed bytes in the
-        // `out_buffer` - this allows referring back to them when handling "length and distance
-        // codes" in the deflate stream).
-        const LOOKBACK_SIZE: usize = 32768;
-
-        // Compact `self.out_buffer` when "needed".  Doing this conditionally helps to put an upper
-        // bound on the amortized cost of copying the data within `self.out_buffer`.
-        //
-        // TODO: The factor of 4 is an ad-hoc heuristic.  Consider measuring and using a different
-        // factor.  (Early experiments seem to indicate that factor of 4 is faster than a factor of
-        // 2 and 4 * `LOOKBACK_SIZE` seems like an acceptable memory trade-off.  Higher factors
-        // result in higher memory usage, but the compaction cost is lower - factor of 4 means
-        // that 1 byte gets copied during compaction for 3 decompressed bytes.)
-        if self.out_pos > LOOKBACK_SIZE * 4 {
-            // Only preserve the `lookback_buffer` and "throw away" the earlier prefix.
-            let lookback_buffer = self.out_pos.saturating_sub(LOOKBACK_SIZE)..self.out_pos;
-            let preserved_len = lookback_buffer.len();
-            self.out_buffer.copy_within(lookback_buffer, 0);
-            self.read_pos = preserved_len;
-            self.out_pos = preserved_len;
-        }
     }
 }

@@ -6,6 +6,7 @@ use std::{borrow::Cow, cmp::min};
 
 use crc32fast::Hasher as Crc32;
 
+use super::zlib::UnfilterBuf;
 use super::zlib::ZlibStream;
 use crate::chunk::{self, ChunkType, IDAT, IEND, IHDR};
 use crate::common::{
@@ -653,7 +654,7 @@ impl StreamingDecoder {
     pub fn update(
         &mut self,
         mut buf: &[u8],
-        image_data: &mut Vec<u8>,
+        mut image_data: Option<&mut UnfilterBuf<'_>>,
     ) -> Result<(usize, Decoded), DecodingError> {
         if self.state.is_none() {
             return Err(DecodingError::Parameter(
@@ -663,6 +664,8 @@ impl StreamingDecoder {
 
         let len = buf.len();
         while !buf.is_empty() {
+            let image_data = image_data.as_deref_mut();
+
             match self.next_state(buf, image_data) {
                 Ok((bytes, Decoded::Nothing)) => buf = &buf[bytes..],
                 Ok((bytes, result)) => {
@@ -681,7 +684,7 @@ impl StreamingDecoder {
     fn next_state(
         &mut self,
         buf: &[u8],
-        image_data: &mut Vec<u8>,
+        image_data: Option<&mut UnfilterBuf<'_>>,
     ) -> Result<(usize, Decoded), DecodingError> {
         use self::State::*;
 
@@ -782,10 +785,17 @@ impl StreamingDecoder {
                 debug_assert!(type_str == IDAT || type_str == chunk::fdAT);
                 let len = std::cmp::min(buf.len(), self.current_chunk.remaining as usize);
                 let buf = &buf[..len];
-                let consumed = self.inflater.decompress(buf, image_data)?;
+
+                let consumed = if let Some(image_data) = image_data {
+                    self.inflater.decompress(buf, image_data)?
+                } else {
+                    len
+                };
+
                 if !self.decode_options.ignore_crc {
                     self.current_chunk.crc.update(&buf[..consumed]);
                 }
+
                 self.current_chunk.remaining -= consumed as u32;
                 if self.current_chunk.remaining == 0 {
                     self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
@@ -801,7 +811,7 @@ impl StreamingDecoder {
         &mut self,
         kind: U32ValueKind,
         u32_be_bytes: &[u8],
-        image_data: &mut Vec<u8>,
+        image_data: Option<&mut UnfilterBuf<'_>>,
     ) -> Result<Decoded, DecodingError> {
         debug_assert_eq!(u32_be_bytes.len(), 4);
         let bytes = u32_be_bytes.try_into().unwrap();
@@ -843,7 +853,10 @@ impl StreamingDecoder {
                     && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
                 {
                     self.current_chunk.type_ = type_str;
-                    self.inflater.finish_compressed_chunks(image_data)?;
+                    if let Some(image_data) = image_data {
+                        self.inflater.finish_compressed_chunks(image_data)?;
+                    }
+
                     self.inflater.reset();
                     self.ready_for_idat_chunks = false;
                     self.ready_for_fdat_chunks = false;
@@ -1674,8 +1687,11 @@ impl StreamingDecoder {
                 // TODO: Calculate **exact** IDAT size for interlaced images.
                 raw_row_len = raw_row_len.saturating_mul(2);
             }
+
+            /* FIXME: we can still track this
             self.inflater
                 .set_max_total_output((height as usize).saturating_mul(raw_row_len));
+            */
         }
 
         self.info = Some(Info {

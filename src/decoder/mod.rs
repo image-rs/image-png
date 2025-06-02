@@ -3,7 +3,6 @@ mod read_decoder;
 pub(crate) mod stream;
 pub(crate) mod transform;
 mod unfiltering_buffer;
-mod zlib;
 
 use self::read_decoder::{ImageDataCompletionStatus, ReadDecoder};
 use self::stream::{DecodeOptions, DecodingError, FormatErrorInner};
@@ -658,7 +657,7 @@ impl<R: BufRead + Seek> Reader<R> {
 
             match self
                 .decoder
-                .decode_image_data(self.unfiltering_buffer.as_mut_vec())?
+                .decode_image_data(&mut self.unfiltering_buffer)?
             {
                 ImageDataCompletionStatus::ExpectingMoreData => (),
                 ImageDataCompletionStatus::Done => self.mark_subframe_as_consumed_and_flushed(),

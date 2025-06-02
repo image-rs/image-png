@@ -6,7 +6,6 @@ use std::{borrow::Cow, cmp::min};
 
 use crc32fast::Hasher as Crc32;
 
-use super::zlib::ZlibStream;
 use crate::chunk::{self, ChunkType, IDAT, IEND, IHDR};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, ColorType, ContentLightLevelInfo, DisposeOp, FrameControl,
@@ -91,7 +90,7 @@ pub enum Decoded {
     PixelDimensions(PixelDimensions),
     AnimationControl(AnimationControl),
     FrameControl(FrameControl),
-    /// Decoded raw image data.
+    /// Consumed bytes are raw zlib compressed image data.
     ImageData,
     /// The last of a consecutive chunk of IDAT was done.
     /// This is distinct from ChunkComplete which only marks that some IDAT chunk was completed but
@@ -448,7 +447,7 @@ impl From<TextDecodingError> for DecodingError {
 /// Decoder configuration options
 #[derive(Clone)]
 pub struct DecodeOptions {
-    ignore_adler32: bool,
+    pub(crate) ignore_adler32: bool,
     ignore_crc: bool,
     ignore_text_chunk: bool,
     ignore_iccp_chunk: bool,
@@ -519,8 +518,6 @@ impl DecodeOptions {
 pub struct StreamingDecoder {
     state: Option<State>,
     current_chunk: ChunkState,
-    /// The inflater state handling consecutive `IDAT` and `fdAT` chunks.
-    inflater: ZlibStream,
     /// The complete image info read from all prior chunks.
     pub(crate) info: Option<Info<'static>>,
     /// The animation chunk sequence number.
@@ -565,9 +562,6 @@ impl StreamingDecoder {
     }
 
     pub fn new_with_options(decode_options: DecodeOptions) -> StreamingDecoder {
-        let mut inflater = ZlibStream::new();
-        inflater.set_ignore_adler32(decode_options.ignore_adler32);
-
         StreamingDecoder {
             state: Some(State::new_u32(U32ValueKind::Signature1stU32)),
             current_chunk: ChunkState {
@@ -576,7 +570,6 @@ impl StreamingDecoder {
                 remaining: 0,
                 raw_bytes: Vec::with_capacity(CHUNK_BUFFER_SIZE),
             },
-            inflater,
             info: None,
             current_seq_no: None,
             have_idat: false,
@@ -594,7 +587,6 @@ impl StreamingDecoder {
         self.current_chunk.crc = Crc32::new();
         self.current_chunk.remaining = 0;
         self.current_chunk.raw_bytes.clear();
-        self.inflater.reset();
         self.info = None;
         self.current_seq_no = None;
         self.have_idat = false;
@@ -611,22 +603,6 @@ impl StreamingDecoder {
 
     pub fn set_ignore_iccp_chunk(&mut self, ignore_iccp_chunk: bool) {
         self.decode_options.set_ignore_iccp_chunk(ignore_iccp_chunk);
-    }
-
-    /// Return whether the decoder is set to ignore the Adler-32 checksum.
-    pub fn ignore_adler32(&self) -> bool {
-        self.inflater.ignore_adler32()
-    }
-
-    /// Set whether to compute and verify the Adler-32 checksum during
-    /// decompression. Return `true` if the flag was successfully set.
-    ///
-    /// The decoder defaults to `true`.
-    ///
-    /// This flag cannot be modified after decompression has started until the
-    /// [`StreamingDecoder`] is reset.
-    pub fn set_ignore_adler32(&mut self, ignore_adler32: bool) -> bool {
-        self.inflater.set_ignore_adler32(ignore_adler32)
     }
 
     /// Set whether to compute and verify the Adler-32 checksum during
@@ -650,10 +626,9 @@ impl StreamingDecoder {
     /// Allows to stream partial data to the encoder. Returns a tuple containing the bytes that have
     /// been consumed from the input buffer and the current decoding result. If the decoded chunk
     /// was an image data chunk, it also appends the read data to `image_data`.
-    pub fn update(
+    pub fn update<'a>(
         &mut self,
-        mut buf: &[u8],
-        image_data: &mut Vec<u8>,
+        mut buf: &'a [u8],
     ) -> Result<(usize, Decoded), DecodingError> {
         if self.state.is_none() {
             return Err(DecodingError::Parameter(
@@ -663,7 +638,7 @@ impl StreamingDecoder {
 
         let len = buf.len();
         while !buf.is_empty() {
-            match self.next_state(buf, image_data) {
+            match self.next_state(buf) {
                 Ok((bytes, Decoded::Nothing)) => buf = &buf[bytes..],
                 Ok((bytes, result)) => {
                     buf = &buf[bytes..];
@@ -681,7 +656,6 @@ impl StreamingDecoder {
     fn next_state(
         &mut self,
         buf: &[u8],
-        image_data: &mut Vec<u8>,
     ) -> Result<(usize, Decoded), DecodingError> {
         use self::State::*;
 
@@ -702,7 +676,7 @@ impl StreamingDecoder {
                     // values is that they occur fairly frequently and special-casing them results
                     // in performance gains.
                     const CONSUMED_BYTES: usize = 4;
-                    self.parse_u32(kind, &buf[0..4], image_data)
+                    self.parse_u32(kind, &buf[0..4])
                         .map(|decoded| (CONSUMED_BYTES, decoded))
                 } else {
                     let remaining_count = 4 - accumulated_count;
@@ -723,7 +697,7 @@ impl StreamingDecoder {
                         Ok((consumed_bytes, Decoded::Nothing))
                     } else {
                         debug_assert_eq!(accumulated_count, 4);
-                        self.parse_u32(kind, &bytes, image_data)
+                        self.parse_u32(kind, &bytes)
                             .map(|decoded| (consumed_bytes, decoded))
                     }
                 }
@@ -781,16 +755,16 @@ impl StreamingDecoder {
             ImageData(type_str) => {
                 debug_assert!(type_str == IDAT || type_str == chunk::fdAT);
                 let len = std::cmp::min(buf.len(), self.current_chunk.remaining as usize);
-                let buf = &buf[..len];
-                let consumed = self.inflater.decompress(buf, image_data)?;
-                self.current_chunk.crc.update(&buf[..consumed]);
-                self.current_chunk.remaining -= consumed as u32;
+                if !self.decode_options.ignore_crc {
+                    self.current_chunk.crc.update(&buf[..len]);
+                }
+                self.current_chunk.remaining -= len as u32;
                 if self.current_chunk.remaining == 0 {
                     self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
                 } else {
                     self.state = Some(ImageData(type_str));
                 }
-                Ok((consumed, Decoded::ImageData))
+                Ok((len, Decoded::ImageData))
             }
         }
     }
@@ -799,7 +773,6 @@ impl StreamingDecoder {
         &mut self,
         kind: U32ValueKind,
         u32_be_bytes: &[u8],
-        image_data: &mut Vec<u8>,
     ) -> Result<Decoded, DecodingError> {
         debug_assert_eq!(u32_be_bytes.len(), 4);
         let bytes = u32_be_bytes.try_into().unwrap();
@@ -841,8 +814,6 @@ impl StreamingDecoder {
                     && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
                 {
                     self.current_chunk.type_ = type_str;
-                    self.inflater.finish_compressed_chunks(image_data)?;
-                    self.inflater.reset();
                     self.ready_for_idat_chunks = false;
                     self.ready_for_fdat_chunks = false;
                     self.state = Some(State::U32 {
@@ -1076,7 +1047,6 @@ impl StreamingDecoder {
             }
             0
         });
-        self.inflater.reset();
         self.ready_for_fdat_chunks = true;
         let fc = FrameControl {
             sequence_number: next_seq_no,
@@ -1672,8 +1642,8 @@ impl StreamingDecoder {
                 // TODO: Calculate **exact** IDAT size for interlaced images.
                 raw_row_len = raw_row_len.saturating_mul(2);
             }
-            self.inflater
-                .set_max_total_output((height as usize).saturating_mul(raw_row_len));
+            // self.inflater
+            //     .set_max_total_output((height as usize).saturating_mul(raw_row_len));
         }
 
         self.info = Some(Info {

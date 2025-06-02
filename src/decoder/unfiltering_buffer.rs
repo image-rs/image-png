@@ -15,6 +15,8 @@ pub(crate) struct UnfilteringBuffer {
     /// This points at the filter type byte of the current row (i.e. the actual pixel data starts at `current_start + 1`)
     /// The pixel data is not-yet-`unfilter`-ed.
     current_start: usize,
+
+    unfilled_start: usize,
 }
 
 impl UnfilteringBuffer {
@@ -32,6 +34,7 @@ impl UnfilteringBuffer {
             data_stream: Vec::new(),
             prev_start: 0,
             current_start: 0,
+            unfilled_start: 0,
         };
         result.debug_assert_invariants();
         result
@@ -54,7 +57,7 @@ impl UnfilteringBuffer {
 
     /// Returns how many bytes of the current row are present in the buffer.
     pub fn curr_row_len(&self) -> usize {
-        self.data_stream.len() - self.current_start
+        self.unfilled_start - self.current_start
     }
 
     /// Returns a `&mut Vec<u8>` suitable for passing to
@@ -65,7 +68,7 @@ impl UnfilteringBuffer {
     /// `ReadDecoder` and `StreamingDecoder`).  TODO: Consider protecting the
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
-    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+    pub fn uncompress_buffer(&mut self) -> (&mut [u8], usize) {
         // // Opportunistically compact the current buffer by discarding bytes
         // // before `prev_start`.
         // if self.prev_start > 0 {
@@ -77,7 +80,16 @@ impl UnfilteringBuffer {
         //     self.debug_assert_invariants();
         // }
 
-        &mut self.data_stream
+        if self.unfilled_start + 8 * 1024 > self.data_stream.len() {
+            self.data_stream.resize(self.unfilled_start + 8 * 1024, 0);
+        }
+
+        (&mut self.data_stream, self.unfilled_start)
+    }
+
+    pub fn marked_valid(&mut self, bytes: usize) {
+        debug_assert!(bytes + self.unfilled_start <= self.data_stream.len());
+        self.unfilled_start += bytes;
     }
 
     /// Runs `unfilter` on the current row, and then shifts rows so that the current row becomes the previous row.

@@ -85,7 +85,8 @@ impl UnfilteringBuffer {
             self.data_stream.resize(self.unfilled_start + 8 * 1024, 0);
         }
 
-        (&mut self.data_stream, self.unfilled_start)
+        let end = self.data_stream.len().min(self.unfilled_start + 64 * 1024);
+        (&mut self.data_stream[..end], self.unfilled_start)
     }
 
     pub fn marked_valid(&mut self, bytes: usize) {

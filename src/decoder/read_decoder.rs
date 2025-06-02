@@ -14,8 +14,8 @@ struct DecompressState {
     zlib: Box<fdeflate::Decompressor>,
     /// Number of bytes from `reader` that have been consumed by `decoder`, but not yet decompressed into the output.
     pending_idat_bytes: usize,
-    /// Whether there is more data to read from the input stream.
-    more_data: bool,
+    /// Whether we've reached the end of the current sequence of IDAT / fDAT chunks.
+    end_of_input: bool,
 }
 
 /// Helper for encapsulating reading input from `Read` and feeding it into a `StreamingDecoder`
@@ -138,12 +138,12 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
             self.decompress = Some(DecompressState {
                 zlib,
                 pending_idat_bytes: 0,
-                more_data: true,
+                end_of_input: false,
             });
         }
         let decompress = self.decompress.as_mut().unwrap();
 
-        if decompress.more_data && decompress.pending_idat_bytes == 0 {
+        if !decompress.end_of_input && decompress.pending_idat_bytes == 0 {
             loop {
                 let buf = self.reader.fill_buf()?;
                 if buf.is_empty() {
@@ -157,7 +157,7 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
                         break;
                     }
                     Decoded::ImageEnd | Decoded::ImageDataFlushed => {
-                        decompress.more_data = false;
+                        decompress.end_of_input = true;
                         self.reader.consume(consumed);
                         break;
                     }
@@ -166,7 +166,6 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
                     | Decoded::ChunkComplete(_, _)
                     | Decoded::ChunkBegin(_, _)
                     | Decoded::PartialChunk(_) => {
-                        //return Ok(ImageDataCompletionStatus::ExpectingMoreData)
                         self.reader.consume(consumed);
                         continue;
                     }
@@ -177,17 +176,16 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
             }
         }
 
-        let (output, old_pos) = image_data.uncompress_buffer();
+        let input = self.reader.fill_buf()?;
+        let (output, output_pos) = image_data.uncompress_buffer();
 
-        // if decompress.pending_idat_bytes > 0 {
-        let buf = self.reader.fill_buf()?;
         let (in_consumed, out_consumed) = decompress
             .zlib
             .read(
-                &buf[..decompress.pending_idat_bytes],
+                &input[..decompress.pending_idat_bytes],
                 output,
-                old_pos,
-                !decompress.more_data,
+                output_pos,
+                decompress.end_of_input,
             )
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
@@ -196,13 +194,12 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
         self.reader.consume(in_consumed);
         decompress.pending_idat_bytes -= in_consumed;
         image_data.marked_valid(out_consumed);
-        // }
 
-        if decompress.more_data || decompress.pending_idat_bytes > 0 {
-            Ok(ImageDataCompletionStatus::ExpectingMoreData)
-        } else {
+        if decompress.end_of_input {
             self.decompress = None;
             Ok(ImageDataCompletionStatus::Done)
+        } else {
+            Ok(ImageDataCompletionStatus::ExpectingMoreData)
         }
     }
 

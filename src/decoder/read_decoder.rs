@@ -12,7 +12,7 @@ use crate::common::Info;
 struct DecompressState {
     /// The decompressor used for zlib streams.
     zlib: Box<fdeflate::Decompressor>,
-    /// Number of bytes from `reader`` that have been consumed by `decoder`, but not yet decompressed into the output.
+    /// Number of bytes from `reader` that have been consumed by `decoder`, but not yet decompressed into the output.
     pending_idat_bytes: usize,
     /// Whether there is more data to read from the input stream.
     more_data: bool,

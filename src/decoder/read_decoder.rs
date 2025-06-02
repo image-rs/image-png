@@ -187,7 +187,7 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
                 &buf[..decompress.pending_idat_bytes],
                 output,
                 old_pos,
-                false, // !decompress.more_data,
+                !decompress.more_data,
             )
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())

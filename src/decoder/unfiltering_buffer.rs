@@ -40,7 +40,7 @@ impl UnfilteringBuffer {
 
     pub fn new(max_rowlen: usize) -> Self {
         let result = Self {
-            data_stream: Vec::new(),
+            data_stream: Vec::with_capacity(max_rowlen * 32),
             prev_start: 0,
             current_start: 0,
             filled: 0,

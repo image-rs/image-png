@@ -17,8 +17,7 @@ use crate::text_metadata::{ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
 use crate::traits::ReadBytesExt;
 use crate::{CodingIndependentCodePoints, Limits};
 
-/// TODO check if these size are reasonable
-pub const CHUNK_BUFFER_SIZE: usize = 32 * 1024;
+pub const CHUNK_BUFFER_SIZE: usize = 128;
 
 /// Determines if checksum checks should be disabled globally.
 ///
@@ -571,7 +570,12 @@ impl StreamingDecoder {
 
         StreamingDecoder {
             state: Some(State::new_u32(U32ValueKind::Signature1stU32)),
-            current_chunk: ChunkState::default(),
+            current_chunk: ChunkState {
+                type_: ChunkType([0; 4]),
+                crc: Crc32::new(),
+                remaining: 0,
+                raw_bytes: Vec::with_capacity(CHUNK_BUFFER_SIZE),
+            },
             inflater,
             info: None,
             current_seq_no: None,
@@ -1836,17 +1840,6 @@ impl Info<'_> {
 impl Default for StreamingDecoder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Default for ChunkState {
-    fn default() -> Self {
-        ChunkState {
-            type_: ChunkType([0; 4]),
-            crc: Crc32::new(),
-            remaining: 0,
-            raw_bytes: Vec::with_capacity(CHUNK_BUFFER_SIZE),
-        }
     }
 }
 

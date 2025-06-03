@@ -96,8 +96,15 @@ impl ZlibStream {
                 })?;
 
         self.started = true;
-        image_data.filled(filled + out_consumed);
-        image_data.commit((filled + out_consumed).saturating_sub(Self::LOOKBACK_SIZE));
+        let filled = filled + out_consumed;
+        image_data.filled(filled);
+
+        if self.state.is_done() {
+            image_data.commit(filled);
+        } else {
+            // See [`Self::LOOKBACK_SIZE`].
+            image_data.commit(filled.saturating_sub(Self::LOOKBACK_SIZE));
+        }
 
         Ok(in_consumed)
     }
@@ -112,6 +119,13 @@ impl ZlibStream {
         image_data: &mut UnfilterBuf<'_>,
     ) -> Result<(), DecodingError> {
         if !self.started {
+            return Ok(());
+        }
+
+        if self.state.is_done() {
+            // We can end up here only after the [`decompress`] call above has detected the state
+            // to be done, too. In this case the filled and committed amount of data are already
+            // equal to each other. So neither of them needs to be touched in any way.
             return Ok(());
         }
 

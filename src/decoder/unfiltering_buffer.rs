@@ -86,58 +86,22 @@ impl UnfilteringBuffer {
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn as_unfilled_buffer(&mut self) -> UnfilterBuf<'_> {
-        const GROWTH: usize = 128 * 1024;
-        let grown_len = self.filled + GROWTH;
+        if self.prev_start >= 128 * 1024 {
+            // We have to relocate the data to the start of the buffer.
+            self.data_stream
+                .copy_within(self.prev_start..self.filled, 0);
 
-        if grown_len < self.data_stream.len() {
-            return UnfilterBuf {
-                buffer: &mut self.data_stream,
-                filled: &mut self.filled,
-                available: &mut self.available,
-            };
+            // The data kept its relative position to `filled` which now lands exactly at
+            // the distance between prev_start and filled.
+            self.current_start -= self.prev_start;
+            self.available -= self.prev_start;
+            self.filled -= self.prev_start;
+            self.prev_start = 0;
         }
 
-        // We may want to grow the stream. That is if it has not yet allocated across our
-        // limit or if we must because there is not enough space at the start..
-        debug_assert!(self.current_start <= self.data_stream.len());
-
-        // We really only need to preserve the part from `available` onwards but but we do not
-        // separate lines so here we compress everything from the previous data onwards.
-        debug_assert!(self.prev_start <= self.available);
-        debug_assert!(self.prev_start <= self.filled);
-
-        // Grow if we're not yet at the limit anyways. And We need to be able to buffer at
-        // least a line to not starve the reader. And we must be able to relocate the current
-        // data. So grow in these instances too even if it is beyond the limit, it's a soft
-        // limit in this sense.
-        if grown_len < self.allocation_limit
-            // There is not enough room gained by shuffling. Plus we actually do want to grow a bit
-            // so avoid copying only a little bit of the input.
-            || self.allocation_limit / 2 >= self.prev_start
-        {
-            // There is never a reason to ever contract the vector.
-            let actual_len = self.data_stream.len().max(grown_len);
-            self.data_stream.resize(actual_len, 0);
-            return UnfilterBuf {
-                buffer: &mut self.data_stream,
-                filled: &mut self.filled,
-                available: &mut self.available,
-            };
+        if self.filled + 8 * 1024 > self.data_stream.len() {
+            self.data_stream.resize(self.filled + 8 * 1024, 0);
         }
-
-        // We have to relocate the data to the start of the buffer.
-        self.data_stream
-            .copy_within(self.prev_start..self.filled, 0);
-
-        // The data kept its relative position to `filled` which now lands exactly at
-        // the distance between prev_start and filled.
-        self.current_start -= self.prev_start;
-        self.available -= self.prev_start;
-        self.filled -= self.prev_start;
-        self.prev_start = 0;
-
-        let actual_len = self.data_stream.len().max(self.filled + GROWTH);
-        self.data_stream.resize(actual_len, 0);
 
         UnfilterBuf {
             buffer: &mut self.data_stream,

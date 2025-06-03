@@ -783,7 +783,9 @@ impl StreamingDecoder {
                 let len = std::cmp::min(buf.len(), self.current_chunk.remaining as usize);
                 let buf = &buf[..len];
                 let consumed = self.inflater.decompress(buf, image_data)?;
-                self.current_chunk.crc.update(&buf[..consumed]);
+                if !self.decode_options.ignore_crc {
+                    self.current_chunk.crc.update(&buf[..consumed]);
+                }
                 self.current_chunk.remaining -= consumed as u32;
                 if self.current_chunk.remaining == 0 {
                     self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));

@@ -23,8 +23,10 @@ pub(crate) struct UnfilteringBuffer {
     filled: usize,
     /// Length of data that can be modified.
     available: usize,
-    /// The maximum number of bytes that we should allocate in the `data_stream`.
-    allocation_limit: usize,
+    /// The number of bytes before we shift the buffer back.
+    shift_back_limit: usize,
+    /// The number of bytes to grow when we hit the buffer end.
+    growth_bytes: usize,
 }
 
 impl UnfilteringBuffer {
@@ -38,14 +40,35 @@ impl UnfilteringBuffer {
         debug_assert!(self.filled <= self.data_stream.len());
     }
 
-    pub fn new(max_rowlen: usize) -> Self {
+    pub fn new(max_rowlen: usize, height: usize) -> Self {
+        let data_stream_capacity = {
+            let max_data = max_rowlen
+                .checked_mul(height.min(32))
+                .and_then(|v| v.checked_next_multiple_of(256))
+                .unwrap_or(usize::MAX);
+            // We do not want to pre-allocate too much in case of a faulty image (no DOS by
+            // pretending to be very very large) and also we want to avoid allocating more data
+            // than we need for the image itself.
+            max_data.min(128 * 1024)
+        };
+
         let result = Self {
-            data_stream: Vec::with_capacity(max_rowlen * 32),
+            data_stream: Vec::with_capacity(data_stream_capacity),
             prev_start: 0,
             current_start: 0,
             filled: 0,
             available: 0,
-            allocation_limit: max_rowlen * 32,
+            shift_back_limit: {
+                // Prefer shifting by powers of two and only after having done some number of
+                // lines that then become free at the end of the buffer.
+                let rowlen_pot = max_rowlen
+                    .checked_mul(4)
+                    .and_then(|v| v.checked_next_power_of_two())
+                    .unwrap_or(isize::MAX as usize);
+                // But never shift back before we have a number of pages freed.
+                rowlen_pot.max(128 * 1024)
+            },
+            growth_bytes: 8 * 1024,
         };
 
         result.debug_assert_invariants();
@@ -86,7 +109,7 @@ impl UnfilteringBuffer {
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn as_unfilled_buffer(&mut self) -> UnfilterBuf<'_> {
-        if self.prev_start >= 128 * 1024 {
+        if self.prev_start >= self.shift_back_limit {
             // We have to relocate the data to the start of the buffer.
             self.data_stream
                 .copy_within(self.prev_start..self.filled, 0);
@@ -99,8 +122,8 @@ impl UnfilteringBuffer {
             self.prev_start = 0;
         }
 
-        if self.filled + 8 * 1024 > self.data_stream.len() {
-            self.data_stream.resize(self.filled + 8 * 1024, 0);
+        if self.filled + self.growth_bytes > self.data_stream.len() {
+            self.data_stream.resize(self.filled + self.growth_bytes, 0);
         }
 
         UnfilterBuf {

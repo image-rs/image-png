@@ -134,9 +134,18 @@ impl UnfilteringBuffer {
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn as_unfilled_buffer(&mut self) -> UnfilterBuf<'_> {
         if self.prev_start >= self.shift_back_limit {
-            // We have to relocate the data to the start of the buffer.
-            self.data_stream
-                .copy_within(self.prev_start..self.filled, 0);
+            // We have to relocate the data to the start of the buffer. Benchmarking suggests that
+            // the codegen for an unbounded range is better / different than the one for a bounded
+            // range. We prefer the former if the data overhead is not too high. `16` was
+            // determined experimentally and might be system (memory) dependent. There's also the
+            // question if we could be a little smarter and avoid crossing page boundaries when
+            // that is not required. Alas, microbenchmarking TBD.
+            if let Some(16..) = self.data_stream.len().checked_sub(self.filled) {
+                self.data_stream
+                    .copy_within(self.prev_start..self.filled, 0);
+            } else {
+                self.data_stream.copy_within(self.prev_start.., 0);
+            }
 
             // The data kept its relative position to `filled` which now lands exactly at
             // the distance between prev_start and filled.

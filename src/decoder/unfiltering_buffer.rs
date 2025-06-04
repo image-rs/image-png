@@ -133,7 +133,14 @@ impl UnfilteringBuffer {
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn as_unfilled_buffer(&mut self) -> UnfilterBuf<'_> {
-        if self.prev_start >= self.shift_back_limit {
+        if self.prev_start >= self.shift_back_limit
+            // Avoid the shift back if the buffer is still very empty. Consider how we got here: a
+            // previous decompression filled the buffer, then we unfiltered, we're now refilling
+            // the buffer again. The condition implies, the previous decompression filled at most
+            // half the buffer. Likely the same will happen again so the following decompression
+            // attempt will not yet be limited by the buffer length.
+            && self.filled >= self.data_stream.len() / 2
+        {
             // We have to relocate the data to the start of the buffer. Benchmarking suggests that
             // the codegen for an unbounded range is better / different than the one for a bounded
             // range. We prefer the former if the data overhead is not too high. `16` was

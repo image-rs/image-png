@@ -59,7 +59,7 @@ impl UnfilteringBuffer {
                 .and_then(|v| v.checked_mul(info.height.min(128) as usize))
                 // In the worst case this is additional room for use of unmasked SIMD moves. But
                 // the other idea here is that the allocator generally aligns the buffer.
-                .and_then(|v| v.checked_next_multiple_of(256))
+                .and_then(|v| checked_next_multiple_of(v, 256))
                 .unwrap_or(usize::MAX);
             // We do not want to pre-allocate too much in case of a faulty image (no DOS by
             // pretending to be very very large) and also we want to avoid allocating more data
@@ -79,7 +79,7 @@ impl UnfilteringBuffer {
                 // least that is the idea but the parameter is just benchmarking. Higher numbers
                 // did not result in performance gains but lowers also, so this is fickle. Maybe
                 // our shift back behavior can not be tuned very well.
-                .and_then(|v| v.checked_next_multiple_of(64))
+                .and_then(|v| checked_next_multiple_of(v, 64))
                 .unwrap_or(isize::MAX as usize);
             // But never shift back before we have a number of pages freed.
             rowlen_pot.max(128 * 1024)
@@ -187,4 +187,29 @@ impl UnfilteringBuffer {
 
         Ok(())
     }
+}
+
+fn checked_next_multiple_of(val: usize, factor: usize) -> Option<usize> {
+    if factor == 0 {
+        return None;
+    }
+
+    let remainder = val % factor;
+
+    if remainder > 0 {
+        val.checked_add(factor - remainder)
+    } else {
+        Some(val)
+    }
+}
+
+#[test]
+fn next_multiple_of_backport_testsuite() {
+    assert_eq!(checked_next_multiple_of(1, 0), None);
+    assert_eq!(checked_next_multiple_of(2, 0), None);
+    assert_eq!(checked_next_multiple_of(1, 2), Some(2));
+    assert_eq!(checked_next_multiple_of(2, 2), Some(2));
+    assert_eq!(checked_next_multiple_of(2, 5), Some(5));
+    assert_eq!(checked_next_multiple_of(1, usize::MAX), Some(usize::MAX));
+    assert_eq!(checked_next_multiple_of(usize::MAX, 2), None);
 }

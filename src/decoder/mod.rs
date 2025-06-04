@@ -18,6 +18,7 @@ use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
 use crate::FrameControl;
+pub use zlib::{UnfilterBuf, UnfilterRegion};
 
 pub use interlace_info::InterlaceInfo;
 use interlace_info::InterlaceInfoIter;
@@ -187,14 +188,15 @@ impl<R: BufRead + Seek> Decoder<R> {
 
     /// Reads all meta data until the first IDAT chunk
     pub fn read_info(mut self) -> Result<Reader<R>, DecodingError> {
-        self.read_header_info()?;
+        let info = self.read_header_info()?;
+        let unfiltering_buffer = UnfilteringBuffer::new(info);
 
         let mut reader = Reader {
             decoder: self.read_decoder,
             bpp: BytesPerPixel::One,
             subframe: SubframeInfo::not_yet_init(),
             remaining_frames: 0, // Temporary value - fixed below after reading `acTL` and `fcTL`.
-            unfiltering_buffer: UnfilteringBuffer::new(),
+            unfiltering_buffer,
             transform: self.transform,
             transform_fn: None,
             scratch_buffer: Vec::new(),
@@ -360,7 +362,7 @@ impl<R: BufRead + Seek> Reader<R> {
 
         self.subframe = SubframeInfo::new(self.info());
         self.bpp = self.info().bpp_in_prediction();
-        self.unfiltering_buffer = UnfilteringBuffer::new();
+        self.unfiltering_buffer.reset_all();
 
         // Allocate output buffer.
         let buflen = self.output_line_size(self.subframe.width);
@@ -559,7 +561,7 @@ impl<R: BufRead + Seek> Reader<R> {
         }
 
         self.remaining_frames = 0;
-        self.unfiltering_buffer = UnfilteringBuffer::new();
+        self.unfiltering_buffer.reset_all();
         self.decoder.read_until_end_of_input()?;
 
         self.finished = true;
@@ -649,10 +651,8 @@ impl<R: BufRead + Seek> Reader<R> {
                 ));
             }
 
-            match self
-                .decoder
-                .decode_image_data(self.unfiltering_buffer.as_mut_vec())?
-            {
+            let mut buffer = self.unfiltering_buffer.as_unfilled_buffer();
+            match self.decoder.decode_image_data(Some(&mut buffer))? {
                 ImageDataCompletionStatus::ExpectingMoreData => (),
                 ImageDataCompletionStatus::Done => self.mark_subframe_as_consumed_and_flushed(),
             }

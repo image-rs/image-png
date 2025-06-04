@@ -18,6 +18,7 @@ use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
 use crate::FrameControl;
+pub use zlib::{UnfilterBuf, UnfilterRegion};
 
 pub use interlace_info::InterlaceInfo;
 use interlace_info::InterlaceInfoIter;

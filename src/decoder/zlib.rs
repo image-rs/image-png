@@ -2,6 +2,16 @@ use super::{stream::FormatErrorInner, DecodingError};
 
 use fdeflate::Decompressor;
 
+/// An inplace buffer for decompression and filtering of PNG rowlines.
+///
+/// The underlying data structure is a vector, with additional markers denoting a region of bytes
+/// that are utilized by the decompression but not yet available to arbitrary modifications. The
+/// caller can still shift around data between calls to the stream decompressor as long as the data
+/// in the marked region is not modified and the indices adjusted accordingly. See
+/// [`UnfilterRegion`] that contains these markers.
+///
+/// Violating the invariants, i.e. modifying bytes in the marked region, results in absurdly wacky
+/// decompression output or panics but not undefined behavior.
 pub struct UnfilterBuf<'data> {
     // The data to be fed into the decoder for (zlib) decompression.
     pub(crate) buffer: &'data mut Vec<u8>,
@@ -9,6 +19,20 @@ pub struct UnfilterBuf<'data> {
     pub(crate) filled: &'data mut usize,
     // Where we record changes to the available byte.
     pub(crate) available: &'data mut usize,
+}
+
+/// A region into a buffer utilized as a [`UnfilterBuf`].
+///
+/// The span of data denoted by `filled..available` is the region of bytes that must be preserved
+/// for use by the decompression algorithm. It may be moved, e.g. by subtracting the same amount
+/// from both of these fields. Always ensure that `filled <= available`, the library does not
+/// violate this invariant when modifying this struct as an [`UnfilterBuf`].
+#[derive(Default, Clone, Copy)]
+pub struct UnfilterRegion {
+    /// The past-the-end index of byte that are allowed to be modified.
+    pub available: usize,
+    /// The past-the-end of bytes that have been written to.
+    pub filled: usize,
 }
 
 /// Ergonomics wrapper around `miniz_oxide::inflate::stream` for zlib compressed data.
@@ -148,6 +172,21 @@ impl ZlibStream {
         image_data.commit(filled);
 
         Ok(())
+    }
+}
+
+impl UnfilterRegion {
+    /// Use this region to decompress new filtered rowline data.
+    ///
+    /// Pass the wrapped buffer to
+    /// [`StreamingDecoder::update`][`super::stream::StreamingDecoder::update`] to fill it with
+    /// data and update the region indices.
+    pub fn as_buf<'data>(&'data mut self, buffer: &'data mut Vec<u8>) -> UnfilterBuf<'data> {
+        UnfilterBuf {
+            buffer,
+            filled: &mut self.filled,
+            available: &mut self.available,
+        }
     }
 }
 

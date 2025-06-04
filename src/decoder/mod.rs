@@ -188,12 +188,7 @@ impl<R: BufRead + Seek> Decoder<R> {
     /// Reads all meta data until the first IDAT chunk
     pub fn read_info(mut self) -> Result<Reader<R>, DecodingError> {
         let info = self.read_header_info()?;
-
-        let unfiltering_buffer = {
-            let max_rowline = info.width as usize * info.bytes_per_pixel();
-            let unfilter_height = info.height as usize;
-            UnfilteringBuffer::new(max_rowline, unfilter_height)
-        };
+        let unfiltering_buffer = UnfilteringBuffer::new(info);
 
         let mut reader = Reader {
             decoder: self.read_decoder,

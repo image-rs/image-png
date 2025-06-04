@@ -2,6 +2,7 @@ use super::stream::{DecodingError, FormatErrorInner};
 use super::zlib::UnfilterBuf;
 use crate::common::BytesPerPixel;
 use crate::filter::{unfilter, RowFilter};
+use crate::Info;
 
 // Buffer for temporarily holding decompressed, not-yet-`unfilter`-ed rows.
 pub(crate) struct UnfilteringBuffer {
@@ -40,10 +41,24 @@ impl UnfilteringBuffer {
         debug_assert!(self.filled <= self.data_stream.len());
     }
 
-    pub fn new(max_rowlen: usize, height: usize) -> Self {
+    /// Create a buffer tuned for filtering rows of the image type.
+    pub fn new(info: &Info<'_>) -> Self {
+        // We don't need all of `info` here so if that becomes a structural problem then these
+        // derived constants can be extracted into a parameter struct. For instance they may be
+        // adjusted according to platform hardware such as cache sizes.
         let data_stream_capacity = {
-            let max_data = max_rowlen
-                .checked_mul(height.min(32))
+            let max_data = info
+                .checked_raw_row_length()
+                // In the current state this is really dependent on IDAT sizes and the compression
+                // settings. We aim to avoid overallocation here, but that occurs in part due to
+                // the algorithm for draining the buffer, which at the time of writing is at each
+                // individual IDAT chunk boundary. So this is set for a quadratic image roughly
+                // fitting into a single 4k chunk at compression.. A very arbitrary choice made
+                // from (probably overfitting) a benchmark of that image size. With a different
+                // algorithm we may come to different buffer uses and have to re-evaluate.
+                .and_then(|v| v.checked_mul(info.height.min(128) as usize))
+                // In the worst case this is additional room for use of unmasked SIMD moves. But
+                // the other idea here is that the allocator generally aligns the buffer.
                 .and_then(|v| v.checked_next_multiple_of(256))
                 .unwrap_or(usize::MAX);
             // We do not want to pre-allocate too much in case of a faulty image (no DOS by
@@ -52,22 +67,31 @@ impl UnfilteringBuffer {
             max_data.min(128 * 1024)
         };
 
+        let shift_back_limit = {
+            // Prefer shifting by powers of two and only after having done some number of
+            // lines that then become free at the end of the buffer.
+            let rowlen_pot = info
+                .checked_raw_row_length()
+                // Ensure some number of rows are actually present before shifting back, i.e. next
+                // time around we want to be able to decode them without reallocating the buffer.
+                .and_then(|v| v.checked_mul(4))
+                // And also, we should be able to use aligned memcopy on the whole thing. Well at
+                // least that is the idea but the parameter is just benchmarking. Higher numbers
+                // did not result in performance gains but lowers also, so this is fickle. Maybe
+                // our shift back behavior can not be tuned very well.
+                .and_then(|v| v.checked_next_multiple_of(64))
+                .unwrap_or(isize::MAX as usize);
+            // But never shift back before we have a number of pages freed.
+            rowlen_pot.max(128 * 1024)
+        };
+
         let result = Self {
             data_stream: Vec::with_capacity(data_stream_capacity),
             prev_start: 0,
             current_start: 0,
             filled: 0,
             available: 0,
-            shift_back_limit: {
-                // Prefer shifting by powers of two and only after having done some number of
-                // lines that then become free at the end of the buffer.
-                let rowlen_pot = max_rowlen
-                    .checked_mul(4)
-                    .and_then(|v| v.checked_next_power_of_two())
-                    .unwrap_or(isize::MAX as usize);
-                // But never shift back before we have a number of pages freed.
-                rowlen_pot.max(128 * 1024)
-            },
+            shift_back_limit,
             growth_bytes: 8 * 1024,
         };
 

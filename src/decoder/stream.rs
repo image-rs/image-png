@@ -1681,19 +1681,6 @@ impl StreamingDecoder {
             }
         };
 
-        if let Some(mut raw_row_len) = color_type.checked_raw_row_length(bit_depth, width) {
-            if interlaced {
-                // This overshoots, but overestimating should be fine.
-                // TODO: Calculate **exact** IDAT size for interlaced images.
-                raw_row_len = raw_row_len.saturating_mul(2);
-            }
-
-            /* FIXME: we can still track this
-            self.inflater
-                .set_max_total_output((height as usize).saturating_mul(raw_row_len));
-            */
-        }
-
         self.info = Some(Info {
             width,
             height,

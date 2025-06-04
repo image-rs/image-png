@@ -13,11 +13,13 @@ use fdeflate::Decompressor;
 /// Violating the invariants, i.e. modifying bytes in the marked region, results in absurdly wacky
 /// decompression output or panics but not undefined behavior.
 pub struct UnfilterBuf<'data> {
-    // The data to be fed into the decoder for (zlib) decompression.
+    /// The data container. Starts with arbitrary data unrelated to the decoder, a slice of decoder
+    /// private data followed by free space for further decoder output. The regions are delimited
+    /// by `filled` and `available` which must be updated accordingly.
     pub(crate) buffer: &'data mut Vec<u8>,
-    // Where we record changes to the out position.
+    /// Where we record changes to the out position.
     pub(crate) filled: &'data mut usize,
-    // Where we record changes to the available byte.
+    /// Where we record changes to the available byte.
     pub(crate) available: &'data mut usize,
 }
 

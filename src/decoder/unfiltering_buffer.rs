@@ -167,7 +167,7 @@ impl UnfilteringBuffer {
         }
 
         UnfilterBuf {
-            buffer: &mut self.data_stream,
+            buffer: &mut self.data_stream[..self.filled + self.growth_bytes],
             filled: &mut self.filled,
             available: &mut self.available,
         }

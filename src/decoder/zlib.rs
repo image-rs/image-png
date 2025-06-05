@@ -114,9 +114,10 @@ impl ZlibStream {
         }
 
         let (buffer, filled) = image_data.borrow_mut();
+        let output_limit = (filled + 8 * 1024).min(buffer.len());
         let (in_consumed, out_consumed) =
             self.state
-                .read(data, buffer, filled, false)
+                .read(data, &mut buffer[..output_limit], filled, false)
                 .map_err(|err| {
                     DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
                 })?;

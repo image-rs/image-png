@@ -854,7 +854,18 @@ impl StreamingDecoder {
                 {
                     self.current_chunk.type_ = type_str;
                     if let Some(image_data) = image_data {
-                        self.inflater.finish_compressed_chunks(image_data)?;
+                        if !self.inflater.drain(image_data)? {
+                            // If we failed to fully drain the inflater then restore back to the
+                            // previous state. Since fdeflate only buffers at most 63-bits of
+                            // compressed input data, it is rather unlikely that we would run out of
+                            // space in the output buffer.
+                            self.state = Some(State::U32 {
+                                kind,
+                                bytes,
+                                accumulated_count: 4,
+                            });
+                            return Ok(Decoded::Nothing);
+                        }
                     }
 
                     self.ready_for_idat_chunks = false;

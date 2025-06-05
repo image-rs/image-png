@@ -16,7 +16,7 @@ pub struct UnfilterBuf<'data> {
     /// The data container. Starts with arbitrary data unrelated to the decoder, a slice of decoder
     /// private data followed by free space for further decoder output. The regions are delimited
     /// by `filled` and `available` which must be updated accordingly.
-    pub(crate) buffer: &'data mut Vec<u8>,
+    pub(crate) buffer: &'data mut [u8],
     /// Where we record changes to the out position.
     pub(crate) filled: &'data mut usize,
     /// Where we record changes to the available byte.
@@ -135,45 +135,41 @@ impl ZlibStream {
         Ok(in_consumed)
     }
 
-    /// Called after all consecutive IDAT chunks were handled.
+    /// Drain the decompressor and flush any remaining data into the `image_data` buffer.
     ///
-    /// The compressed stream can be split on arbitrary byte boundaries. This enables some cleanup
-    /// within the decompressor and flushing additional data which may have been kept back in case
-    /// more data were passed to it.
-    pub(crate) fn finish_compressed_chunks(
+    /// Returns whether there was enough space in `image_data` to write all the output data. If
+    /// not, this method can be called again to continue draining the decompressor.
+    pub(crate) fn drain(
         &mut self,
         image_data: &mut UnfilterBuf<'_>,
-    ) -> Result<(), DecodingError> {
+    ) -> Result<bool, DecodingError> {
         if !self.started {
-            return Ok(());
+            return Ok(true);
         }
 
         if self.state.is_done() {
             // We can end up here only after the [`decompress`] call above has detected the state
             // to be done, too. In this case the filled and committed amount of data are already
             // equal to each other. So neither of them needs to be touched in any way.
-            return Ok(());
+            return Ok(true);
         }
 
-        let (_, mut filled) = image_data.borrow_mut();
-        while !self.state.is_done() {
-            let (buffer, _) = image_data.borrow_mut();
-            let (_in_consumed, out_consumed) =
-                self.state.read(&[], buffer, filled, true).map_err(|err| {
-                    DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
-                })?;
+        let (buffer, filled) = image_data.borrow_mut();
+        let (_in_consumed, out_consumed) =
+            self.state.read(&[], buffer, filled, true).map_err(|err| {
+                DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
+            })?;
 
-            filled += out_consumed;
-
-            if !self.state.is_done() {
-                image_data.flush_allocate();
-            }
-        }
-
+        let filled = filled + out_consumed;
         image_data.filled(filled);
-        image_data.commit(filled);
 
-        Ok(())
+        if self.state.is_done() {
+            image_data.commit(filled);
+            Ok(true)
+        } else {
+            image_data.commit(filled.saturating_sub(Self::LOOKBACK_SIZE));
+            Ok(false)
+        }
     }
 }
 
@@ -183,7 +179,7 @@ impl UnfilterRegion {
     /// Pass the wrapped buffer to
     /// [`StreamingDecoder::update`][`super::stream::StreamingDecoder::update`] to fill it with
     /// data and update the region indices.
-    pub fn as_buf<'data>(&'data mut self, buffer: &'data mut Vec<u8>) -> UnfilterBuf<'data> {
+    pub fn as_buf<'data>(&'data mut self, buffer: &'data mut [u8]) -> UnfilterBuf<'data> {
         UnfilterBuf {
             buffer,
             filled: &mut self.filled,
@@ -203,10 +199,5 @@ impl UnfilterBuf<'_> {
 
     pub(crate) fn commit(&mut self, howmany: usize) {
         *self.available = howmany;
-    }
-
-    pub(crate) fn flush_allocate(&mut self) {
-        let len = self.buffer.len() + 32 * 1024;
-        self.buffer.resize(len, 0);
     }
 }

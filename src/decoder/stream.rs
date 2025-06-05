@@ -857,7 +857,6 @@ impl StreamingDecoder {
                         self.inflater.finish_compressed_chunks(image_data)?;
                     }
 
-                    self.inflater.reset();
                     self.ready_for_idat_chunks = false;
                     self.ready_for_fdat_chunks = false;
                     self.state = Some(State::U32 {

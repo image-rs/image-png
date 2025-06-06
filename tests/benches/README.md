@@ -9,6 +9,7 @@ Copyrights:
   downloaded at 2048px resolution and modified to use `ColorType::Indexed` with
   `convert -type palette -colors 256 2048px-Stadt_Onex_2021.png
   tests/benches/paletted-zune.png`.
+* `tango-icon-address-book-new-16.png`: Public Domain, file from the official Tango icon set distribution
 * `tango-icon-address-book-new-32.png`: Public Domain, file from the official Tango icon set distribution
 * `tango-icon-address-book-new-128-rsvg-convert.png`: Public Domain, converted from SVG with rsvg-convert
 * `lorem_ipsum_screenshot.png`: Public Domain, screenshot of Firefox text rendering on Linux

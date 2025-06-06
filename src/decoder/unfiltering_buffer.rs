@@ -26,11 +26,11 @@ pub(crate) struct UnfilteringBuffer {
     available: usize,
     /// The number of bytes before we shift the buffer back.
     shift_back_limit: usize,
-    /// The number of bytes to grow when we hit the buffer end.
-    growth_bytes: usize,
 }
 
 impl UnfilteringBuffer {
+    pub const GROWTH_BYTES: usize = 8 * 1024;
+
     /// Asserts in debug builds that all the invariants hold.  No-op in release
     /// builds.  Intended to be called after creating or mutating `self` to
     /// ensure that the final state preserves the invariants.
@@ -92,7 +92,6 @@ impl UnfilteringBuffer {
             filled: 0,
             available: 0,
             shift_back_limit,
-            growth_bytes: 8 * 1024,
         };
 
         result.debug_assert_invariants();
@@ -162,8 +161,8 @@ impl UnfilteringBuffer {
             self.prev_start = 0;
         }
 
-        if self.filled + self.growth_bytes > self.data_stream.len() {
-            self.data_stream.resize(self.filled + self.growth_bytes, 0);
+        if self.filled + Self::GROWTH_BYTES > self.data_stream.len() {
+            self.data_stream.resize(self.filled + Self::GROWTH_BYTES, 0);
         }
 
         UnfilterBuf {

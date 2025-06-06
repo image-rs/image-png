@@ -1,4 +1,4 @@
-use super::{stream::FormatErrorInner, DecodingError};
+use super::{stream::FormatErrorInner, unfiltering_buffer::UnfilteringBuffer, DecodingError};
 
 use fdeflate::Decompressor;
 
@@ -114,12 +114,13 @@ impl ZlibStream {
         }
 
         let (buffer, filled) = image_data.borrow_mut();
-        let (in_consumed, out_consumed) =
-            self.state
-                .read(data, buffer, filled, false)
-                .map_err(|err| {
-                    DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
-                })?;
+        let output_limit = (filled + UnfilteringBuffer::GROWTH_BYTES).min(buffer.len());
+        let (in_consumed, out_consumed) = self
+            .state
+            .read(data, &mut buffer[..output_limit], filled, false)
+            .map_err(|err| {
+                DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
+            })?;
 
         self.started = true;
         let filled = filled + out_consumed;

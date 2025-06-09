@@ -1733,7 +1733,9 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
         match self.writer.take() {
             Wrapper::Flate2(mut wrt) => wrt.flush()?,
             Wrapper::Chunk(mut wrt) => wrt.flush()?,
-            Wrapper::FDeflate(w) => { w.finish()?; }
+            Wrapper::FDeflate(w) => {
+                w.finish()?;
+            }
             // This handles both the case where we entered an unrecoverable state after zlib
             // decoding failure and after a panic while we had taken the chunk/zlib reader.
             Wrapper::Unrecoverable | Wrapper::None => {

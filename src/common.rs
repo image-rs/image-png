@@ -365,17 +365,21 @@ impl Default for Compression {
 pub enum DeflateCompression {
     /// Do not compress the data at all.
     ///
-    /// Useful for incompressible images,
-    /// or when speed is paramount and you don't care about size at all.
+    /// Useful for incompressible images, or when speed is paramount and you don't care about size
+    /// at all.
     ///
     /// This mode also disables filters, forcing [Filter::NoFilter].
     NoCompression,
 
     /// Excellent for creating lightly compressed PNG images very quickly.
     ///
-    /// Uses the [fdeflate](https://crates.io/crates/fdeflate) crate under the hood
-    /// to achieve speeds far exceeding what libpng is capable of
-    /// while still providing a decent compression ratio.
+    /// Uses the [fdeflate](https://crates.io/crates/fdeflate) crate under the hood to achieve
+    /// speeds far exceeding what libpng is capable of while still providing a decent compression
+    /// ratio.
+    ///
+    /// Note: When used in streaming mode, this compression level can actually result in files
+    /// *larger* than would be produced by `NoCompression` because it doesn't do any buffering of
+    /// the output stream to detect whether the data is being compressed or not.
     FdeflateUltraFast,
 
     /// Compression level between 1 and 9, where higher values mean better compression at the cost of

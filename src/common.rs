@@ -329,8 +329,8 @@ pub enum Compression {
     /// Extremely fast but light compression.
     ///
     /// Note: When used in streaming mode, this compression level can actually result in files
-    /// *larger* than would be produced by `NoCompression` because it doesn't do any buffering of
-    /// the output stream to detect whether the data is being compressed or not.
+    /// *larger* than would be produced by `NoCompression` on incompressible data because
+    /// it doesn't do any buffering of the output stream to detect whether the data is being compressed or not.
     Fastest,
     /// Extremely fast compression with a decent compression ratio.
     ///
@@ -339,7 +339,7 @@ pub enum Compression {
     /// better compression ratio than the fastest modes of other encoders.
     ///
     /// Like `Compression::Fast` this can currently produce files larger than `NoCompression` in
-    /// streaming mode. This may change in the future.
+    /// streaming mode when given incompressible data. This may change in the future.
     Fast,
     /// Balances encoding speed and compression ratio
     Balanced,

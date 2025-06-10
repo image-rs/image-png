@@ -1335,13 +1335,29 @@ impl<W: Write> Drop for ChunkWriter<'_, W> {
 /// variant is used to signal that.
 enum Wrapper<'a, W: Write> {
     Chunk(ChunkWriter<'a, W>),
-    Zlib(ZlibEncoder<ChunkWriter<'a, W>>),
+    Flate2(ZlibEncoder<ChunkWriter<'a, W>>),
+    FDeflate(fdeflate::Compressor<ChunkWriter<'a, W>>),
     Unrecoverable,
     /// This is used in-between, should never be matched
     None,
 }
 
 impl<'a, W: Write> Wrapper<'a, W> {
+    fn from_level(writer: ChunkWriter<'a, W>, compression: DeflateCompression) -> io::Result<Self> {
+        Ok(match compression {
+            DeflateCompression::NoCompression => {
+                Wrapper::Flate2(ZlibEncoder::new(writer, flate2::Compression::none()))
+            }
+            DeflateCompression::FdeflateUltraFast => {
+                Wrapper::FDeflate(fdeflate::Compressor::new(writer)?)
+            }
+            DeflateCompression::Level(level) => Wrapper::Flate2(ZlibEncoder::new(
+                writer,
+                flate2::Compression::new(u32::from(level)),
+            )),
+        })
+    }
+
     /// Like `Option::take` this returns the `Wrapper` contained
     /// in `self` and replaces it with `Wrapper::None`
     fn take(&mut self) -> Wrapper<'a, W> {
@@ -1399,10 +1415,9 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let mut chunk_writer = ChunkWriter::new(writer, buf_len);
         let (line_len, to_write) = chunk_writer.next_frame_info();
         chunk_writer.write_header()?;
-        let zlib = ZlibEncoder::new(chunk_writer, compression.closest_flate2_level());
 
         Ok(StreamWriter {
-            writer: Wrapper::Zlib(zlib),
+            writer: Wrapper::from_level(chunk_writer, compression)?,
             index: 0,
             prev_buf,
             curr_buf,
@@ -1610,7 +1625,9 @@ impl<'a, W: Write> StreamWriter<'a, W> {
                 let err = FormatErrorKind::Unrecoverable.into();
                 return Err(EncodingError::Format(err));
             }
-            Wrapper::Zlib(_) => unreachable!("never called on a half-finished frame"),
+            Wrapper::Flate2(_) | Wrapper::FDeflate(_) => {
+                unreachable!("never called on a half-finished frame")
+            }
             Wrapper::None => unreachable!(),
         };
         wrt.flush()?;
@@ -1628,10 +1645,13 @@ impl<'a, W: Write> StreamWriter<'a, W> {
 
         // now it can be taken because the next statements cannot cause any errors
         match self.writer.take() {
-            Wrapper::Chunk(wrt) => {
-                let encoder = ZlibEncoder::new(wrt, self.compression.closest_flate2_level());
-                self.writer = Wrapper::Zlib(encoder);
-            }
+            Wrapper::Chunk(wrt) => match Wrapper::from_level(wrt, self.compression) {
+                Ok(writer) => self.writer = writer,
+                Err(err) => {
+                    self.writer = Wrapper::Unrecoverable;
+                    return Err(err.into());
+                }
+            },
             _ => unreachable!(),
         };
 
@@ -1652,7 +1672,14 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
 
         if self.to_write == 0 {
             match self.writer.take() {
-                Wrapper::Zlib(wrt) => match wrt.finish() {
+                Wrapper::Flate2(wrt) => match wrt.finish() {
+                    Ok(chunk) => self.writer = Wrapper::Chunk(chunk),
+                    Err(err) => {
+                        self.writer = Wrapper::Unrecoverable;
+                        return Err(err);
+                    }
+                },
+                Wrapper::FDeflate(wrt) => match wrt.finish() {
                     Ok(chunk) => self.writer = Wrapper::Chunk(chunk),
                     Err(err) => {
                         self.writer = Wrapper::Unrecoverable;
@@ -1683,13 +1710,18 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
                 &mut filtered,
             );
             // This can't fail as the other variant is used only to allow the zlib encoder to finish
-            let wrt = match &mut self.writer {
-                Wrapper::Zlib(wrt) => wrt,
+            match &mut self.writer {
+                Wrapper::Flate2(wrt) => {
+                    wrt.write_all(&[filter_type as u8])?;
+                    wrt.write_all(&filtered)?;
+                }
+                Wrapper::FDeflate(wrt) => {
+                    wrt.write_data(&[filter_type as u8])?;
+                    wrt.write_data(&filtered)?;
+                }
                 _ => unreachable!(),
             };
 
-            wrt.write_all(&[filter_type as u8])?;
-            wrt.write_all(&filtered)?;
             mem::swap(&mut self.prev_buf, &mut self.curr_buf);
             self.index = 0;
         }
@@ -1698,9 +1730,12 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        match &mut self.writer {
-            Wrapper::Zlib(wrt) => wrt.flush()?,
-            Wrapper::Chunk(wrt) => wrt.flush()?,
+        match self.writer.take() {
+            Wrapper::Flate2(mut wrt) => wrt.flush()?,
+            Wrapper::Chunk(mut wrt) => wrt.flush()?,
+            Wrapper::FDeflate(w) => {
+                w.finish()?;
+            }
             // This handles both the case where we entered an unrecoverable state after zlib
             // decoding failure and after a panic while we had taken the chunk/zlib reader.
             Wrapper::Unrecoverable | Wrapper::None => {

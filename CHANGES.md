@@ -6,6 +6,9 @@
 * Improved the compression settings API for encoding.
 * `Decoder` now requires a reader that implements `Seek` and `BufRead` traits.
 * Bump bitflags dependency to 2.0.
+* `StreamingDecoder::update` now takes a structured `UnfilterBuf` argument
+  instead of a direct reference to a vector. This allows in-place
+  decompression. There is a public constructor for `UnfilterBuf`.
 
 ### Other additions
 

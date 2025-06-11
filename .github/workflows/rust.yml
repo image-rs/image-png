@@ -86,10 +86,9 @@ jobs:
   test_all_32:
     runs-on: ubuntu-latest
     container:
-      image: i386/debian
+      image: i386/rust
     steps:
     - uses: actions/checkout@v4
-    - run: rustup default stable
     - name: test
       run: >
         cargo test -v adam7::test_32_bit_machine

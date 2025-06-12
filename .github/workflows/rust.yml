@@ -86,8 +86,10 @@ jobs:
   test_all_32:
     runs-on: ubuntu-latest
     container:
-      image: node:20
+      image: i386/rust
     steps:
+    - name: install node
+    - run: apt update && apt install nodejs -y
     - uses: actions/checkout@v4
     - run: rustup default stable
     - name: test

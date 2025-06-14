@@ -1599,16 +1599,33 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     /// [`Writer`], then it will also do a check on their correctness. Differently from
     /// [`Writer::finish`], this just `flush`es, returns error if some data is abandoned.
     pub fn finish(mut self) -> Result<()> {
+        self.finish_mut()
+    }
+
+    /// Internal helper that can be called both from `fn finish(mut self)`
+    /// and from `fn drop(&mut self)`.
+    fn finish_mut(&mut self) -> Result<()> {
         if self.to_write > 0 {
             let err = FormatErrorKind::MissingData(self.to_write).into();
             return Err(EncodingError::Format(err));
         }
 
-        // TODO: call `writer.finish` somehow?
         self.flush()?;
-
-        if let Wrapper::Chunk(wrt) = self.writer.take() {
-            wrt.writer.validate_sequence_done()?;
+        match self.writer.take() {
+            Wrapper::Chunk(wrt) => {
+                wrt.writer.validate_sequence_done()?;
+            }
+            Wrapper::FDeflate(wrt) => {
+                wrt.finish()?;
+            }
+            Wrapper::Flate2(wrt) => {
+                wrt.finish()?;
+            }
+            Wrapper::None => unreachable!(),
+            Wrapper::Unrecoverable => {
+                let err = FormatErrorKind::Unrecoverable.into();
+                return Err(EncodingError::Format(err));
+            }
         }
 
         Ok(())
@@ -1730,12 +1747,10 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        match self.writer.take() {
-            Wrapper::Flate2(mut wrt) => wrt.flush()?,
-            Wrapper::Chunk(mut wrt) => wrt.flush()?,
-            Wrapper::FDeflate(w) => {
-                w.finish()?;
-            }
+        match &mut self.writer {
+            Wrapper::Flate2(wrt) => wrt.flush()?,
+            Wrapper::Chunk(wrt) => wrt.flush()?,
+            Wrapper::FDeflate(_) => (), // TODO: Add `flush()` to `fdeflate::Compressor`?
             // This handles both the case where we entered an unrecoverable state after zlib
             // decoding failure and after a panic while we had taken the chunk/zlib reader.
             Wrapper::Unrecoverable | Wrapper::None => {
@@ -1755,7 +1770,7 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
 
 impl<W: Write> Drop for StreamWriter<'_, W> {
     fn drop(&mut self) {
-        let _ = self.flush();
+        let _ = self.finish_mut();
     }
 }
 
@@ -2398,6 +2413,60 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn test_stream_flushing(compression: Compression) -> Result<()> {
+        let output = vec![0u8; 1024];
+        let mut cursor = Cursor::new(output);
+
+        let mut encoder = Encoder::new(&mut cursor, 8, 8);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_compression(compression);
+        let mut writer = encoder.write_header()?;
+        let mut stream = writer.stream_writer()?;
+
+        for _ in 0..8 {
+            let written = stream.write(&[1; 32])?;
+            assert_eq!(written, 32);
+            stream.flush()?;
+        }
+        stream.finish()?;
+        drop(writer);
+
+        {
+            cursor.set_position(0);
+            let mut decoder = Decoder::new(cursor).read_info().expect("A valid image");
+            let mut buffer = [0u8; 256];
+            decoder.next_frame(&mut buffer[..]).expect("Valid read");
+            assert_eq!(buffer, [1; 256]);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn stream_flushing_with_high_compression() -> Result<()> {
+        test_stream_flushing(Compression::High)
+    }
+
+    #[test]
+    fn stream_flushing_with_balanced_compression() -> Result<()> {
+        test_stream_flushing(Compression::Balanced)
+    }
+
+    #[test]
+    fn stream_flushing_with_fast_compression() -> Result<()> {
+        test_stream_flushing(Compression::Fast)
+    }
+
+    #[test]
+    fn stream_flushing_with_fastest_compression() -> Result<()> {
+        test_stream_flushing(Compression::Fastest)
+    }
+
+    #[test]
+    fn stream_flushing_with_no_compression() -> Result<()> {
+        test_stream_flushing(Compression::NoCompression)
     }
 
     #[test]

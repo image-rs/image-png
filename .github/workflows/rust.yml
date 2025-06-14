@@ -83,6 +83,15 @@ jobs:
     - name: test
       run: >
         cargo test -v --all-targets
+  test_all_32:
+    runs-on: ubuntu-latest
+    container:
+      image: uriht/i386-rust-node
+    steps:
+    - uses: actions/checkout@v4
+    - name: test
+      run: >
+        cargo test -v adam7::test_32_bit_machine
   rustfmt:
     runs-on: ubuntu-latest
     steps:

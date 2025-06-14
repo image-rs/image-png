@@ -507,6 +507,11 @@ fn test_expand_pass_subbyte() {
     );
 }
 
+#[test]
+fn test_32_bit_machine() {
+    multibyte_expand_pass_test_helper(1, 256000000, 32);
+}
+
 #[cfg(test)]
 fn create_adam7_info_for_tests(pass: u8, line: u32, img_width: usize) -> Adam7Info {
     let width = {
@@ -519,4 +524,22 @@ fn create_adam7_info_for_tests(pass: u8, line: u32, img_width: usize) -> Adam7In
     };
 
     Adam7Info { pass, line, width }
+}
+
+#[cfg(test)]
+fn multibyte_expand_pass_test_helper(width: usize, height: usize, bits_pp: u8) {
+    use rand::Rng;
+
+    let bytes_pp = bits_pp / 8;
+    let size = width * height * bytes_pp as usize;
+    let img = &mut vec![0u8; size];
+    let img_row_stride = width * bytes_pp as usize;
+    let mut rng = rand::thread_rng();
+
+    for it in Adam7Iterator::new(width as u32, height as u32).into_iter() {
+        let interlace_size = it.width * (bytes_pp as u32);
+        let interlaced_row: Vec<_> = (0..interlace_size).map(|_| rng.gen::<u8>()).collect();
+
+        expand_pass(img, img_row_stride, &interlaced_row, &it, bits_pp);
+    }
 }

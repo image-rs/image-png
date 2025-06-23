@@ -482,7 +482,7 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Returns the next processed row of the image (discarding `InterlaceInfo`).
     ///
     /// See also [`Reader.read_row`], which reads into a caller-provided buffer.
-    pub fn next_row(&mut self) -> Result<Option<Row>, DecodingError> {
+    pub fn next_row(&mut self) -> Result<Option<Row<'_>>, DecodingError> {
         self.next_interlaced_row()
             .map(|v| v.map(|v| Row { data: v.data }))
     }
@@ -490,7 +490,7 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Returns the next processed row of the image.
     ///
     /// See also [`Reader.read_row`], which reads into a caller-provided buffer.
-    pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow>, DecodingError> {
+    pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow<'_>>, DecodingError> {
         let mut output_buffer = mem::take(&mut self.scratch_buffer);
         output_buffer.resize(self.output_line_size(self.info().width), 0u8);
         let result = self.read_row(&mut output_buffer);

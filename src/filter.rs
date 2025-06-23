@@ -2,6 +2,175 @@ use core::convert::TryInto;
 
 use crate::{common::BytesPerPixel, Compression};
 
+#[cfg(feature = "unstable")]
+mod simd {
+    // Optional module that contains portable_simd versions of the most important unfiltering algorithms.
+    use core::convert::TryInto;
+    use core::simd::cmp::{SimdOrd, SimdPartialOrd};
+    use core::simd::num::{SimdInt, SimdUint};
+    use core::simd::{LaneCount, Simd, SupportedLaneCount};
+
+    // Import the fastest arch-specific scalar implementations from the outer file.
+    #[cfg(target_arch = "aarch64")]
+    use crate::filter::filter_paeth as filter_paeth_decode;
+    #[cfg(target_arch = "x86_64")]
+    use crate::filter::filter_paeth_stbi as filter_paeth_decode;
+
+    // AArch64 Paeth predictor. Ported from the libpng implementation at
+    // https://github.com/pnggroup/libpng/blob/master/arm/filter_neon_intrinsics.c
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn paeth_predictor_simd<const SIZE: usize>(
+        a_i16: Simd<i16, SIZE>,
+        b_i16: Simd<i16, SIZE>,
+        c_i16: Simd<i16, SIZE>,
+    ) -> Simd<u8, SIZE>
+    where
+        LaneCount<SIZE>: SupportedLaneCount,
+    {
+        // pa = abs(b - c)
+        let pa = (b_i16 - c_i16).abs();
+        // pb = abs(a - c)
+        let pb = (a_i16 - c_i16).abs();
+        // pc = abs(a + b - c - c)
+        let pc = (a_i16 + b_i16 - c_i16 - c_i16).abs();
+
+        let mut nearest = a_i16;
+        let mut min_dist = pa;
+
+        // Tie-breaking: left, then above, then upper-left
+        let pb_lt_min = pb.simd_lt(min_dist);
+        nearest = pb_lt_min.select(b_i16, nearest);
+        min_dist = pb_lt_min.select(pb, min_dist);
+
+        let pc_lt_min = pc.simd_lt(min_dist);
+        nearest = pc_lt_min.select(c_i16, nearest);
+
+        nearest.cast::<u8>()
+    }
+
+    // Paeth Predictor based on STBI formulation (often better for x64)
+    #[cfg(not(target_arch = "aarch64"))]
+    #[inline(always)]
+    fn paeth_predictor_simd<const SIZE: usize>(
+        a_i16: Simd<i16, SIZE>,
+        b_i16: Simd<i16, SIZE>,
+        c_i16: Simd<i16, SIZE>,
+    ) -> Simd<u8, SIZE>
+    where
+        LaneCount<SIZE>: SupportedLaneCount,
+    {
+        let thresh = c_i16 * Simd::splat(3) - (a_i16 + b_i16);
+        let lo = a_i16.simd_min(b_i16);
+        let hi = a_i16.simd_max(b_i16);
+        let t0 = hi.simd_le(thresh).select(lo, c_i16);
+        thresh.simd_le(lo).select(hi, t0).cast::<u8>()
+    }
+
+    // Core kernel for 3bpp paeth. Returns the next 'a' pixel.
+    #[inline(always)]
+    fn process_paeth_chunk_bpp3_s48(
+        // Previous 'a' pixel from the last pump, or zero if this is the first.
+        mut current_a: Simd<u8, 3>,
+        // 48 bytes from the row above.
+        b_vec: &Simd<u8, 48>,
+        // The last three bytes of the previous b_vec, or zero if this if the first.
+        c_vec_initial: Simd<u8, 3>,
+        // 48 bytes from the current row (filtered) also re-used as the output
+        x_out: &mut Simd<u8, 48>,
+    ) -> Simd<u8, 3> {
+        let x_in = *x_out;
+
+        let mut preds = [0u8; 48];
+
+        let mut c_vec = b_vec.shift_elements_right::<3>(0u8);
+        c_vec.as_mut_array()[0..3].copy_from_slice(c_vec_initial.as_array());
+
+        macro_rules! process_pixel {
+            ($shift:expr) => {
+                let a_i16 = current_a.cast::<i16>();
+                let b_i16 = b_vec.extract::<$shift, 3>().cast::<i16>();
+                let c_i16 = c_vec.extract::<$shift, 3>().cast::<i16>();
+                let pred = paeth_predictor_simd(a_i16, b_i16, c_i16);
+                current_a = x_in.extract::<$shift, 3>() + pred;
+                preds[$shift..$shift + 3].copy_from_slice(pred.as_array());
+            };
+        }
+
+        process_pixel!(0);
+        process_pixel!(3);
+        process_pixel!(6);
+        process_pixel!(9);
+        process_pixel!(12);
+        process_pixel!(15);
+        process_pixel!(18);
+        process_pixel!(21);
+        process_pixel!(24);
+        process_pixel!(27);
+        process_pixel!(30);
+        process_pixel!(33);
+        process_pixel!(36);
+        process_pixel!(39);
+        process_pixel!(42);
+        process_pixel!(45);
+
+        *x_out += Simd::from_array(preds);
+        current_a
+    }
+
+    // Apply Paeth unfiltering in 16 pixel chunks (3bpp).
+    pub fn paeth_3bpp(current: &mut [u8], prev: &[u8]) {
+        const BPP: usize = 3;
+        const STRIDE_BYTES: usize = 48; // 16 pixels * 3 bytes/pixel.
+
+        // Use the standard convention of [c] [b]
+        //                                [a] [x]
+        // We load 48 bytes of each and use a sliding window approach to minimize loads/stores.
+        // Initially set these to zero.
+        let mut a: Simd<u8, BPP> = Default::default(); // Left pixel (unfiltered), 'a'
+        let mut c: Simd<u8, BPP> = Default::default(); // Upper-left pixel (unfiltered), 'c' for the first pixel in a chunk
+
+        // Decide the number of chunks and setup iterators
+        let chunks = current.len() / STRIDE_BYTES;
+        let (simd_row, remainder_row) = current.split_at_mut(chunks * STRIDE_BYTES);
+        let (simd_prev_row, remainder_prev_row) = prev.split_at(chunks * STRIDE_BYTES);
+        let row_iter = simd_row.chunks_exact_mut(STRIDE_BYTES);
+        let prev_iter = simd_prev_row.chunks_exact(STRIDE_BYTES);
+        let combined_iter = row_iter.zip(prev_iter);
+
+        for (chunk, prev_chunk) in combined_iter {
+            let mut x: Simd<u8, STRIDE_BYTES> = Simd::<u8, STRIDE_BYTES>::from_slice(chunk);
+            let b: Simd<u8, STRIDE_BYTES> = Simd::<u8, STRIDE_BYTES>::from_slice(prev_chunk);
+
+            // Process the chunk using the SIMD helper, passing the initial 'c' (vlast)
+            a = process_paeth_chunk_bpp3_s48(a, &b, c, &mut x);
+
+            // Update `vlast` for the next chunk: it's the upper-left of the next chunk,
+            // which corresponds to the upper-right of the current chunk's `b` vector.
+            c = b.extract::<{ STRIDE_BYTES - BPP }, BPP>();
+
+            x.copy_to_slice(chunk);
+        }
+
+        // Scalar remainder
+        let mut a_bpp = a.to_array();
+        let mut c_bpp = c.to_array();
+        for (chunk, b_bpp) in remainder_row
+            .chunks_exact_mut(BPP)
+            .zip(remainder_prev_row.chunks_exact(BPP))
+        {
+            let new_chunk = [
+                chunk[0].wrapping_add(filter_paeth_decode(a_bpp[0], b_bpp[0], c_bpp[0])),
+                chunk[1].wrapping_add(filter_paeth_decode(a_bpp[1], b_bpp[1], c_bpp[1])),
+                chunk[2].wrapping_add(filter_paeth_decode(a_bpp[2], b_bpp[2], c_bpp[2])),
+            ];
+            *TryInto::<&mut [u8; BPP]>::try_into(chunk).unwrap() = new_chunk;
+            a_bpp = new_chunk;
+            c_bpp = b_bpp.try_into().unwrap();
+        }
+    }
+}
+
 /// The byte level filter applied to scanlines to prepare them for compression.
 ///
 /// Compression in general benefits from repetitive data. The filter is a content-aware method of
@@ -574,25 +743,32 @@ pub(crate) fn unfilter(
                     }
                 }
                 BytesPerPixel::Three => {
-                    let mut a_bpp = [0; 3];
-                    let mut c_bpp = [0; 3];
-
-                    let mut previous = &previous[..previous.len() / 3 * 3];
-                    let current_len = current.len();
-                    let mut current = &mut current[..current_len / 3 * 3];
-
-                    while let ([c0, c1, c2, c_rest @ ..], [p0, p1, p2, p_rest @ ..]) =
-                        (current, previous)
+                    #[cfg(feature = "unstable")]
                     {
-                        current = c_rest;
-                        previous = p_rest;
+                        simd::paeth_3bpp(current, previous);
+                    }
+                    #[cfg(not(feature = "unstable"))]
+                    {
+                        let mut a_bpp = [0; 3];
+                        let mut c_bpp = [0; 3];
 
-                        *c0 = c0.wrapping_add(filter_paeth_decode(a_bpp[0], *p0, c_bpp[0]));
-                        *c1 = c1.wrapping_add(filter_paeth_decode(a_bpp[1], *p1, c_bpp[1]));
-                        *c2 = c2.wrapping_add(filter_paeth_decode(a_bpp[2], *p2, c_bpp[2]));
+                        let mut previous = &previous[..previous.len() / 3 * 3];
+                        let current_len = current.len();
+                        let mut current = &mut current[..current_len / 3 * 3];
 
-                        a_bpp = [*c0, *c1, *c2];
-                        c_bpp = [*p0, *p1, *p2];
+                        while let ([c0, c1, c2, c_rest @ ..], [p0, p1, p2, p_rest @ ..]) =
+                            (current, previous)
+                        {
+                            current = c_rest;
+                            previous = p_rest;
+
+                            *c0 = c0.wrapping_add(filter_paeth_decode(a_bpp[0], *p0, c_bpp[0]));
+                            *c1 = c1.wrapping_add(filter_paeth_decode(a_bpp[1], *p1, c_bpp[1]));
+                            *c2 = c2.wrapping_add(filter_paeth_decode(a_bpp[2], *p2, c_bpp[2]));
+
+                            a_bpp = [*c0, *c1, *c2];
+                            c_bpp = [*p0, *p1, *p2];
+                        }
                     }
                 }
                 BytesPerPixel::Four => {

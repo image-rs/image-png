@@ -7,7 +7,6 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use getopts::{Matches, Options, ParsingStyle};
-use term::{color, Attr};
 
 fn parse_args() -> Matches {
     let args: Vec<String> = env::args().collect();
@@ -75,8 +74,7 @@ fn final_channels(c: png::ColorType, trns: bool) -> u8 {
 fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
     // TODO improve performance by reusing allocations from decoder
     use png::Decoded::*;
-    let mut t = term::stdout()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "could not open terminal"))?;
+    let mut t = std::io::stdout();
     let data = &mut vec![0; 10 * 1024][..];
     let mut reader = io::BufReader::new(File::open(&fname)?);
     let fname = fname.as_ref().to_string_lossy();

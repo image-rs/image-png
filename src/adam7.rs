@@ -507,6 +507,12 @@ fn test_expand_pass_subbyte() {
     );
 }
 
+#[test]
+fn test_32_bit_machine() {
+    let expanded = multibyte_expand_pass_test_helper(1, 256000000, 32);
+    assert_eq!(*expanded.last().unwrap(), 0xff);
+}
+
 #[cfg(test)]
 fn create_adam7_info_for_tests(pass: u8, line: u32, img_width: usize) -> Adam7Info {
     let width = {
@@ -519,4 +525,23 @@ fn create_adam7_info_for_tests(pass: u8, line: u32, img_width: usize) -> Adam7In
     };
 
     Adam7Info { pass, line, width }
+}
+
+#[cfg(test)]
+fn multibyte_expand_pass_test_helper(width: usize, height: usize, bits_pp: u8) -> Vec<u8> {
+    let bytes_pp = bits_pp / 8;
+    let size = width * height * bytes_pp as usize;
+    let mut img = vec![0u8; size];
+    let img_row_stride = width * bytes_pp as usize;
+
+    for it in Adam7Iterator::new(width as u32, height as u32).into_iter() {
+        let interlace_size = it.width * (bytes_pp as u32);
+        // Ensure that expanded pixels are never empty bits. This differentiates the written bits
+        // from the initial bits that are all zeroed.
+        let interlaced_row: Vec<_> = (0..interlace_size).map(|_| 0xff).collect();
+
+        expand_pass(&mut img, img_row_stride, &interlaced_row, &it, bits_pp);
+    }
+
+    img
 }

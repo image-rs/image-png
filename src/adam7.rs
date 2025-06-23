@@ -116,23 +116,12 @@ impl Iterator for Adam7Iterator {
     }
 }
 
-fn subbyte_pixels(scanline: &[u8], bits_pp: usize) -> impl Iterator<Item = u8> + '_ {
-    (0..scanline.len() * 8)
-        .step_by(bits_pp)
-        .map(move |bit_idx| {
-            let byte_idx = bit_idx / 8;
-
-            // sub-byte samples start in the high-order bits
-            let rem = 8 - bit_idx % 8 - bits_pp;
-
-            match bits_pp {
-                // evenly divides bytes
-                1 => (scanline[byte_idx] >> rem) & 1,
-                2 => (scanline[byte_idx] >> rem) & 3,
-                4 => (scanline[byte_idx] >> rem) & 15,
-                _ => unreachable!(),
-            }
-        })
+fn subbyte_pixels<const N: usize>(
+    scanline: &[u8],
+    bit_pos: [u8; N],
+    mask: u8,
+) -> impl Iterator<Item = u8> + '_ {
+    (scanline.iter().copied()).flat_map(move |value| bit_pos.map(|n| (value >> n) & mask))
 }
 
 /// Given `row_stride`, interlace `info`, and bits-per-pixel, produce an iterator of bit positions
@@ -217,17 +206,35 @@ pub fn expand_pass(
 
     let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, bits_pp);
 
-    if bits_pp < 8 {
-        for (pos, px) in bit_indices.zip(subbyte_pixels(interlaced_row, bits_pp)) {
-            let rem = 8 - pos % 8 - bits_pp;
-            img[pos / 8] |= px << rem as u8;
+    match bits_per_pixel {
+        1 => {
+            const BIT_POS_1: [u8; 8] = [7, 6, 5, 4, 3, 2, 1, 0];
+            for (pos, px) in bit_indices.zip(subbyte_pixels(interlaced_row, BIT_POS_1, 0b1)) {
+                let rem = 8 - pos % 8 - bits_pp;
+                img[pos / 8] |= px << rem as u8;
+            }
         }
-    } else {
-        let bytes_pp = bits_pp / 8;
+        2 => {
+            const BIT_POS_2: [u8; 4] = [6, 4, 2, 0];
+            for (pos, px) in bit_indices.zip(subbyte_pixels(interlaced_row, BIT_POS_2, 0b11)) {
+                let rem = 8 - pos % 8 - bits_pp;
+                img[pos / 8] |= px << rem as u8;
+            }
+        }
+        4 => {
+            const BIT_POS_4: [u8; 2] = [4, 0];
+            for (pos, px) in bit_indices.zip(subbyte_pixels(interlaced_row, BIT_POS_4, 0b1111)) {
+                let rem = 8 - pos % 8 - bits_pp;
+                img[pos / 8] |= px << rem as u8;
+            }
+        }
+        _ => {
+            let bytes_pp = bits_pp / 8;
 
-        for (bitpos, px) in bit_indices.zip(interlaced_row.chunks(bytes_pp)) {
-            for (offset, val) in px.iter().enumerate() {
-                img[bitpos / 8 + offset] = *val;
+            for (bitpos, px) in bit_indices.zip(interlaced_row.chunks(bytes_pp)) {
+                for (offset, val) in px.iter().enumerate() {
+                    img[bitpos / 8 + offset] = *val;
+                }
             }
         }
     }
@@ -287,9 +294,11 @@ fn test_adam7() {
 
 #[test]
 fn test_subbyte_pixels() {
-    let scanline = &[0b10101010, 0b10101010];
+    const BIT_POS_1: [u8; 8] = [7, 6, 5, 4, 3, 2, 1, 0];
 
-    let pixels = subbyte_pixels(scanline, 1).collect::<Vec<_>>();
+    let scanline = &[0b10101010, 0b10101010];
+    let pixels = subbyte_pixels(scanline, BIT_POS_1, 1).collect::<Vec<_>>();
+
     assert_eq!(pixels.len(), 16);
     assert_eq!(pixels, [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]);
 }

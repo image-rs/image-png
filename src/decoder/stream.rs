@@ -1139,6 +1139,11 @@ impl StreamingDecoder {
                 num_frames: buf.read_be()?,
                 num_plays: buf.read_be()?,
             };
+            // The spec says that "0 is not a valid value" for `num_frames`.
+            // So let's ignore such malformed `acTL` chunks.
+            if actl.num_frames == 0 {
+                return Ok(Decoded::Nothing);
+            }
             self.info.as_mut().unwrap().animation_control = Some(actl);
             Ok(Decoded::AnimationControl(actl))
         }
@@ -3048,5 +3053,47 @@ mod tests {
         reader.next_frame(&mut buf).unwrap();
         assert_eq!(3093270825, crc32fast::hash(&buf));
         assert!(reader.info().trns.is_none());
+    }
+
+    /// This is a regression test for https://crbug.com/422421347
+    #[test]
+    fn test_actl_num_frames_zero() {
+        let width = 16;
+        let frame_data = generate_rgba8_with_width_and_height(width, width);
+
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+        write_actl(
+            &mut png,
+            &crate::AnimationControl {
+                num_frames: 0, // <= spec violation needed by this test
+                num_plays: 0,
+            },
+        );
+        // Presence of an `fcTL` chunk will prevent incrementing
+        // `num_frames` when calculating `remaining_frames` in
+        // `Decoder::read_info`.  So the test writes an `fcTL` chunk
+        // to end up with `remaining_frames == 0` if `parse_actl` allows
+        // `num_frames == 0`.
+        write_fctl(
+            &mut png,
+            &crate::FrameControl {
+                width,
+                height: width,
+                ..Default::default()
+            },
+        );
+        write_chunk(&mut png, b"IDAT", &frame_data);
+        write_iend(&mut png);
+
+        let mut reader = Decoder::new(Cursor::new(png)).read_info().unwrap();
+
+        // Using `next_interlaced_row` in the test, because it doesn't check
+        // `Reader::remaining_frames` (unlike `next_frame`), because it assumes that either
+        // `read_info` or `next_frame` leave `Reader` in a valid state.
+        //
+        // The test passes if these `next_interlaced_row` calls don't hit any `assert!` failures.
+        while let Some(_row) = reader.next_interlaced_row().unwrap() {}
     }
 }

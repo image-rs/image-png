@@ -1061,7 +1061,7 @@ impl<W: Write> Writer<W> {
     ///
     /// This borrows the writer which allows for manually appending additional
     /// chunks after the image data has been written.
-    pub fn stream_writer(&mut self) -> Result<StreamWriter<W>> {
+    pub fn stream_writer(&mut self) -> Result<StreamWriter<'_, W>> {
         self.stream_writer_with_size(DEFAULT_BUFFER_LENGTH)
     }
 
@@ -1070,7 +1070,7 @@ impl<W: Write> Writer<W> {
     /// See [`stream_writer`].
     ///
     /// [`stream_writer`]: Self::stream_writer
-    pub fn stream_writer_with_size(&mut self, size: usize) -> Result<StreamWriter<W>> {
+    pub fn stream_writer_with_size(&mut self, size: usize) -> Result<StreamWriter<'_, W>> {
         StreamWriter::new(ChunkOutput::Borrowed(self), size)
     }
 

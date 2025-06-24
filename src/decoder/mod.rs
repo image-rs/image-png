@@ -402,11 +402,17 @@ impl<R: BufRead + Seek> Reader<R> {
             self.read_until_image_data()?;
         }
 
-        if buf.len() < self.output_buffer_size() {
+        // Note that we only check if the buffer size calculation holds in a call to decoding the
+        // frame. Consequently, we can represent the `Info` and frameless decoding even when the
+        // target architecture's address space is too small for a frame. However reading the actual
+        if self
+            .checked_output_buffer_size()
+            .map_or(true, |size| buf.len() < size)
+        {
             return Err(DecodingError::Parameter(
                 ParameterErrorKind::ImageBufferSize {
-                    expected: buf.len(),
-                    actual: self.output_buffer_size(),
+                    expected: self.output_buffer_size(),
+                    actual: buf.len(),
                 }
                 .into(),
             ));
@@ -633,6 +639,21 @@ impl<R: BufRead + Seek> Reader<R> {
         let (width, height) = self.info().size();
         let size = self.output_line_size(width);
         size * height as usize
+    }
+
+    /// Return the number of bytes required to hold a deinterlaced image frame, if it fits into the
+    /// memory space of the machine.
+    pub fn checked_output_buffer_size(&self) -> Option<usize> {
+        let (width, height) = self.info().size();
+        let (color, depth) = self.output_color_type();
+        // The subtraction should always work, but we do this for consistency. Also note that by
+        // calling `checked_raw_row_length` the row buffer is guaranteed to work whereas if we
+        // ran other function that didn't include the filter byte that could later fail on an image
+        // that is `1xN`...
+        let size = color.checked_raw_row_length(depth, width)?.checked_sub(1)?;
+        let height = usize::try_from(height).ok()?;
+        size.checked_mul(height)
+            .filter(|&n| n < isize::MAX as usize)
     }
 
     /// Returns the number of bytes required to hold a deinterlaced row.

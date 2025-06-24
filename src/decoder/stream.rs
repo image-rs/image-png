@@ -2342,7 +2342,7 @@ mod tests {
 
         let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
 
         // 0-length fdAT should result in an error.
@@ -2370,7 +2370,7 @@ mod tests {
 
         let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
 
         // 3-bytes-long fdAT should result in an error.
@@ -2408,7 +2408,7 @@ mod tests {
         // Start decoding.
         let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         let Some(animation_control) = reader.info().animation_control else {
             panic!("No acTL");
         };
@@ -2471,7 +2471,7 @@ mod tests {
         };
         let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
 
         // TODO: Should this return an error instead?  For now let's just have test assertions for
         // the current behavior.
@@ -2609,13 +2609,13 @@ mod tests {
 
         let (whole_output_info, decoded_from_whole_input) =
             streaming_input.decode_full_input(|mut r| {
-                let mut buf = vec![0; r.output_buffer_size()];
+                let mut buf = vec![0; r.output_buffer_size().unwrap()];
                 let output_info = r.next_frame(&mut buf).unwrap();
                 (output_info, buf)
             });
 
         let mut png_reader = streaming_input.stream_input_until_reader_is_available();
-        let mut decoded_from_streaming_input = vec![0; png_reader.output_buffer_size()];
+        let mut decoded_from_streaming_input = vec![0; png_reader.output_buffer_size().unwrap()];
         let streaming_output_info = loop {
             match png_reader.next_frame(decoded_from_streaming_input.as_mut_slice()) {
                 Ok(output_info) => break output_info,
@@ -2640,7 +2640,7 @@ mod tests {
         let streaming_input = StreamingInput::with_noncompressed_png(WIDTH, IDAT_SIZE);
 
         let decoded_from_whole_input = streaming_input.decode_full_input(|mut r| {
-            let mut buf = vec![0; r.output_buffer_size()];
+            let mut buf = vec![0; r.output_buffer_size().unwrap()];
             r.next_frame(&mut buf).unwrap();
             buf
         });
@@ -2799,7 +2799,7 @@ mod tests {
     #[test]
     fn test_next_frame_polling_after_end_non_animated() {
         let mut reader = create_reader_of_ihdr_idat();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader
             .next_frame(&mut buf)
             .expect("Expecting no error for IDAT frame");
@@ -2836,7 +2836,7 @@ mod tests {
     #[test]
     fn test_next_frame_polling_after_end_idat_part_of_animation() {
         let mut reader = create_reader_of_ihdr_actl_fctl_idat_fctl_fdat();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
 
         assert_eq!(get_fctl_sequence_number(&reader), 0);
         reader
@@ -2867,7 +2867,7 @@ mod tests {
     #[test]
     fn test_next_frame_polling_after_end_idat_not_part_of_animation() {
         let mut reader = create_reader_of_ihdr_actl_idat_fctl_fdat_fctl_fdat();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
 
         assert!(reader.info().frame_control.is_none());
         reader
@@ -2902,7 +2902,7 @@ mod tests {
     #[test]
     fn test_row_by_row_then_next_frame() {
         let mut reader = create_reader_of_ihdr_actl_fctl_idat_fctl_fdat();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
 
         assert_eq!(get_fctl_sequence_number(&reader), 0);
         while let Some(_) = reader.next_row().unwrap() {}
@@ -2960,7 +2960,7 @@ mod tests {
     #[test]
     fn test_next_frame_info_after_next_frame() {
         let mut reader = create_reader_of_ihdr_actl_fctl_idat_fctl_fdat();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
 
         assert_eq!(get_fctl_sequence_number(&reader), 0);
         reader
@@ -2994,7 +2994,7 @@ mod tests {
     #[test]
     fn test_next_frame_info_to_skip_first_frame() {
         let mut reader = create_reader_of_ihdr_actl_idat_fctl_fdat_fctl_fdat();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
 
         // First (IDAT) frame doesn't have frame control info, which means
         // that it is not part of the animation.
@@ -3043,7 +3043,7 @@ mod tests {
         };
         let decoder = Decoder::new(Cursor::new(&png));
         let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         assert!(reader.info().trns.is_none());
         reader.next_frame(&mut buf).unwrap();
         assert_eq!(3093270825, crc32fast::hash(&buf));

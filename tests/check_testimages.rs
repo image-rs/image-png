@@ -97,7 +97,7 @@ fn render_images() {
         let mut decoder = png::Decoder::new(BufReader::new(File::open(path)?));
         decoder.set_transformations(png::Transformations::normalize_to_color8());
         let mut reader = decoder.read_info()?;
-        let mut img_data = vec![0; reader.output_buffer_size()];
+        let mut img_data = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut img_data)?;
         // First sanity check:
         assert_eq!(
@@ -119,7 +119,7 @@ fn render_images_identity() {
     process_images("results_identity.txt", &TEST_SUITES, |path| {
         let decoder = png::Decoder::new(BufReader::new(File::open(&path)?));
         let mut reader = decoder.read_info()?;
-        let mut img_data = vec![0; reader.output_buffer_size()];
+        let mut img_data = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut img_data)?;
         let bits =
             ((info.width as usize * info.color_type.samples() * info.bit_depth as usize + 7) & !7)
@@ -145,7 +145,7 @@ fn render_images_alpha() {
         let mut decoder = png::Decoder::new(BufReader::new(File::open(&path)?));
         decoder.set_transformations(png::Transformations::ALPHA);
         let mut reader = decoder.read_info()?;
-        let mut img_data = vec![0; reader.output_buffer_size()];
+        let mut img_data = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut img_data)?;
         let bits =
             ((info.width as usize * info.color_type.samples() * info.bit_depth as usize + 7) & !7)
@@ -186,7 +186,7 @@ fn apng_images() {
         let mut decoder = png::Decoder::new(BufReader::new(File::open(&path)?));
         decoder.set_transformations(png::Transformations::normalize_to_color8());
         let mut reader = decoder.read_info()?;
-        let mut img_data = vec![0; reader.output_buffer_size()];
+        let mut img_data = vec![0; reader.output_buffer_size().unwrap()];
         let real_frames = reader.info().animation_control().unwrap().num_frames;
         // Print out frame info, helps with blessing the result file for new images.
         println!(

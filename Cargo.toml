@@ -64,6 +64,12 @@ harness = false
 required-features = ["benchmarks"]
 
 [[bench]]
+path = "benches/adam7.rs"
+name = "adam7"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
 path = "benches/expand_paletted.rs"
 name = "expand_paletted"
 harness = false

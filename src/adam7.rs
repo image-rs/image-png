@@ -276,6 +276,23 @@ pub fn expand_pass(
                 img[pos.byte] |= px << shift;
             }
         }
+        // While caught by the below loop, we special case this for codegen. The effects are
+        // massive when the compiler uses the constant chunk size in particular for this case where
+        // no more copy_from_slice is being issued by everything happens in the register alone.
+        8 => {
+            let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, 1);
+
+            for (bytepos, &px) in byte_indices.zip(interlaced_row) {
+                img[bytepos] = px;
+            }
+        }
+        16 => {
+            let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, 2);
+
+            for (bytepos, px) in byte_indices.zip(interlaced_row.chunks(2)) {
+                img[bytepos..][..2].copy_from_slice(px);
+            }
+        }
         _ => {
             debug_assert!(bits_per_pixel % 8 == 0);
             let bytes_pp = bits_per_pixel / 8;

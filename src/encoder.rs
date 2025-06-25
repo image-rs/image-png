@@ -1810,7 +1810,7 @@ mod tests {
                 // Decode image
                 let decoder = Decoder::new(BufReader::new(File::open(path).unwrap()));
                 let mut reader = decoder.read_info().unwrap();
-                let mut buf = vec![0; reader.output_buffer_size()];
+                let mut buf = vec![0; reader.output_buffer_size().unwrap()];
                 let info = reader.next_frame(&mut buf).unwrap();
                 use DeflateCompression::*;
                 for compression in [NoCompression, FdeflateUltraFast, Level(4)] {
@@ -1835,7 +1835,7 @@ mod tests {
                     // Decode encoded decoded image
                     let decoder = Decoder::new(Cursor::new(&*out));
                     let mut reader = decoder.read_info().unwrap();
-                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    let mut buf2 = vec![0; reader.output_buffer_size().unwrap()];
                     reader.next_frame(&mut buf2).unwrap();
                     // check if the encoded image is ok:
                     assert_eq!(buf, buf2);
@@ -1868,7 +1868,7 @@ mod tests {
                 // Decode image
                 let decoder = Decoder::new(BufReader::new(File::open(path).unwrap()));
                 let mut reader = decoder.read_info().unwrap();
-                let mut buf = vec![0; reader.output_buffer_size()];
+                let mut buf = vec![0; reader.output_buffer_size().unwrap()];
                 let info = reader.next_frame(&mut buf).unwrap();
                 use DeflateCompression::*;
                 for compression in [NoCompression, FdeflateUltraFast, Level(4)] {
@@ -1900,7 +1900,7 @@ mod tests {
                     // Decode encoded decoded image
                     let decoder = Decoder::new(Cursor::new(&*out));
                     let mut reader = decoder.read_info().unwrap();
-                    let mut buf2 = vec![0; reader.output_buffer_size()];
+                    let mut buf2 = vec![0; reader.output_buffer_size().unwrap()];
                     reader.next_frame(&mut buf2).unwrap();
                     // check if the encoded image is ok:
                     assert_eq!(buf, buf2);
@@ -1917,7 +1917,7 @@ mod tests {
             let decoder = Decoder::new(BufReader::new(File::open(&path).unwrap()));
             let mut reader = decoder.read_info().unwrap();
 
-            let mut decoded_pixels = vec![0; reader.output_buffer_size()];
+            let mut decoded_pixels = vec![0; reader.output_buffer_size().unwrap()];
             let info = reader.info();
             assert_eq!(
                 info.width as usize * info.height as usize * usize::from(bit_depth),
@@ -1941,7 +1941,7 @@ mod tests {
             // Decode re-encoded image
             let decoder = Decoder::new(Cursor::new(&*out));
             let mut reader = decoder.read_info().unwrap();
-            let mut redecoded = vec![0; reader.output_buffer_size()];
+            let mut redecoded = vec![0; reader.output_buffer_size().unwrap()];
             reader.next_frame(&mut redecoded).unwrap();
             // check if the encoded image is ok:
             assert_eq!(indexed_data, redecoded);

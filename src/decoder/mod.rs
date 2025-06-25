@@ -204,20 +204,21 @@ impl<R: BufRead + Seek> Decoder<R> {
         };
 
         // Check if the decoding buffer of a single raw line has a valid size.
+        //
+        // FIXME: this check and the next can be delayed until processing image data. This would
+        // allow usage where only the metadata is processes, or where the image is processed
+        // line-by-line even on targets that can not fit the whole image into their address space.
+        // We should strive for a balance between implementation complexity (still ensure that the
+        // no-overflow preconditions are met for internal calculation) and use possibilities.
         if reader.info().checked_raw_row_length().is_none() {
             return Err(DecodingError::LimitsExceeded);
         }
 
         // Check if the output buffer has a valid size.
-        let (width, height) = reader.info().size();
-        let (color, depth) = reader.output_color_type();
-        let rowlen = color
-            .checked_raw_row_length(depth, width)
-            .ok_or(DecodingError::LimitsExceeded)?
-            - 1;
-        let height: usize =
-            std::convert::TryFrom::try_from(height).map_err(|_| DecodingError::LimitsExceeded)?;
-        if rowlen.checked_mul(height).is_none() {
+        //
+        // FIXME: see above and
+        // <https://github.com/image-rs/image-png/pull/608#issuecomment-3003576956>
+        if reader.output_buffer_size().is_none() {
             return Err(DecodingError::LimitsExceeded);
         }
 
@@ -365,7 +366,7 @@ impl<R: BufRead + Seek> Reader<R> {
         self.unfiltering_buffer.reset_all();
 
         // Allocate output buffer.
-        let buflen = self.output_line_size(self.subframe.width);
+        let buflen = self.unguarded_output_line_size(self.subframe.width);
         self.decoder.reserve_bytes(buflen)?;
 
         Ok(())
@@ -402,11 +403,18 @@ impl<R: BufRead + Seek> Reader<R> {
             self.read_until_image_data()?;
         }
 
-        if buf.len() < self.output_buffer_size() {
+        // Note that we only check if the buffer size calculation holds in a call to decoding the
+        // frame. Consequently, we can represent the `Info` and frameless decoding even when the
+        // target architecture's address space is too small for a frame. However reading the actual
+        let required_len = self
+            .output_buffer_size()
+            .ok_or(DecodingError::LimitsExceeded)?;
+
+        if buf.len() < required_len {
             return Err(DecodingError::Parameter(
                 ParameterErrorKind::ImageBufferSize {
-                    expected: buf.len(),
-                    actual: self.output_buffer_size(),
+                    expected: required_len,
+                    actual: buf.len(),
                 }
                 .into(),
             ));
@@ -418,11 +426,11 @@ impl<R: BufRead + Seek> Reader<R> {
             height: self.subframe.height,
             color_type,
             bit_depth,
-            line_size: self.output_line_size(self.subframe.width),
+            line_size: self.unguarded_output_line_size(self.subframe.width),
         };
 
         if self.info().interlaced {
-            let stride = self.output_line_size(self.info().width);
+            let stride = self.unguarded_output_line_size(self.info().width);
             let samples = color_type.samples() as u8;
             let bits_pp = samples * (bit_depth as u8);
             while let Some(InterlacedRow {
@@ -492,7 +500,10 @@ impl<R: BufRead + Seek> Reader<R> {
     /// See also [`Reader.read_row`], which reads into a caller-provided buffer.
     pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow<'_>>, DecodingError> {
         let mut output_buffer = mem::take(&mut self.scratch_buffer);
-        output_buffer.resize(self.output_line_size(self.info().width), 0u8);
+        let max_line_size = self
+            .output_line_size(self.info().width)
+            .ok_or(DecodingError::LimitsExceeded)?;
+        output_buffer.resize(max_line_size, 0u8);
         let result = self.read_row(&mut output_buffer);
         self.scratch_buffer = output_buffer;
         result.map(move |option| {
@@ -548,7 +559,7 @@ impl<R: BufRead + Seek> Reader<R> {
             InterlaceInfo::Adam7(Adam7Info { width, .. }) => *width,
             InterlaceInfo::Null(_) => self.subframe.width,
         };
-        self.output_line_size(width)
+        self.unguarded_output_line_size(width)
     }
 
     /// Read the rest of the image and chunks and finish up, including text chunks or others
@@ -627,18 +638,40 @@ impl<R: BufRead + Seek> Reader<R> {
         }
     }
 
-    /// Returns the number of bytes required to hold a deinterlaced image frame
-    /// that is decoded using the given input transformations.
-    pub fn output_buffer_size(&self) -> usize {
+    /// Return the number of bytes required to hold a deinterlaced image frame that is decoded
+    /// using the given input transformations.
+    ///
+    /// Returns `None` if the output buffer does not fit into the memory space of the machine,
+    /// otherwise returns the byte length in `Some`. The length is smaller than [`isize::MAX`].
+    pub fn output_buffer_size(&self) -> Option<usize> {
         let (width, height) = self.info().size();
-        let size = self.output_line_size(width);
-        size * height as usize
+        let (color, depth) = self.output_color_type();
+        // The subtraction should always work, but we do this for consistency. Also note that by
+        // calling `checked_raw_row_length` the row buffer is guaranteed to work whereas if we
+        // ran other function that didn't include the filter byte that could later fail on an image
+        // that is `1xN`...
+        let linelen = color.checked_raw_row_length(depth, width)?.checked_sub(1)?;
+        let height = usize::try_from(height).ok()?;
+        let imglen = linelen.checked_mul(height)?;
+        // Ensure that it fits into address space not only `usize` to allocate.
+        (imglen <= isize::MAX as usize).then_some(imglen)
     }
 
     /// Returns the number of bytes required to hold a deinterlaced row.
-    pub fn output_line_size(&self, width: u32) -> usize {
+    pub(crate) fn unguarded_output_line_size(&self, width: u32) -> usize {
         let (color, depth) = self.output_color_type();
         color.raw_row_length_from_width(depth, width) - 1
+    }
+
+    /// Returns the number of bytes required to hold a deinterlaced row.
+    ///
+    /// Returns `None` if the output buffer does not fit into the memory space of the machine,
+    /// otherwise returns the byte length in `Some`. The length is smaller than [`isize::MAX`].
+    pub fn output_line_size(&self, width: u32) -> Option<usize> {
+        let (color, depth) = self.output_color_type();
+        let length = color.checked_raw_row_length(depth, width)?.checked_sub(1)?;
+        // Ensure that it fits into address space not only `usize` to allocate.
+        (length <= isize::MAX as usize).then_some(length)
     }
 
     /// Unfilter the next raw interlaced row into `self.unfiltering_buffer`.

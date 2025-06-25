@@ -204,20 +204,21 @@ impl<R: BufRead + Seek> Decoder<R> {
         };
 
         // Check if the decoding buffer of a single raw line has a valid size.
+        //
+        // FIXME: this check and the next can be delayed until processing image data. This would
+        // allow usage where only the metadata is processes, or where the image is processed
+        // line-by-line even on targets that can not fit the whole image into their address space.
+        // We should strive for a balance between implementation complexity (still ensure that the
+        // no-overflow preconditions are met for internal calculation) and use possibilities.
         if reader.info().checked_raw_row_length().is_none() {
             return Err(DecodingError::LimitsExceeded);
         }
 
         // Check if the output buffer has a valid size.
-        let (width, height) = reader.info().size();
-        let (color, depth) = reader.output_color_type();
-        let rowlen = color
-            .checked_raw_row_length(depth, width)
-            .ok_or(DecodingError::LimitsExceeded)?
-            - 1;
-        let height: usize =
-            std::convert::TryFrom::try_from(height).map_err(|_| DecodingError::LimitsExceeded)?;
-        if rowlen.checked_mul(height).is_none() {
+        //
+        // FIXME: see above and
+        // <https://github.com/image-rs/image-png/pull/608#issuecomment-3003576956>
+        if reader.output_buffer_size().is_none() {
             return Err(DecodingError::LimitsExceeded);
         }
 

@@ -18,7 +18,7 @@
 //! let decoder = png::Decoder::new(BufReader::new(File::open("tests/pngsuite/basi0g01.png").unwrap()));
 //! let mut reader = decoder.read_info().unwrap();
 //! // Allocate the output buffer.
-//! let mut buf = vec![0; reader.output_buffer_size()];
+//! let mut buf = vec![0; reader.output_buffer_size().unwrap()];
 //! // Read the next frame. An APNG might contain multiple frames.
 //! let info = reader.next_frame(&mut buf).unwrap();
 //! // Grab the bytes of the image.

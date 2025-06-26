@@ -305,6 +305,48 @@ pub fn expand_pass(
     }
 }
 
+/// Expand pass, but also ensure that after each pass the whole image has been initialized up to
+/// the data available. In constrast to `expand_pass` there are no holes left in the image.
+///
+/// For instance, consider the first pass which is an eighth subsampling of the original image.
+/// Here's a side by-side of pixel data written from each of the two algorithms:
+///
+/// ```
+/// normal:   splat:
+/// 1-------  11111111
+/// --------  11111111
+/// --------  11111111
+/// --------  11111111
+/// --------  11111111
+/// --------  11111111
+/// --------  11111111
+/// ```
+///
+/// Data written in previous passes must not be modified. We 'weave' the data of passes and repeat
+/// them in the neighbouring pixels until their subsampling alignment. For details, see the
+/// `x_repeat` and `y_repeat` data. Thus the 4th pass would look like this:
+///
+/// ```
+/// normal:   splat:
+/// --4---4-  --44--44
+/// --------  --44--44
+/// --------  --44--44
+/// --4---4-  --44--44
+/// --------  --44--44
+/// --------  --44--44
+/// --------  --44--44
+/// ```
+///
+pub fn expand_pass_splat(
+    img: &mut [u8],
+    img_row_stride: usize,
+    interlaced_row: &[u8],
+    interlace_info: &Adam7Info,
+    bits_per_pixel: u8,
+) {
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

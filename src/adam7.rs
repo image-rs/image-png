@@ -13,6 +13,16 @@ pub struct Adam7Info {
     pub(crate) width: u32,
 }
 
+/// The index of a bit in the image buffer.
+///
+/// We do not use a pure `usize` to avoid overflows on 32-bit targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BitPostion {
+    byte: usize,
+    /// [0..8)
+    bit: u8,
+}
+
 impl Adam7Info {
     /// Creates a new `Adam7Info`.  May panic if the arguments are out of range (e.g. if `pass` is
     /// 0 or greater than 8).
@@ -116,38 +126,26 @@ impl Iterator for Adam7Iterator {
     }
 }
 
-fn subbyte_pixels(scanline: &[u8], bits_pp: usize) -> impl Iterator<Item = u8> + '_ {
-    (0..scanline.len() * 8)
-        .step_by(bits_pp)
-        .map(move |bit_idx| {
-            let byte_idx = bit_idx / 8;
-
-            // sub-byte samples start in the high-order bits
-            let rem = 8 - bit_idx % 8 - bits_pp;
-
-            match bits_pp {
-                // evenly divides bytes
-                1 => (scanline[byte_idx] >> rem) & 1,
-                2 => (scanline[byte_idx] >> rem) & 3,
-                4 => (scanline[byte_idx] >> rem) & 15,
-                _ => unreachable!(),
-            }
-        })
+fn subbyte_values<const N: usize>(
+    scanline: &[u8],
+    bit_pos: [u8; N],
+    mask: u8,
+) -> impl Iterator<Item = u8> + '_ {
+    (scanline.iter().copied()).flat_map(move |value| bit_pos.map(|n| (value >> n) & mask))
 }
 
 /// Given `row_stride`, interlace `info`, and bits-per-pixel, produce an iterator of bit positions
 /// of pixels to copy from the input scanline to the image buffer.  The positions are expressed as
 /// bit offsets from position (0,0) in the frame that is currently being decoded.
+///
+/// This should only be used with `bits_pp < 8`.
 fn expand_adam7_bits(
     row_stride_in_bytes: usize,
     info: &Adam7Info,
-    bits_pp: usize,
-) -> impl Iterator<Item = usize> {
-    let line_no = info.line as usize;
-    let pass = info.pass;
-    let interlaced_width = info.width as usize;
-
-    let (line_mul, line_off, samp_mul, samp_off) = match pass {
+    bits_pp: u8,
+) -> impl Iterator<Item = BitPostion> {
+    debug_assert!(bits_pp == 1 || bits_pp == 2 || bits_pp == 4);
+    let (line_mul, line_off, samp_mul, samp_off) = match info.pass {
         1 => (8, 0, 8, 0),
         2 => (8, 0, 8, 4),
         3 => (8, 4, 4, 0),
@@ -163,13 +161,48 @@ fn expand_adam7_bits(
     };
 
     // the equivalent line number in progressive scan
-    let prog_line = line_mul * line_no + line_off;
-    let line_start = prog_line * row_stride_in_bytes * 8;
+    let prog_line = line_mul * info.line as usize + line_off;
+    let byte_start = prog_line * row_stride_in_bytes;
 
-    (0..interlaced_width)
-        .map(move |i| i * samp_mul + samp_off)
-        .map(move |i| i * bits_pp)
-        .map(move |bits_offset| bits_offset + line_start)
+    // In contrast to `subbyte_values` we *must* be precise with our length here.
+    (0..u64::from(info.width))
+        // Bounded by u32::MAX * 8 * 4 + 16 so does not overflow `u64`.
+        .map(move |i| (i * samp_mul + samp_off) * u64::from(bits_pp))
+        .map(move |i| BitPostion {
+            // Bounded by the buffer size which already exists.
+            byte: byte_start + (i / 8) as usize,
+            bit: i as u8 % 8,
+        })
+}
+
+fn expand_adam7_bytes(
+    row_stride_in_bytes: usize,
+    info: &Adam7Info,
+    bytes_pp: u8,
+) -> impl Iterator<Item = usize> {
+    let (line_mul, line_off, samp_mul, samp_off) = match info.pass {
+        1 => (8, 0, 8, 0),
+        2 => (8, 0, 8, 4),
+        3 => (8, 4, 4, 0),
+        4 => (4, 0, 4, 2),
+        5 => (4, 2, 2, 0),
+        6 => (2, 0, 2, 1),
+        7 => (2, 1, 1, 0),
+        _ => {
+            // `Adam7Info.pass` is a non-`pub`lic field.  `InterlaceInfo` is expected
+            // to maintain an invariant that `pass` is valid.
+            panic!("Invalid `Adam7Info.pass`");
+        }
+    };
+
+    // the equivalent line number in progressive scan
+    let prog_line = line_mul * info.line as usize + line_off;
+    let byte_start = prog_line * row_stride_in_bytes;
+
+    (0..u64::from(info.width))
+        .map(move |i| (i * samp_mul + samp_off) * u64::from(bytes_pp))
+        // Bounded by the allocated buffer size so must fit in `usize`
+        .map(move |i| i as usize + byte_start)
 }
 
 /// Copies pixels from `interlaced_row` into the right location in `img`.
@@ -213,21 +246,60 @@ pub fn expand_pass(
     interlace_info: &Adam7Info,
     bits_per_pixel: u8,
 ) {
-    let bits_pp = bits_per_pixel as usize;
-
-    let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, bits_pp);
-
-    if bits_pp < 8 {
-        for (pos, px) in bit_indices.zip(subbyte_pixels(interlaced_row, bits_pp)) {
-            let rem = 8 - pos % 8 - bits_pp;
-            img[pos / 8] |= px << rem as u8;
+    match bits_per_pixel {
+        // Note: for 1, 2, 4 multiple runs through the iteration will access the same byte in `img`
+        // so we can not iterate over `&mut u8` values. A better strategy would write multiple bit
+        // groups in one go. This would then also not be as bounds-check heavy?
+        1 => {
+            const BIT_POS_1: [u8; 8] = [7, 6, 5, 4, 3, 2, 1, 0];
+            let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 1);
+            for (pos, px) in bit_indices.zip(subbyte_values(interlaced_row, BIT_POS_1, 0b1)) {
+                let shift = 8 - bits_per_pixel - pos.bit;
+                img[pos.byte] |= px << shift;
+            }
         }
-    } else {
-        let bytes_pp = bits_pp / 8;
+        2 => {
+            const BIT_POS_2: [u8; 4] = [6, 4, 2, 0];
+            let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 2);
 
-        for (bitpos, px) in bit_indices.zip(interlaced_row.chunks(bytes_pp)) {
-            for (offset, val) in px.iter().enumerate() {
-                img[bitpos / 8 + offset] = *val;
+            for (pos, px) in bit_indices.zip(subbyte_values(interlaced_row, BIT_POS_2, 0b11)) {
+                let shift = 8 - bits_per_pixel - pos.bit;
+                img[pos.byte] |= px << shift;
+            }
+        }
+        4 => {
+            const BIT_POS_4: [u8; 2] = [4, 0];
+            let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 4);
+
+            for (pos, px) in bit_indices.zip(subbyte_values(interlaced_row, BIT_POS_4, 0b1111)) {
+                let shift = 8 - bits_per_pixel - pos.bit;
+                img[pos.byte] |= px << shift;
+            }
+        }
+        // While caught by the below loop, we special case this for codegen. The effects are
+        // massive when the compiler uses the constant chunk size in particular for this case where
+        // no more copy_from_slice is being issued by everything happens in the register alone.
+        8 => {
+            let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, 1);
+
+            for (bytepos, &px) in byte_indices.zip(interlaced_row) {
+                img[bytepos] = px;
+            }
+        }
+        16 => {
+            let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, 2);
+
+            for (bytepos, px) in byte_indices.zip(interlaced_row.chunks(2)) {
+                img[bytepos..][..2].copy_from_slice(px);
+            }
+        }
+        _ => {
+            debug_assert!(bits_per_pixel % 8 == 0);
+            let bytes_pp = bits_per_pixel / 8;
+            let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, bytes_pp);
+
+            for (bytepos, px) in byte_indices.zip(interlaced_row.chunks(bytes_pp.into())) {
+                img[bytepos..][..px.len()].copy_from_slice(px);
             }
         }
     }
@@ -287,9 +359,11 @@ fn test_adam7() {
 
 #[test]
 fn test_subbyte_pixels() {
-    let scanline = &[0b10101010, 0b10101010];
+    const BIT_POS_1: [u8; 8] = [7, 6, 5, 4, 3, 2, 1, 0];
 
-    let pixels = subbyte_pixels(scanline, 1).collect::<Vec<_>>();
+    let scanline = &[0b10101010, 0b10101010];
+    let pixels = subbyte_values(scanline, BIT_POS_1, 1).collect::<Vec<_>>();
+
     assert_eq!(pixels.len(), 16);
     assert_eq!(pixels, [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]);
 }
@@ -304,6 +378,10 @@ fn test_expand_adam7_bits() {
     let expected = |offset: usize, step: usize, count: usize| {
         (0..count)
             .map(move |i| step * i + offset)
+            .map(|i| BitPostion {
+                byte: i / 8,
+                bit: (i % 8) as u8,
+            })
             .collect::<Vec<_>>()
     };
 
@@ -370,22 +448,21 @@ fn test_expand_adam7_bits_independent_row_stride() {
     let pass = 1;
     let line_no = 1;
     let width = 32;
-    let bits_pp = 8;
     let info = create_adam7_info_for_tests;
 
     {
         let stride = width;
         assert_eq!(
-            expand_adam7_bits(stride, &info(pass, line_no, width), bits_pp).collect::<Vec<_>>(),
-            vec![2048, 2112, 2176, 2240],
+            expand_adam7_bytes(stride, &info(pass, line_no, width), 1).collect::<Vec<_>>(),
+            [2048, 2112, 2176, 2240].map(|n| n / 8),
         );
     }
 
     {
         let stride = 10000;
         assert_eq!(
-            expand_adam7_bits(stride, &info(pass, line_no, width), bits_pp).collect::<Vec<_>>(),
-            vec![640000, 640064, 640128, 640192],
+            expand_adam7_bytes(stride, &info(pass, line_no, width), 1).collect::<Vec<_>>(),
+            [640000, 640064, 640128, 640192].map(|n| n / 8),
         );
     }
 }
@@ -505,6 +582,42 @@ fn test_expand_pass_subbyte() {
         ],
         img
     );
+}
+
+/// This test ensures that `expand_pass` works correctly on 32-bit machines, even when the indices
+/// of individual bits in the target buffer can not be expressed within a `usize`. We ensure that
+/// the output buffer size is between `usize::MAX / 8` and `isize::MAX` to trigger that condition.
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn regression_overflow_adam7_bitfill() {
+    fn multibyte_expand_pass_test_helper(width: usize, height: usize, bits_pp: u8) -> Vec<u8> {
+        let bytes_pp = bits_pp / 8;
+        let size = width * height * bytes_pp as usize;
+        let mut img = vec![0u8; size];
+        let img_row_stride = width * bytes_pp as usize;
+
+        for it in Adam7Iterator::new(width as u32, height as u32).into_iter() {
+            if it.pass != 7 {
+                continue;
+            }
+
+            if it.line != (width / 2) as u32 - 1 {
+                continue;
+            }
+
+            let interlace_size = it.width * (bytes_pp as u32);
+            // Ensure that expanded pixels are never empty bits. This differentiates the written bits
+            // from the initial bits that are all zeroed.
+            let interlaced_row: Vec<_> = (0..interlace_size).map(|_| 0xff).collect();
+
+            expand_pass(&mut img, img_row_stride, &interlaced_row, &it, bits_pp);
+        }
+
+        img
+    }
+
+    let expanded = multibyte_expand_pass_test_helper(1 << 14, 1 << 14, 32);
+    assert_eq!(*expanded.last().unwrap(), 0xff);
 }
 
 #[cfg(test)]

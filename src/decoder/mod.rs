@@ -13,7 +13,7 @@ use self::unfiltering_buffer::UnfilteringBuffer;
 use std::io::{BufRead, Seek};
 use std::mem;
 
-use crate::adam7::{self, Adam7Info};
+use crate::adam7::{self, Adam7Info, Adam7Variant};
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
@@ -201,6 +201,7 @@ impl<R: BufRead + Seek> Decoder<R> {
             transform_fn: None,
             scratch_buffer: Vec::new(),
             finished: false,
+            interlace: Adam7Variant::default(),
         };
 
         // Check if the decoding buffer of a single raw line has a valid size.
@@ -306,6 +307,8 @@ pub struct Reader<R: BufRead + Seek> {
     scratch_buffer: Vec<u8>,
     /// Whether `ImageEnd` was already reached by `fn finish`.
     finished: bool,
+    /// How to expand interlaced data we encounter.
+    interlace: Adam7Variant,
 }
 
 /// The subframe specific information.
@@ -433,6 +436,8 @@ impl<R: BufRead + Seek> Reader<R> {
             let stride = self.unguarded_output_line_size(self.info().width);
             let samples = color_type.samples() as u8;
             let bits_pp = samples * (bit_depth as u8);
+            let expand = self.interlace.expand_pass_fn();
+
             while let Some(InterlacedRow {
                 data: row,
                 interlace,
@@ -441,7 +446,7 @@ impl<R: BufRead + Seek> Reader<R> {
             {
                 // `unwrap` won't panic, because we checked `self.info().interlaced` above.
                 let adam7info = interlace.get_adam7_info().unwrap();
-                adam7::expand_pass(buf, stride, row, adam7info, bits_pp);
+                expand(buf, stride, row, adam7info, bits_pp);
             }
         } else {
             let current_interlace_info = self.subframe.current_interlace_info.as_ref();

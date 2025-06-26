@@ -46,6 +46,44 @@ impl Adam7Info {
         assert!(width > 0);
         Self { pass, line, width }
     }
+
+    fn pass_constants(&self) -> PassConstants {
+        PassConstants::PASSES[self.pass as usize - 1]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PassConstants {
+    x_sampling: u8,
+    x_offset: u8,
+    y_sampling: u8,
+    y_offset: u8,
+}
+
+impl PassConstants {
+    /// The constants associated with each of the 7 passes. Note that it is 0-indexed while the
+    /// pass number (as per specification) is 1-indexed.
+    pub const PASSES: [Self; 7] = {
+        // Shortens the constructor for readability, retains clear argument order below.
+        const fn new(x_sampling: u8, x_offset: u8, y_sampling: u8, y_offset: u8) -> PassConstants {
+            PassConstants {
+                x_sampling,
+                x_offset,
+                y_sampling,
+                y_offset,
+            }
+        }
+
+        [
+            new(8, 0, 8, 0),
+            new(8, 4, 8, 0),
+            new(4, 0, 8, 4),
+            new(4, 2, 4, 0),
+            new(2, 0, 4, 2),
+            new(2, 1, 2, 0),
+            new(1, 0, 2, 1),
+        ]
+    };
 }
 
 /// This iterator iterates over the different passes of an image Adam7 encoded
@@ -88,16 +126,16 @@ impl Adam7Iterator {
     fn init_pass(&mut self) {
         let w = f64::from(self.width);
         let h = f64::from(self.height);
-        let (line_width, lines) = match self.current_pass {
-            1 => (w / 8.0, h / 8.0),
-            2 => ((w - 4.0) / 8.0, h / 8.0),
-            3 => (w / 4.0, (h - 4.0) / 8.0),
-            4 => ((w - 2.0) / 4.0, h / 4.0),
-            5 => (w / 2.0, (h - 2.0) / 4.0),
-            6 => ((w - 1.0) / 2.0, h / 2.0),
-            7 => (w, (h - 1.0) / 2.0),
-            _ => unreachable!(),
-        };
+
+        let info = PassConstants::PASSES[self.current_pass as usize - 1];
+        // Note: integer arithmetic `div_ceil` would not handle the cases `w < 8` where the
+        // intermediate value becomes negative. Since offset <= 0.5 * sampling we get the correct
+        // ceiling value with floating point arithmetic however. Also note the float arithmetic is
+        // exact since all divisions are pure exponent offsets and the mantissa holds any possible
+        // `[-8; 0) + u32[]` value.
+        let line_width = (w - f64::from(info.x_offset)) / f64::from(info.x_sampling);
+        let lines = (h - f64::from(info.y_offset)) / f64::from(info.y_sampling);
+
         self.line_width = line_width.ceil() as u32;
         self.lines = lines.ceil() as u32;
         self.line = 0;
@@ -126,6 +164,31 @@ impl Iterator for Adam7Iterator {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Adam7Variant {
+    /// This is the adam7 de-interlace we do by default. Only pixels related to the pass are
+    /// written. The output buffer should not be directly used for presentation until all passes
+    /// are complete. At least the invalid pixels in the buffer should be masked. However, this
+    /// performs the least amount of writes and is optimal when you're only reading full frames.
+    #[default]
+    Sparse,
+    /// A variant of the Adam7 de-interlace that ensures that all pixels are initialized after each
+    /// pass, and are progressively refined towards the final image. Performs more writes than the
+    /// other variant as some pixels are touched repeatedly, but ensures the buffer can be used as
+    /// directly as possible for presentation.
+    Splat,
+}
+
+impl Adam7Variant {
+    pub(crate) fn expand_pass_fn(self) -> fn(&mut [u8], usize, &[u8], &Adam7Info, u8) {
+        match self {
+            Adam7Variant::Sparse => expand_pass,
+            Adam7Variant::Splat => expand_pass_splat,
+        }
+    }
+}
+
 fn subbyte_values<const N: usize>(
     scanline: &[u8],
     bit_pos: [u8; N],
@@ -145,19 +208,15 @@ fn expand_adam7_bits(
     bits_pp: u8,
 ) -> impl Iterator<Item = BitPostion> {
     debug_assert!(bits_pp == 1 || bits_pp == 2 || bits_pp == 4);
-    let (line_mul, line_off, samp_mul, samp_off) = match info.pass {
-        1 => (8, 0, 8, 0),
-        2 => (8, 0, 8, 4),
-        3 => (8, 4, 4, 0),
-        4 => (4, 0, 4, 2),
-        5 => (4, 2, 2, 0),
-        6 => (2, 0, 2, 1),
-        7 => (2, 1, 1, 0),
-        _ => {
-            // `Adam7Info.pass` is a non-`pub`lic field.  `InterlaceInfo` is expected
-            // to maintain an invariant that `pass` is valid.
-            panic!("Invalid `Adam7Info.pass`");
-        }
+    let (line_mul, line_off, samp_mul, samp_off) = {
+        let constants = info.pass_constants();
+        (
+            // Convert each to their respectively required type from u8.
+            usize::from(constants.y_sampling),
+            usize::from(constants.y_offset),
+            u64::from(constants.x_sampling),
+            u64::from(constants.x_offset),
+        )
     };
 
     // the equivalent line number in progressive scan
@@ -180,19 +239,15 @@ fn expand_adam7_bytes(
     info: &Adam7Info,
     bytes_pp: u8,
 ) -> impl Iterator<Item = usize> {
-    let (line_mul, line_off, samp_mul, samp_off) = match info.pass {
-        1 => (8, 0, 8, 0),
-        2 => (8, 0, 8, 4),
-        3 => (8, 4, 4, 0),
-        4 => (4, 0, 4, 2),
-        5 => (4, 2, 2, 0),
-        6 => (2, 0, 2, 1),
-        7 => (2, 1, 1, 0),
-        _ => {
-            // `Adam7Info.pass` is a non-`pub`lic field.  `InterlaceInfo` is expected
-            // to maintain an invariant that `pass` is valid.
-            panic!("Invalid `Adam7Info.pass`");
-        }
+    let (line_mul, line_off, samp_mul, samp_off) = {
+        let constants = info.pass_constants();
+        (
+            // Convert each to their respectively required type from u8.
+            usize::from(constants.y_sampling),
+            usize::from(constants.y_offset),
+            u64::from(constants.x_sampling),
+            u64::from(constants.x_offset),
+        )
     };
 
     // the equivalent line number in progressive scan
@@ -311,7 +366,7 @@ pub fn expand_pass(
 /// For instance, consider the first pass which is an eighth subsampling of the original image.
 /// Here's a side by-side of pixel data written from each of the two algorithms:
 ///
-/// ```
+/// ```text
 /// normal:   splat:
 /// 1-------  11111111
 /// --------  11111111
@@ -326,7 +381,7 @@ pub fn expand_pass(
 /// them in the neighbouring pixels until their subsampling alignment. For details, see the
 /// `x_repeat` and `y_repeat` data. Thus the 4th pass would look like this:
 ///
-/// ```
+/// ```text
 /// normal:   splat:
 /// --4---4-  --44--44
 /// --------  --44--44

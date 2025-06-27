@@ -200,6 +200,19 @@ impl Iterator for Adam7Iterator {
     }
 }
 
+/// The algorithm to use when progressively filling pixel data from Adam7 interlaced passes.
+///
+/// Adam7 interlacing is a technique optionally used in PNG by which only a sub-sample of pixel
+/// data is encoded in the beginning of the image data chunks, followed by progressively larger
+/// subsets of the data in subsequent passes. Therefore a 'rough image' is available after ust a
+/// very tiny fraction of the data has been read which can be advantageous for loading an image
+/// from a slow IO medium while optimizing time-to-first-meaningful-paint and then replacing the
+/// presented data as it is streamed in.
+///
+/// There are trade-offs to make here. The strictly necessary requirement for an implementation is
+/// that the exact image is recovered after all passes are applied. However the intermediate states
+/// of the output are left to the implementation, as long as it follows the restriction of
+/// resulting in the intended image when all passes have been applied.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Adam7Variant {
@@ -207,22 +220,17 @@ pub enum Adam7Variant {
     /// written. The output buffer should not be directly used for presentation until all passes
     /// are complete. At least the invalid pixels in the buffer should be masked. However, this
     /// performs the least amount of writes and is optimal when you're only reading full frames.
+    ///
+    /// This corresponds to [`crate::expand_interlaced_row`].
     #[default]
     Sparse,
     /// A variant of the Adam7 de-interlace that ensures that all pixels are initialized after each
     /// pass, and are progressively refined towards the final image. Performs more writes than the
     /// other variant as some pixels are touched repeatedly, but ensures the buffer can be used as
     /// directly as possible for presentation.
+    ///
+    /// This corresponds to [`crate::splat_interlaced_row`].
     Splat,
-}
-
-impl Adam7Variant {
-    pub(crate) fn expand_pass_fn(self) -> fn(&mut [u8], usize, &[u8], &Adam7Info, u8) {
-        match self {
-            Adam7Variant::Sparse => expand_pass,
-            Adam7Variant::Splat => expand_pass_splat,
-        }
-    }
 }
 
 fn subbyte_values<const N: usize>(

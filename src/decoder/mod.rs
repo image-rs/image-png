@@ -139,7 +139,7 @@ impl<R: BufRead + Seek> Decoder<R> {
         }
     }
 
-    /// Create a new decoder configuration with custom `DecodeOptions`.
+    /// Create a new decoder configuration with custom [`DecodeOptions`].
     pub fn new_with_options(r: R, decode_options: DecodeOptions) -> Decoder<R> {
         let mut read_decoder = ReadDecoder::with_options(r, decode_options);
         read_decoder.set_limits(Limits::default());

@@ -13,7 +13,7 @@ use self::unfiltering_buffer::UnfilteringBuffer;
 use std::io::{BufRead, Seek};
 use std::mem;
 
-use crate::adam7::{self, Adam7Info, Adam7Variant};
+use crate::adam7::{Adam7Info, Adam7Variant};
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
@@ -546,7 +546,7 @@ impl<R: BufRead + Seek> Reader<R> {
         }
         let rowlen = match interlace {
             InterlaceInfo::Null(_) => self.subframe.rowlen,
-            InterlaceInfo::Adam7(Adam7Info { width, .. }) => {
+            InterlaceInfo::Adam7(Adam7Info { samples: width, .. }) => {
                 self.info().raw_row_length_from_width(width)
             }
         };
@@ -561,7 +561,7 @@ impl<R: BufRead + Seek> Reader<R> {
 
     fn output_line_size_for_interlace_info(&self, interlace: &InterlaceInfo) -> usize {
         let width = match interlace {
-            InterlaceInfo::Adam7(Adam7Info { width, .. }) => *width,
+            InterlaceInfo::Adam7(Adam7Info { samples: width, .. }) => *width,
             InterlaceInfo::Null(_) => self.subframe.width,
         };
         self.unguarded_output_line_size(width)

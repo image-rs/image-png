@@ -1,5 +1,6 @@
 //! Utility functions related to handling of
 //! [the Adam7 algorithm](https://en.wikipedia.org/wiki/Adam7_algorithm).
+use core::ops::RangeTo;
 
 /// Describes which stage of
 /// [the Adam7 algorithm](https://en.wikipedia.org/wiki/Adam7_algorithm)
@@ -8,9 +9,14 @@
 /// See also [Reader.next_interlaced_row](crate::decoder::Reader::next_interlaced_row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Adam7Info {
+    /// The Adam7 pass number, 1..7.
     pub(crate) pass: u8,
+    /// The index of the line within this pass.
     pub(crate) line: u32,
+    /// The original pixel count.
     pub(crate) width: u32,
+    /// How many Adam7 samples there are.
+    pub(crate) samples: u32,
 }
 
 /// The index of a bit in the image buffer.
@@ -32,10 +38,8 @@ impl Adam7Info {
     /// * `line` is the number of a line within a pass (starting with 0).  For example,
     ///   in an image of height 8, `line` can be beteween `0..4` in the 7th `pass`
     ///   (those 4 interlaced rows correspond to 2nd, 4th, 6th, and 8th row of the full image).
-    /// * `width` describes how many pixels are in an interlaced row.  For example,
-    ///   in the 7th `pass`, the `width` is be the same as full image width, but in
-    ///   in the 1st `pass`, the `width` is be 1/8th of the image width (rounded up as
-    ///   necessary).
+    /// * `width` describes how many pixels are in a full row of the image. The bytes in each
+    ///   passline of the Adam7 are calculated from this number.
     ///
     /// Note that in typical usage, `Adam7Info`s are returned by [Reader.next_interlaced_row]
     /// and there is no need to create them by calling `Adam7Info::new`.  `Adam7Info::new` is
@@ -44,11 +48,35 @@ impl Adam7Info {
     pub fn new(pass: u8, line: u32, width: u32) -> Self {
         assert!(1 <= pass && pass <= 7);
         assert!(width > 0);
-        Self { pass, line, width }
+
+        let consts = PassConstants::PASSES[pass as usize - 1];
+        let samples =
+            (f64::from(width) - f64::from(consts.x_offset)) / f64::from(consts.x_sampling);
+        let samples = samples.ceil() as u32;
+
+        Self {
+            pass,
+            line,
+            width,
+            samples,
+        }
     }
 
     fn pass_constants(&self) -> PassConstants {
         PassConstants::PASSES[self.pass as usize - 1]
+    }
+
+    /// How often to repeat a pixel.
+    fn splat_pixel_repeat(self, idx: usize) -> u8 {
+        let pass = self.pass_constants();
+        let x_pixel = idx as u32 * u32::from(pass.x_sampling) + u32::from(pass.x_offset);
+        (self.width - x_pixel).min(pass.splat_x_repeat().into()) as u8
+    }
+
+    fn splat_line_repeat(self, height: u32) -> u8 {
+        let pass = self.pass_constants();
+        let y_line = self.line * u32::from(pass.y_sampling) + u32::from(pass.y_offset);
+        (height - y_line).min(pass.splat_y_repeat().into()) as u8
     }
 }
 
@@ -61,6 +89,14 @@ struct PassConstants {
 }
 
 impl PassConstants {
+    const fn splat_x_repeat(self) -> u8 {
+        self.x_sampling - self.x_offset
+    }
+
+    const fn splat_y_repeat(self) -> u8 {
+        self.y_sampling - self.y_offset
+    }
+
     /// The constants associated with each of the 7 passes. Note that it is 0-indexed while the
     /// pass number (as per specification) is 1-indexed.
     pub const PASSES: [Self; 7] = {
@@ -152,7 +188,8 @@ impl Iterator for Adam7Iterator {
             Some(Adam7Info {
                 pass: self.current_pass,
                 line: this_line,
-                width: self.line_width,
+                width: self.width,
+                samples: self.line_width,
             })
         } else if self.current_pass < 7 {
             self.current_pass += 1;
@@ -224,7 +261,7 @@ fn expand_adam7_bits(
     let byte_start = prog_line * row_stride_in_bytes;
 
     // In contrast to `subbyte_values` we *must* be precise with our length here.
-    (0..u64::from(info.width))
+    (0..u64::from(info.samples))
         // Bounded by u32::MAX * 8 * 4 + 16 so does not overflow `u64`.
         .map(move |i| (i * samp_mul + samp_off) * u64::from(bits_pp))
         .map(move |i| BitPostion {
@@ -254,7 +291,7 @@ fn expand_adam7_bytes(
     let prog_line = line_mul * info.line as usize + line_off;
     let byte_start = prog_line * row_stride_in_bytes;
 
-    (0..u64::from(info.width))
+    (0..u64::from(info.samples))
         .map(move |i| (i * samp_mul + samp_off) * u64::from(bytes_pp))
         // Bounded by the allocated buffer size so must fit in `usize`
         .map(move |i| i as usize + byte_start)
@@ -399,7 +436,131 @@ pub fn expand_pass_splat(
     interlace_info: &Adam7Info,
     bits_per_pixel: u8,
 ) {
-    todo!()
+    fn expand_bits_to_img(
+        img: &mut [u8],
+        px: u8,
+        mut pos: BitPostion,
+        repeat: RangeTo<u8>,
+        bpp: u8,
+    ) {
+        let (mut into, mut tail) = img[pos.byte..].split_first_mut().unwrap();
+        let mask = (1u8 << bpp) - 1;
+
+        for _ in 0..repeat.end {
+            if pos.bit >= 8 {
+                pos.byte += 1;
+                pos.bit -= 8;
+
+                (into, tail) = tail.split_first_mut().unwrap();
+            }
+
+            let shift = 8 - bpp - pos.bit;
+            // Preserve all other bits, but be prepared for existing bits
+            let pre = (*into >> shift) & mask;
+            *into ^= (pre ^ px) << shift;
+
+            pos.bit += bpp;
+        }
+    }
+
+    let height = (img.len() / img_row_stride) as u32;
+    let y_repeat = interlace_info.splat_line_repeat(height);
+    debug_assert!(y_repeat > 0);
+
+    match bits_per_pixel {
+        // Note: for 1, 2, 4 multiple runs through the iteration will access the same byte in `img`
+        // so we can not iterate over `&mut u8` values. A better strategy would write multiple bit
+        // groups in one go. This would then also not be as bounds-check heavy?
+        1 => {
+            const BIT_POS_1: [u8; 8] = [7, 6, 5, 4, 3, 2, 1, 0];
+
+            for offset in 0..y_repeat {
+                let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 1);
+                let line_offset = usize::from(offset) * img_row_stride;
+
+                for (idx, (mut pos, px)) in bit_indices
+                    .zip(subbyte_values(interlaced_row, BIT_POS_1, 0b1))
+                    .enumerate()
+                {
+                    let x_repeat = interlace_info.splat_pixel_repeat(idx);
+                    debug_assert!(x_repeat > 0);
+                    pos.byte += line_offset;
+                    expand_bits_to_img(img, px, pos, ..x_repeat, bits_per_pixel);
+                }
+            }
+        }
+        2 => {
+            const BIT_POS_2: [u8; 4] = [6, 4, 2, 0];
+
+            for offset in 0..y_repeat {
+                let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 2);
+                let line_offset = usize::from(offset) * img_row_stride;
+
+                for (idx, (mut pos, px)) in bit_indices
+                    .zip(subbyte_values(interlaced_row, BIT_POS_2, 0b11))
+                    .enumerate()
+                {
+                    let x_repeat = interlace_info.splat_pixel_repeat(idx);
+                    pos.byte += line_offset;
+                    expand_bits_to_img(img, px, pos, ..x_repeat, bits_per_pixel);
+                }
+            }
+        }
+        4 => {
+            const BIT_POS_4: [u8; 2] = [4, 0];
+
+            for offset in 0..y_repeat {
+                let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 4);
+                let line_offset = usize::from(offset) * img_row_stride;
+
+                for (idx, (mut pos, px)) in bit_indices
+                    .zip(subbyte_values(interlaced_row, BIT_POS_4, 0b1111))
+                    .enumerate()
+                {
+                    let x_repeat = interlace_info.splat_pixel_repeat(idx);
+                    pos.byte += line_offset;
+                    expand_bits_to_img(img, px, pos, ..x_repeat, bits_per_pixel);
+                }
+            }
+        }
+        // While caught by the below loop, we special case this for codegen. The effects are
+        // massive when the compiler uses the constant chunk size in particular for this case where
+        // no more copy_from_slice is being issued by everything happens in the register alone.
+        8 => {
+            for offset in 0..y_repeat {
+                let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, 1);
+                let line_offset = usize::from(offset) * img_row_stride;
+
+                for (idx, (bytepos, px)) in byte_indices.zip(interlaced_row).enumerate() {
+                    let x_repeat = usize::from(interlace_info.splat_pixel_repeat(idx));
+                    debug_assert!(x_repeat > 0);
+                    img[line_offset + bytepos..][..x_repeat].fill(*px);
+                }
+            }
+        }
+        _ => {
+            debug_assert!(bits_per_pixel % 8 == 0);
+            let bytes = bits_per_pixel / 8;
+            let chunk = usize::from(bytes);
+
+            for offset in 0..y_repeat {
+                let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, bytes);
+                let line_offset = usize::from(offset) * img_row_stride;
+
+                for (idx, (bytepos, px)) in byte_indices
+                    .zip(interlaced_row.chunks_exact(chunk))
+                    .enumerate()
+                {
+                    let x_repeat = usize::from(interlace_info.splat_pixel_repeat(idx));
+                    let target = &mut img[line_offset + bytepos..][..chunk * x_repeat];
+
+                    for target in target.chunks_exact_mut(chunk) {
+                        target.copy_from_slice(px);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -422,37 +583,44 @@ mod tests {
                 Adam7Info {
                     pass: 1,
                     line: 0,
-                    width: 1
+                    samples: 1,
+                    width: 4,
                 },
                 Adam7Info {
                     pass: 4,
                     line: 0,
-                    width: 1
+                    samples: 1,
+                    width: 4,
                 },
                 Adam7Info {
                     pass: 5,
                     line: 0,
-                    width: 2
+                    samples: 2,
+                    width: 4,
                 },
                 Adam7Info {
                     pass: 6,
                     line: 0,
-                    width: 2
+                    samples: 2,
+                    width: 4,
                 },
                 Adam7Info {
                     pass: 6,
                     line: 1,
-                    width: 2
+                    samples: 2,
+                    width: 4,
                 },
                 Adam7Info {
                     pass: 7,
                     line: 0,
-                    width: 4
+                    samples: 4,
+                    width: 4,
                 },
                 Adam7Info {
                     pass: 7,
                     line: 1,
-                    width: 4
+                    samples: 4,
+                    width: 4,
                 }
             ]
         );
@@ -686,6 +854,111 @@ mod tests {
         );
     }
 
+    // We use 4bpp as representative for bit-fiddling passes bpp 1, 2, 4. The choice was made
+    // because it is succinct to write in hex so one can read this and understand it.
+    #[test]
+    fn test_expand_pass_splat_4bpp() {
+        let width = 8;
+        let bits_pp = 4;
+
+        let mut img = [0u8; 8];
+        let stride = width / 2;
+
+        let passes: &[(&'static [u8], &'static [u8])] = &[
+            (&[0x10], &[0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]), // pass 1, 0
+            (&[0x20], &[0x11, 0x11, 0x22, 0x22, 0x11, 0x11, 0x22, 0x22]), // pass 2, 0
+            // no third pass..
+            (&[0x4a], &[0x11, 0x44, 0x22, 0xaa, 0x11, 0x44, 0x22, 0xaa]), // pass 4, 0
+            // no fifth pass..
+            (
+                &[0x6b, 0x6b],
+                &[0x16, 0x4b, 0x26, 0xab, 0x16, 0x4b, 0x26, 0xab],
+            ), // pass 6, 0
+            (
+                &[0x7c, 0xc7, 0x7c, 0x7c],
+                &[0x16, 0x4b, 0x26, 0xab, 0x7c, 0xc7, 0x7c, 0x7c],
+            ), // pass 7, 0
+        ];
+
+        let adam7 = Adam7Iterator::new(8, 2);
+        for ((data, expected), adam7_info) in passes.iter().zip(adam7) {
+            expand_pass_splat(&mut img, stride, data, &adam7_info, bits_pp);
+            assert_eq!(img, *expected, "{img:x?} {expected:x?} {adam7_info:?}");
+        }
+    }
+
+    /// Check that our different Adam7 strategies lead to the same result once all interlace lines
+    /// have been applied.
+    #[test]
+    fn adam7_equivalence() {
+        // Choose ragged sizes to cover bugs that write outside etc.
+        const WIDTH: u32 = 8;
+        const HEIGHT: u32 = 8;
+
+        let interace_pool: Vec<_> = (0x42u8..).take(32).collect();
+
+        for &bpp in &[1u8, 2, 4, 8, 16, 24, 32][2..] {
+            let bytes_of = |pix: u32| (u32::from(bpp) * pix).next_multiple_of(8) as usize / 8;
+
+            let rowbytes = bytes_of(WIDTH);
+
+            // In the sparse case we do not promise to override all bits
+            let mut buf_sparse = vec![0x00; rowbytes * HEIGHT as usize];
+            // Whereas in the spat case we do, so we may as well set some arbitrary initial
+            let mut buf_splat = vec![0xaa; rowbytes * HEIGHT as usize];
+
+            // Now execute all the iterations, then compare buffers.
+            for adam7_info in Adam7Iterator::new(WIDTH, HEIGHT) {
+                let adam7_bytes = bytes_of(adam7_info.samples);
+                let interlace_line = &interace_pool[..adam7_bytes];
+
+                expand_pass(&mut buf_sparse, rowbytes, interlace_line, &adam7_info, bpp);
+                expand_pass_splat(&mut buf_splat, rowbytes, interlace_line, &adam7_info, bpp);
+            }
+
+            assert_eq!(
+                buf_sparse, buf_splat,
+                "{buf_sparse:x?} {buf_splat:x?} bpp={bpp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_expand_pass_splat_1bpp() {
+        let width = 8;
+        let bits_pp = 1;
+
+        let mut img = [0u8; 8];
+        let stride = 1;
+
+        // Since bits do not suffice to represent the pass number in pixels we choose interlace
+        // rows such that we toggle all affected bits each time. In particular the input bits that
+        // must not be used are set to the inverse.
+        let passes: &[(&'static [u8], &'static [u8])] = &[
+            (&[0x80], &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]), // pass 1, 0
+            (&[0x7f], &[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0]), // pass 2, 0
+            (&[0xc0], &[0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0xff, 0xff, 0xff]), // pass 3, 0
+            (&[0x3f], &[0xc0, 0xc0, 0xc0, 0xc0, 0xff, 0xff, 0xff, 0xff]), // pass 4, 0
+            (&[0x3f], &[0xc0, 0xc0, 0xc0, 0xc0, 0xcc, 0xcc, 0xcc, 0xcc]), // pass 4, 1
+            (&[0xf0], &[0xc0, 0xc0, 0xff, 0xff, 0xcc, 0xcc, 0xcc, 0xcc]), // pass 5, 0
+            (&[0xf0], &[0xc0, 0xc0, 0xff, 0xff, 0xcc, 0xcc, 0xff, 0xff]), // pass 5, 1
+            (&[0x0f], &[0x80, 0x80, 0xff, 0xff, 0xcc, 0xcc, 0xff, 0xff]), // pass 6, 0
+            (&[0x0f], &[0x80, 0x80, 0xaa, 0xaa, 0xcc, 0xcc, 0xff, 0xff]), // pass 6, 1
+            (&[0x0f], &[0x80, 0x80, 0xaa, 0xaa, 0x88, 0x88, 0xff, 0xff]), // pass 6, 2
+            (&[0x0f], &[0x80, 0x80, 0xaa, 0xaa, 0x88, 0x88, 0xaa, 0xaa]), // pass 6, 3
+            (&[0xff], &[0x80, 0xff, 0xaa, 0xaa, 0x88, 0x88, 0xaa, 0xaa]), // pass 7, 0
+            (&[0xff], &[0x80, 0xff, 0xaa, 0xff, 0x88, 0x88, 0xaa, 0xaa]), // pass 7, 1
+            (&[0xff], &[0x80, 0xff, 0xaa, 0xff, 0x88, 0xff, 0xaa, 0xaa]), // pass 7, 2
+            (&[0xff], &[0x80, 0xff, 0xaa, 0xff, 0x88, 0xff, 0xaa, 0xff]), // pass 7, 3
+        ];
+
+        let adam7 = Adam7Iterator::new(width, 8);
+        for ((data, expected), adam7_info) in passes.iter().zip(adam7) {
+            expand_pass_splat(&mut img, stride, data, &adam7_info, bits_pp);
+            assert_eq!(img, *expected, "{img:x?} {expected:x?} {adam7_info:?}");
+        }
+    }
+
     /// This test ensures that `expand_pass` works correctly on 32-bit machines, even when the indices
     /// of individual bits in the target buffer can not be expressed within a `usize`. We ensure that
     /// the output buffer size is between `usize::MAX / 8` and `isize::MAX` to trigger that condition.
@@ -728,11 +1001,16 @@ mod tests {
             let img_height = 8;
             Adam7Iterator::new(img_width as u32, img_height)
                 .filter(|info| info.pass == pass)
-                .map(|info| info.width)
+                .map(|info| info.samples)
                 .next()
                 .unwrap()
         };
 
-        Adam7Info { pass, line, width }
+        Adam7Info {
+            pass,
+            line,
+            samples: width,
+            width,
+        }
     }
 }

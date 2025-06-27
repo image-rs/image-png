@@ -49,10 +49,8 @@ impl Adam7Info {
         assert!(1 <= pass && pass <= 7);
         assert!(width > 0);
 
-        let consts = PassConstants::PASSES[pass as usize - 1];
-        let samples =
-            (f64::from(width) - f64::from(consts.x_offset)) / f64::from(consts.x_sampling);
-        let samples = samples.ceil() as u32;
+        let info = PassConstants::PASSES[pass as usize - 1];
+        let samples = info.count_samples(width);
 
         Self {
             pass,
@@ -95,6 +93,18 @@ impl PassConstants {
 
     const fn splat_y_repeat(self) -> u8 {
         self.y_sampling - self.y_offset
+    }
+
+    fn count_samples(self, width: u32) -> u32 {
+        width
+            .saturating_sub(u32::from(self.x_offset))
+            .div_ceil(u32::from(self.x_sampling))
+    }
+
+    fn count_lines(self, height: u32) -> u32 {
+        height
+            .saturating_sub(u32::from(self.y_offset))
+            .div_ceil(u32::from(self.y_sampling))
     }
 
     /// The constants associated with each of the 7 passes. Note that it is 0-indexed while the
@@ -160,20 +170,9 @@ impl Adam7Iterator {
 
     /// Calculates the bounds of the current pass
     fn init_pass(&mut self) {
-        let w = f64::from(self.width);
-        let h = f64::from(self.height);
-
         let info = PassConstants::PASSES[self.current_pass as usize - 1];
-        // Note: integer arithmetic `div_ceil` would not handle the cases `w < 8` where the
-        // intermediate value becomes negative. Since offset <= 0.5 * sampling we get the correct
-        // ceiling value with floating point arithmetic however. Also note the float arithmetic is
-        // exact since all divisions are pure exponent offsets and the mantissa holds any possible
-        // `[-8; 0) + u32[]` value.
-        let line_width = (w - f64::from(info.x_offset)) / f64::from(info.x_sampling);
-        let lines = (h - f64::from(info.y_offset)) / f64::from(info.y_sampling);
-
-        self.line_width = line_width.ceil() as u32;
-        self.lines = lines.ceil() as u32;
+        self.line_width = info.count_samples(self.width);
+        self.lines = info.count_lines(self.height);
         self.line = 0;
     }
 }

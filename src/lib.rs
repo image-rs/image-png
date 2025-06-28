@@ -77,8 +77,11 @@ mod srgb;
 pub mod text_metadata;
 mod traits;
 
-pub use crate::adam7::expand_pass as expand_interlaced_row;
-pub use crate::adam7::Adam7Info;
+pub use crate::adam7::{
+    expand_pass as expand_interlaced_row, expand_pass_splat as splat_interlaced_row,
+};
+
+pub use crate::adam7::{Adam7Info, Adam7Variant};
 pub use crate::common::*;
 pub use crate::decoder::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
 pub use crate::decoder::{Decoder, InterlaceInfo, InterlacedRow, Limits, OutputInfo, Reader};

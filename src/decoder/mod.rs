@@ -13,7 +13,7 @@ use self::unfiltering_buffer::UnfilteringBuffer;
 use std::io::{BufRead, Seek};
 use std::mem;
 
-use crate::adam7::{self, Adam7Info};
+use crate::adam7::Adam7Info;
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
 };
@@ -139,7 +139,7 @@ impl<R: BufRead + Seek> Decoder<R> {
         }
     }
 
-    /// Create a new decoder configuration with custom `DecodeOptions`.
+    /// Create a new decoder configuration with custom [`DecodeOptions`].
     pub fn new_with_options(r: R, decode_options: DecodeOptions) -> Decoder<R> {
         let mut read_decoder = ReadDecoder::with_options(r, decode_options);
         read_decoder.set_limits(Limits::default());
@@ -433,6 +433,8 @@ impl<R: BufRead + Seek> Reader<R> {
             let stride = self.unguarded_output_line_size(self.info().width);
             let samples = color_type.samples() as u8;
             let bits_pp = samples * (bit_depth as u8);
+            let expand = crate::adam7::expand_pass;
+
             while let Some(InterlacedRow {
                 data: row,
                 interlace,
@@ -441,7 +443,7 @@ impl<R: BufRead + Seek> Reader<R> {
             {
                 // `unwrap` won't panic, because we checked `self.info().interlaced` above.
                 let adam7info = interlace.get_adam7_info().unwrap();
-                adam7::expand_pass(buf, stride, row, adam7info, bits_pp);
+                expand(buf, stride, row, adam7info, bits_pp);
             }
         } else {
             let current_interlace_info = self.subframe.current_interlace_info.as_ref();
@@ -541,7 +543,7 @@ impl<R: BufRead + Seek> Reader<R> {
         }
         let rowlen = match interlace {
             InterlaceInfo::Null(_) => self.subframe.rowlen,
-            InterlaceInfo::Adam7(Adam7Info { width, .. }) => {
+            InterlaceInfo::Adam7(Adam7Info { samples: width, .. }) => {
                 self.info().raw_row_length_from_width(width)
             }
         };
@@ -556,7 +558,7 @@ impl<R: BufRead + Seek> Reader<R> {
 
     fn output_line_size_for_interlace_info(&self, interlace: &InterlaceInfo) -> usize {
         let width = match interlace {
-            InterlaceInfo::Adam7(Adam7Info { width, .. }) => *width,
+            InterlaceInfo::Adam7(Adam7Info { samples: width, .. }) => *width,
             InterlaceInfo::Null(_) => self.subframe.width,
         };
         self.unguarded_output_line_size(width)

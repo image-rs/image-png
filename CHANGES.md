@@ -9,12 +9,29 @@
 * `StreamingDecoder::update` now takes a structured `UnfilterBuf` argument
   instead of a direct reference to a vector. This allows in-place
   decompression. There is a public constructor for `UnfilterBuf`.
+* The methods `Decoder::output_buffer_size` and `output_line_size` now return
+  `Option<usize>` to reflect that these calculations no longer overflow on some
+  targets where the required buffers can not be represented in the address
+  space. They return the mathematically correct size where possible.
 
-### Other additions
+### Additions
 
 * Added `Reader::read_row` method.
 * Add support for parsing eXIf chunk.
 * Treat most auxiliary chunk errors as benign.
+* Added `splat_interlaced_row`, which implements an alternative method for
+  merging Adam7 interlaced lines into the output buffer that is more suitable
+  for the presentation of progressive states of the buffer.
+* Added `Adam7Variant` documenting the various methods for applying interlaced
+  rows and to prepare an API to progressively read frames through `Decoder`.
+
+### Changes
+
+* The decoding of Adam7 interlaced data is now much faster.
+* The `acTL` chunk is now ignored when it is invalid, instead of producing
+  errors while reading or decoding the following APNG chunks.
+* Adam7 Interlacing on 32-bit targets now handles some cases correctly that
+  previously wrote some bytes to the wrong pixel indices due to overflows.
 
 ## 0.17.16
 

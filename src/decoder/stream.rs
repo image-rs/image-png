@@ -1039,17 +1039,7 @@ impl StreamingDecoder {
         //
         // TODO: Consider supporting a strict mode where even benign errors are reported up.
         // See https://github.com/image-rs/image-png/pull/569#issuecomment-2642062285
-        if matches!(parse_result.as_ref(), Err(DecodingError::Format(_)))
-            && matches!(
-                type_str,
-                chunk::cHRM
-                    | chunk::gAMA
-                    | chunk::iCCP
-                    | chunk::pHYs
-                    | chunk::sBIT
-                    | chunk::sRGB
-                    | chunk::tRNS
-            )
+        if matches!(parse_result.as_ref(), Err(DecodingError::Format(_))) && type_str != chunk::fcTL
         {
             parse_result = Ok(Decoded::Nothing);
         }

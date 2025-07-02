@@ -30,6 +30,10 @@
 * The decoding of Adam7 interlaced data is now much faster.
 * The `acTL` chunk is now ignored when it is invalid, instead of producing
   errors while reading or decoding the following APNG chunks.
+* The requirement of the `fcTL` chunk for the default image to match the IHDR's
+  indicate image size is now enforced.
+* More minor format errors in auxiliary chunks are now ignored by the decoder,
+  instead disregarding the malformed chunk.
 * Adam7 Interlacing on 32-bit targets now handles some cases correctly that
   previously wrote some bytes to the wrong pixel indices due to overflows.
 

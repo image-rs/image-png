@@ -1124,6 +1124,9 @@ impl StreamingDecoder {
             },
         };
         self.info.as_ref().unwrap().validate(&fc)?;
+        if !self.have_idat {
+            self.info.as_ref().unwrap().validate_default_image(&fc)?;
+        }
         self.info.as_mut().unwrap().frame_control = Some(fc);
         Ok(Decoded::FrameControl(fc))
     }
@@ -1823,6 +1826,27 @@ impl StreamingDecoder {
 }
 
 impl Info<'_> {
+    fn validate_default_image(&self, fc: &FrameControl) -> Result<(), DecodingError> {
+        // https://www.w3.org/TR/png-3/#fcTL-chunk says that:
+        //
+        // > The fcTL chunk corresponding to the default image, if it exists, has these
+        // > restrictions:
+        // >
+        // > * The x_offset and y_offset fields must be 0.
+        // > * The width and height fields must equal
+        // >   the corresponding fields from the IHDR chunk.
+        if fc.x_offset != 0
+            || fc.y_offset != 0
+            || fc.width != self.width
+            || fc.height != self.height
+        {
+            return Err(DecodingError::Format(
+                FormatErrorInner::BadSubFrameBounds {}.into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate(&self, fc: &FrameControl) -> Result<(), DecodingError> {
         if fc.width == 0 || fc.height == 0 {
             return Err(DecodingError::Format(
@@ -3095,5 +3119,43 @@ mod tests {
         //
         // The test passes if these `next_interlaced_row` calls don't hit any `assert!` failures.
         while let Some(_row) = reader.next_interlaced_row().unwrap() {}
+    }
+
+    #[test]
+    fn test_small_fctl() {
+        const FCTL_SIZE: u32 = 30;
+        const IHDR_SIZE: u32 = 50;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, IHDR_SIZE);
+        write_actl(
+            &mut png,
+            &crate::AnimationControl {
+                num_frames: 1,
+                num_plays: 1,
+            },
+        );
+        write_fctl(
+            &mut png,
+            &crate::FrameControl {
+                width: FCTL_SIZE,
+                height: FCTL_SIZE,
+                x_offset: 10,
+                y_offset: 10,
+                sequence_number: 0,
+                ..Default::default()
+            },
+        );
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(IHDR_SIZE, IHDR_SIZE),
+        );
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(png)).read_info();
+        let err = reader.err().unwrap();
+        assert!(matches!(&err, DecodingError::Format(_)));
+        assert_eq!("Sub frame is out-of-bounds.", format!("{err}"));
     }
 }

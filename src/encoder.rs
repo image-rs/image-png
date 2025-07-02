@@ -1380,6 +1380,7 @@ pub struct StreamWriter<'a, W: Write> {
     writer: Wrapper<'a, W>,
     prev_buf: Vec<u8>,
     curr_buf: Vec<u8>,
+    filtered_buf: Vec<u8>,
     /// Amount of data already written
     index: usize,
     /// length of the current scanline
@@ -1411,6 +1412,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let compression = writer.options.compression;
         let prev_buf = vec![0; in_len];
         let curr_buf = vec![0; in_len];
+        let filtered_buf = vec![0; in_len];
 
         let mut chunk_writer = ChunkWriter::new(writer, buf_len);
         let (line_len, to_write) = chunk_writer.next_frame_info();
@@ -1421,6 +1423,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
             index: 0,
             prev_buf,
             curr_buf,
+            filtered_buf,
             bpp,
             filter,
             width,
@@ -1717,24 +1720,22 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
         self.to_write -= written;
 
         if self.index == self.line_len {
-            // TODO: reuse this buffer between rows.
-            let mut filtered = vec![0; self.curr_buf.len()];
             let filter_type = filter(
                 self.filter,
                 self.bpp,
                 &self.prev_buf,
                 &self.curr_buf,
-                &mut filtered,
+                &mut self.filtered_buf,
             );
             // This can't fail as the other variant is used only to allow the zlib encoder to finish
             match &mut self.writer {
                 Wrapper::Flate2(wrt) => {
                     wrt.write_all(&[filter_type as u8])?;
-                    wrt.write_all(&filtered)?;
+                    wrt.write_all(&self.filtered_buf)?;
                 }
                 Wrapper::FDeflate(wrt) => {
                     wrt.write_data(&[filter_type as u8])?;
-                    wrt.write_data(&filtered)?;
+                    wrt.write_data(&self.filtered_buf)?;
                 }
                 _ => unreachable!(),
             };

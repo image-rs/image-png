@@ -323,7 +323,7 @@ fn expand_adam7_bytes(
 ///
 /// ```
 /// use png::{expand_interlaced_row, Adam7Info};
-/// let info = Adam7Info::new(5, 0, 4);  // 1st line of 5th pass has 4 pixels.
+/// let info = Adam7Info::new(5, 0, 8);
 /// let mut img = vec![0; 8 * 8];
 /// let row = vec![1, 2, 3, 4];
 /// expand_interlaced_row(&mut img, 8, &row, &info, 8);

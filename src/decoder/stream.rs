@@ -3148,4 +3148,29 @@ mod tests {
         assert!(matches!(&err, DecodingError::Format(_)));
         assert_eq!("Sub frame is out-of-bounds.", format!("{err}"));
     }
+
+    #[test]
+    fn test_invalid_text_chunk() {
+        // The spec requires a NUL character (separating keyword from text) within the first 80
+        // bytes of the chunk.  Here there is no NUL character in the first 100 bytes, so this
+        // chunk is invalid and should trigger an error in `parse_text`.
+        let invalid_text_chunk = vec![b'A'; 100];
+
+        const SIZE: u32 = 20;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, SIZE);
+        write_chunk(&mut png, b"tEXt", invalid_text_chunk.as_slice());
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(SIZE, SIZE),
+        );
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(png)).read_info().unwrap();
+        let info = reader.info();
+        assert_eq!(info.width, SIZE);
+        assert_eq!(info.uncompressed_latin1_text.len(), 0);
+    }
 }

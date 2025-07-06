@@ -61,11 +61,8 @@ enum State {
         accumulated_count: usize,
     },
     /// In this state we are reading chunk data from external input, and appending it to
-    /// `ChunkState::raw_bytes`.
+    /// `ChunkState::raw_bytes`. Then if all data has been read, we parse the chunk.
     ReadChunkData(ChunkType),
-    /// In this state we check if all chunk data has been already read into `ChunkState::raw_bytes`
-    /// and if so then we parse the chunk.  Otherwise, we go back to the `ReadChunkData` state.
-    ParseChunkData(ChunkType),
     /// In this state we are reading image data from external input and feeding it directly into
     /// `StreamingDecoder::inflater`.
     ImageData(ChunkType),
@@ -731,20 +728,6 @@ impl StreamingDecoder {
                     }
                 }
             }
-            ParseChunkData(type_str) => {
-                debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
-                if self.current_chunk.remaining == 0 {
-                    // Got complete chunk.
-                    Ok((0, self.parse_chunk(type_str)?))
-                } else {
-                    // Make sure we have room to read more of the chunk.
-                    // We need it fully before parsing.
-                    self.reserve_current_chunk()?;
-
-                    self.state = Some(ReadChunkData(type_str));
-                    Ok((0, Decoded::PartialChunk(type_str)))
-                }
-            }
             ReadChunkData(type_str) => {
                 debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
                 if self.current_chunk.remaining == 0 {
@@ -758,25 +741,36 @@ impl StreamingDecoder {
                         type_: _,
                     } = &mut self.current_chunk;
 
+                    if raw_bytes.len() == raw_bytes.capacity() {
+                        if self.limits.bytes == 0 {
+                            return Err(DecodingError::LimitsExceeded);
+                        }
+
+                        // Double the size of the Vec, but not beyond the allocation limit.
+                        debug_assert!(raw_bytes.capacity() > 0);
+                        let reserve_size = raw_bytes.capacity().min(self.limits.bytes);
+
+                        self.limits.reserve_bytes(reserve_size)?;
+                        raw_bytes.reserve_exact(reserve_size);
+                    }
+
                     let buf_avail = raw_bytes.capacity() - raw_bytes.len();
                     let bytes_avail = min(buf.len(), buf_avail);
                     let n = min(*remaining, bytes_avail as u32);
-                    if buf_avail == 0 {
-                        self.state = Some(ParseChunkData(type_str));
-                        Ok((0, Decoded::Nothing))
-                    } else {
-                        let buf = &buf[..n as usize];
-                        if !self.decode_options.ignore_crc {
-                            crc.update(buf);
-                        }
-                        raw_bytes.extend_from_slice(buf);
 
-                        *remaining -= n;
-                        if *remaining == 0 {
-                            self.state = Some(ParseChunkData(type_str));
-                        } else {
-                            self.state = Some(ReadChunkData(type_str));
-                        }
+                    let buf = &buf[..n as usize];
+                    if !self.decode_options.ignore_crc {
+                        crc.update(buf);
+                    }
+                    raw_bytes.extend_from_slice(buf);
+
+                    *remaining -= n;
+                    if *remaining == 0 {
+                        debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
+                        debug_assert_eq!(self.current_chunk.remaining, 0);
+                        Ok((n as usize, self.parse_chunk(type_str)?))
+                    } else {
+                        self.state = Some(ReadChunkData(type_str));
                         Ok((n as usize, Decoded::Nothing))
                     }
                 }
@@ -972,22 +966,6 @@ impl StreamingDecoder {
                 self.state = Some(State::ImageData(chunk::fdAT));
                 Ok(Decoded::PartialChunk(chunk::fdAT))
             }
-        }
-    }
-
-    fn reserve_current_chunk(&mut self) -> Result<(), DecodingError> {
-        let max = self.limits.bytes;
-        let buffer = &mut self.current_chunk.raw_bytes;
-
-        // Double if necessary, but no more than until the limit is reached.
-        let reserve_size = max.saturating_sub(buffer.capacity()).min(buffer.len());
-        self.limits.reserve_bytes(reserve_size)?;
-        buffer.reserve_exact(reserve_size);
-
-        if buffer.capacity() == buffer.len() {
-            Err(DecodingError::LimitsExceeded)
-        } else {
-            Ok(())
         }
     }
 

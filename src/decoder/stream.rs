@@ -767,12 +767,12 @@ impl StreamingDecoder {
                     *remaining -= n;
                     if *remaining == 0 {
                         debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
-                        debug_assert_eq!(self.current_chunk.remaining, 0);
-                        Ok((n as usize, self.parse_chunk(type_str)?))
+                        self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
+                        self.parse_chunk(type_str)?;
                     } else {
                         self.state = Some(ReadChunkData(type_str));
-                        Ok((n as usize, Decoded::Nothing))
                     }
+                    Ok((n as usize, Decoded::Nothing))
                 }
             }
             ImageData(type_str) => {
@@ -968,8 +968,7 @@ impl StreamingDecoder {
         }
     }
 
-    fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
-        self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
+    fn parse_chunk(&mut self, type_str: ChunkType) -> Result<(), DecodingError> {
         let mut parse_result = match type_str {
             IHDR => self.parse_ihdr(),
             chunk::sBIT => self.parse_sbit(),
@@ -990,7 +989,7 @@ impl StreamingDecoder {
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
             chunk::iTXt if !self.decode_options.ignore_text_chunk => self.parse_itxt(),
-            _ => Ok(Decoded::Nothing),
+            _ => Ok(()),
         };
 
         parse_result = parse_result.map_err(|e| {
@@ -1018,7 +1017,7 @@ impl StreamingDecoder {
         // See https://github.com/image-rs/image-png/pull/569#issuecomment-2642062285
         if matches!(parse_result.as_ref(), Err(DecodingError::Format(_))) && type_str != chunk::fcTL
         {
-            parse_result = Ok(Decoded::Nothing);
+            parse_result = Ok(());
         }
 
         // Clear the parsing state to enforce that parsing can't continue after an error.
@@ -1029,7 +1028,7 @@ impl StreamingDecoder {
         parse_result
     }
 
-    fn parse_fctl(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_fctl(&mut self) -> Result<(), DecodingError> {
         let mut buf = &self.current_chunk.raw_bytes[..];
         let next_seq_no = buf.read_be()?;
 
@@ -1095,10 +1094,10 @@ impl StreamingDecoder {
             self.info.as_ref().unwrap().validate_default_image(&fc)?;
         }
         self.info.as_mut().unwrap().frame_control = Some(fc);
-        Ok(Decoded::Nothing)
+        Ok(())
     }
 
-    fn parse_actl(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_actl(&mut self) -> Result<(), DecodingError> {
         if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::acTL }.into(),
@@ -1112,14 +1111,14 @@ impl StreamingDecoder {
             // The spec says that "0 is not a valid value" for `num_frames`.
             // So let's ignore such malformed `acTL` chunks.
             if actl.num_frames == 0 {
-                return Ok(Decoded::Nothing);
+                return Ok(());
             }
             self.info.as_mut().unwrap().animation_control = Some(actl);
-            Ok(Decoded::Nothing)
+            Ok(())
         }
     }
 
-    fn parse_plte(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_plte(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if info.palette.is_some() {
             // Only one palette is allowed
@@ -1130,11 +1129,11 @@ impl StreamingDecoder {
             self.limits
                 .reserve_bytes(self.current_chunk.raw_bytes.len())?;
             info.palette = Some(Cow::Owned(self.current_chunk.raw_bytes.clone()));
-            Ok(Decoded::Nothing)
+            Ok(())
         }
     }
 
-    fn parse_sbit(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_sbit(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if info.palette.is_some() {
             return Err(DecodingError::Format(
@@ -1198,10 +1197,10 @@ impl StreamingDecoder {
             }
         }
         info.sbit = Some(Cow::Owned(vec));
-        Ok(Decoded::Nothing)
+        Ok(())
     }
 
-    fn parse_trns(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_trns(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if info.trns.is_some() {
             return Err(DecodingError::Format(
@@ -1225,7 +1224,7 @@ impl StreamingDecoder {
                     vec.truncate(1);
                 }
                 info.trns = Some(Cow::Owned(vec));
-                Ok(Decoded::Nothing)
+                Ok(())
             }
             ColorType::Rgb => {
                 if len < 6 {
@@ -1240,7 +1239,7 @@ impl StreamingDecoder {
                     vec.truncate(3);
                 }
                 info.trns = Some(Cow::Owned(vec));
-                Ok(Decoded::Nothing)
+                Ok(())
             }
             ColorType::Indexed => {
                 // The transparency chunk must be after the palette chunk and
@@ -1256,7 +1255,7 @@ impl StreamingDecoder {
                 }
 
                 info.trns = Some(Cow::Owned(vec));
-                Ok(Decoded::Nothing)
+                Ok(())
             }
             c => Err(DecodingError::Format(
                 FormatErrorInner::ColorWithBadTrns(c).into(),
@@ -1264,7 +1263,7 @@ impl StreamingDecoder {
         }
     }
 
-    fn parse_phys(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_phys(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if self.have_idat {
             Err(DecodingError::Format(
@@ -1289,11 +1288,11 @@ impl StreamingDecoder {
             };
             let pixel_dims = PixelDimensions { xppu, yppu, unit };
             info.pixel_dims = Some(pixel_dims);
-            Ok(Decoded::Nothing)
+            Ok(())
         }
     }
 
-    fn parse_chrm(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_chrm(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if self.have_idat {
             Err(DecodingError::Format(
@@ -1334,11 +1333,11 @@ impl StreamingDecoder {
             };
 
             info.chrm_chunk = Some(source_chromaticities);
-            Ok(Decoded::Nothing)
+            Ok(())
         }
     }
 
-    fn parse_gama(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_gama(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if self.have_idat {
             Err(DecodingError::Format(
@@ -1354,11 +1353,11 @@ impl StreamingDecoder {
             let source_gamma = ScaledFloat::from_scaled(source_gamma);
 
             info.gama_chunk = Some(source_gamma);
-            Ok(Decoded::Nothing)
+            Ok(())
         }
     }
 
-    fn parse_srgb(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_srgb(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if self.have_idat {
             Err(DecodingError::Format(
@@ -1377,14 +1376,14 @@ impl StreamingDecoder {
 
             // Set srgb and override source gamma and chromaticities.
             info.srgb = Some(rendering_intent);
-            Ok(Decoded::Nothing)
+            Ok(())
         }
     }
 
     // NOTE: This function cannot return `DecodingError` and handles parsing
     // errors or spec violations as-if the chunk was missing.  See
     // https://github.com/image-rs/image-png/issues/525 for more discussion.
-    fn parse_cicp(&mut self) -> Decoded {
+    fn parse_cicp(&mut self) {
         fn parse(mut buf: &[u8]) -> Result<CodingIndependentCodePoints, std::io::Error> {
             let color_primaries: u8 = buf.read_be()?;
             let transfer_function: u8 = buf.read_be()?;
@@ -1425,14 +1424,12 @@ impl StreamingDecoder {
         if is_before_plte_and_idat && info.coding_independent_code_points.is_none() {
             info.coding_independent_code_points = parse(&self.current_chunk.raw_bytes[..]).ok();
         }
-
-        Decoded::Nothing
     }
 
     // NOTE: This function cannot return `DecodingError` and handles parsing
     // errors or spec violations as-if the chunk was missing.  See
     // https://github.com/image-rs/image-png/issues/525 for more discussion.
-    fn parse_mdcv(&mut self) -> Decoded {
+    fn parse_mdcv(&mut self) {
         fn parse(mut buf: &[u8]) -> Result<MasteringDisplayColorVolume, std::io::Error> {
             let red_x: u16 = buf.read_be()?;
             let red_y: u16 = buf.read_be()?;
@@ -1476,14 +1473,12 @@ impl StreamingDecoder {
         if is_before_plte_and_idat && info.mastering_display_color_volume.is_none() {
             info.mastering_display_color_volume = parse(&self.current_chunk.raw_bytes[..]).ok();
         }
-
-        Decoded::Nothing
     }
 
     // NOTE: This function cannot return `DecodingError` and handles parsing
     // errors or spec violations as-if the chunk was missing.  See
     // https://github.com/image-rs/image-png/issues/525 for more discussion.
-    fn parse_clli(&mut self) -> Decoded {
+    fn parse_clli(&mut self) {
         fn parse(mut buf: &[u8]) -> Result<ContentLightLevelInfo, std::io::Error> {
             let max_content_light_level: u32 = buf.read_be()?;
             let max_frame_average_light_level: u32 = buf.read_be()?;
@@ -1501,21 +1496,17 @@ impl StreamingDecoder {
         if info.content_light_level.is_none() {
             info.content_light_level = parse(&self.current_chunk.raw_bytes[..]).ok();
         }
-
-        Decoded::Nothing
     }
 
-    fn parse_exif(&mut self) -> Decoded {
+    fn parse_exif(&mut self) {
         // We ignore a second, duplicated eXIf chunk (if any).
         let info = self.info.as_mut().unwrap();
         if info.exif_metadata.is_none() {
             info.exif_metadata = Some(self.current_chunk.raw_bytes.clone().into());
         }
-
-        Decoded::Nothing
     }
 
-    fn parse_iccp(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_iccp(&mut self) -> Result<(), DecodingError> {
         if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::iCCP }.into(),
@@ -1532,11 +1523,11 @@ impl StreamingDecoder {
             //     [...] decoders can ignore them."
             //   * The reference implementation (libpng) ignores the subsequent iCCP chunks
             //     (treating them as a benign error).
-            Ok(Decoded::Nothing)
+            Ok(())
         } else {
             self.have_iccp = true;
             let _ = self.parse_iccp_raw();
-            Ok(Decoded::Nothing)
+            Ok(())
         }
     }
 
@@ -1583,7 +1574,7 @@ impl StreamingDecoder {
         Ok(())
     }
 
-    fn parse_ihdr(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_ihdr(&mut self) -> Result<(), DecodingError> {
         if self.info.is_some() {
             return Err(DecodingError::Format(
                 FormatErrorInner::DuplicateChunk { kind: IHDR }.into(),
@@ -1664,7 +1655,7 @@ impl StreamingDecoder {
             ..Default::default()
         });
 
-        Ok(Decoded::Nothing)
+        Ok(())
     }
 
     fn split_keyword(buf: &[u8]) -> Result<(&[u8], &[u8]), DecodingError> {
@@ -1680,7 +1671,7 @@ impl StreamingDecoder {
         Ok((&buf[..null_byte_index], &buf[null_byte_index + 1..]))
     }
 
-    fn parse_text(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_text(&mut self) -> Result<(), DecodingError> {
         let buf = &self.current_chunk.raw_bytes[..];
         self.limits.reserve_bytes(buf.len())?;
 
@@ -1692,10 +1683,10 @@ impl StreamingDecoder {
             .uncompressed_latin1_text
             .push(TEXtChunk::decode(keyword_slice, value_slice).map_err(DecodingError::from)?);
 
-        Ok(Decoded::Nothing)
+        Ok(())
     }
 
-    fn parse_ztxt(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_ztxt(&mut self) -> Result<(), DecodingError> {
         let buf = &self.current_chunk.raw_bytes[..];
         self.limits.reserve_bytes(buf.len())?;
 
@@ -1712,10 +1703,10 @@ impl StreamingDecoder {
                 .map_err(DecodingError::from)?,
         );
 
-        Ok(Decoded::Nothing)
+        Ok(())
     }
 
-    fn parse_itxt(&mut self) -> Result<Decoded, DecodingError> {
+    fn parse_itxt(&mut self) -> Result<(), DecodingError> {
         let buf = &self.current_chunk.raw_bytes[..];
         self.limits.reserve_bytes(buf.len())?;
 
@@ -1760,19 +1751,19 @@ impl StreamingDecoder {
             .map_err(DecodingError::from)?,
         );
 
-        Ok(Decoded::Nothing)
+        Ok(())
     }
 
     // NOTE: This function cannot return `DecodingError` and handles parsing
     // errors or spec violations as-if the chunk was missing.  See
     // https://github.com/image-rs/image-png/issues/525 for more discussion.
-    fn parse_bkgd(&mut self) -> Decoded {
+    fn parse_bkgd(&mut self) {
         let info = self.info.as_mut().unwrap();
         if info.bkgd.is_none() && !self.have_idat {
             let expected = match info.color_type {
                 ColorType::Indexed => {
                     if info.palette.is_none() {
-                        return Decoded::Nothing;
+                        return;
                     };
                     1
                 }
@@ -1785,8 +1776,6 @@ impl StreamingDecoder {
                 info.bkgd = Some(Cow::Owned(vec));
             }
         }
-
-        Decoded::Nothing
     }
 }
 

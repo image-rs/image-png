@@ -7,6 +7,7 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use getopts::{Matches, Options, ParsingStyle};
+use png::chunk;
 
 fn parse_args() -> Matches {
     let args: Vec<String> = env::args().collect();
@@ -34,7 +35,7 @@ fn parse_args() -> Matches {
 struct Config {
     quiet: bool,
     verbose: bool,
-    color: bool,
+    _color: bool,
     text: bool,
 }
 
@@ -74,7 +75,6 @@ fn final_channels(c: png::ColorType, trns: bool) -> u8 {
 fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
     // TODO improve performance by reusing allocations from decoder
     use png::Decoded::*;
-    let mut t = std::io::stdout();
     let data = &mut vec![0; 10 * 1024][..];
     let mut reader = io::BufReader::new(File::open(&fname)?);
     let fname = fname.as_ref().to_string_lossy();
@@ -102,7 +102,6 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
         });
     );
     let display_error = |err| -> Result<_, io::Error> {
-        let mut t = std::io::stderr();
         if c.verbose {
             println!(": {}", err);
             print!("ERRORS DETECTED");
@@ -136,7 +135,7 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
             buf = &data[..n];
         }
         match decoder.update(buf, None) {
-            Ok((_, ImageEnd)) => {
+            Ok((_, ChunkComplete(chunk::IEND))) => {
                 if !have_idat {
                     // This isn't beautiful. But it works.
                     display_error(png::DecodingError::IoError(io::Error::new(
@@ -172,15 +171,7 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
                 buf = &buf[n..];
                 pos += n;
                 match res {
-                    Header(w, h, b, c, i) => {
-                        width = w;
-                        height = h;
-                        bits = b as u8;
-                        color = c;
-                        interlaced = i;
-                    }
                     ChunkBegin(len, type_str) => {
-                        use png::chunk;
                         n_chunks += 1;
                         if c.verbose {
                             let chunk = type_str;
@@ -204,12 +195,14 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
                             _ => (),
                         }
                     }
-                    ImageData => {
-                        //println!("got {} bytes of image data", data.len())
-                    }
-                    ChunkComplete(_, type_str) if c.verbose => {
-                        use png::chunk::*;
-                        if type_str == IHDR {
+                    ChunkComplete(chunk::IHDR) => {
+                        width = decoder.info().unwrap().width;
+                        height = decoder.info().unwrap().height;
+                        bits = decoder.info().unwrap().bit_depth as u8;
+                        color = decoder.info().unwrap().color_type;
+                        interlaced = decoder.info().unwrap().interlaced;
+
+                        if c.verbose {
                             println!();
                             print!(
                                 "    {} x {} image, {}{}, {}",
@@ -221,11 +214,13 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
                             );
                         }
                     }
-                    AnimationControl(actl) => {
+                    ChunkComplete(chunk::acTL) => {
+                        let actl = decoder.info().unwrap().animation_control.unwrap();
                         println!();
                         print!("    {} frames, {} plays", actl.num_frames, actl.num_plays,);
                     }
-                    FrameControl(fctl) => {
+                    ChunkComplete(chunk::fdAT) => {
+                        let fctl = decoder.info().unwrap().frame_control.unwrap();
                         println!();
                         println!(
                             "    sequence #{}, {} x {} pixels @ ({}, {})",
@@ -250,6 +245,9 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
                             fctl.dispose_op,
                             fctl.blend_op,
                         );
+                    }
+                    ImageData => {
+                        //println!("got {} bytes of image data", data.len())
                     }
                     _ => (),
                 }
@@ -291,7 +289,7 @@ fn main() {
     let config = Config {
         quiet: m.opt_present("q"),
         verbose: m.opt_present("v"),
-        color: m.opt_present("c"),
+        _color: m.opt_present("c"),
         text: m.opt_present("t"),
     };
 

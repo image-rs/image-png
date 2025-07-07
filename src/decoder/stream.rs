@@ -83,20 +83,20 @@ impl State {
 pub enum Decoded {
     /// Nothing decoded yet
     Nothing,
-    Header(u32, u32, BitDepth, ColorType, bool),
+
+    /// A chunk header (length and type fields) has been read.
     ChunkBegin(u32, ChunkType),
-    ChunkComplete(u32, ChunkType),
-    PixelDimensions(PixelDimensions),
-    AnimationControl(AnimationControl),
-    FrameControl(FrameControl),
+
+    /// Chunk has been read.
+    ChunkComplete(ChunkType),
+
     /// Decoded raw image data.
     ImageData,
+
     /// The last of a consecutive chunk of IDAT was done.
     /// This is distinct from ChunkComplete which only marks that some IDAT chunk was completed but
     /// not that no additional IDAT chunk follows.
     ImageDataFlushed,
-    PartialChunk(ChunkType),
-    ImageEnd,
 }
 
 /// Any kind of error during PNG decoding.
@@ -911,13 +911,12 @@ impl StreamingDecoder {
                 };
 
                 if val == sum || CHECKSUM_DISABLED {
-                    if type_str == IEND {
-                        debug_assert!(self.state.is_none());
-                        Ok(Decoded::ImageEnd)
-                    } else {
+                    debug_assert!(self.state.is_none());
+                    if type_str != IEND {
                         self.state = Some(State::new_u32(U32ValueKind::Length));
-                        Ok(Decoded::ChunkComplete(val, type_str))
                     }
+
+                    Ok(Decoded::ChunkComplete(type_str))
                 } else if self.decode_options.skip_ancillary_crc_failures
                     && !chunk::is_critical(type_str)
                 {
@@ -964,7 +963,7 @@ impl StreamingDecoder {
                 }
 
                 self.state = Some(State::ImageData(chunk::fdAT));
-                Ok(Decoded::PartialChunk(chunk::fdAT))
+                Ok(Decoded::Nothing)
             }
         }
     }
@@ -991,7 +990,7 @@ impl StreamingDecoder {
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
             chunk::iTXt if !self.decode_options.ignore_text_chunk => self.parse_itxt(),
-            _ => Ok(Decoded::PartialChunk(type_str)),
+            _ => Ok(Decoded::Nothing),
         };
 
         parse_result = parse_result.map_err(|e| {
@@ -1096,7 +1095,7 @@ impl StreamingDecoder {
             self.info.as_ref().unwrap().validate_default_image(&fc)?;
         }
         self.info.as_mut().unwrap().frame_control = Some(fc);
-        Ok(Decoded::FrameControl(fc))
+        Ok(Decoded::Nothing)
     }
 
     fn parse_actl(&mut self) -> Result<Decoded, DecodingError> {
@@ -1116,7 +1115,7 @@ impl StreamingDecoder {
                 return Ok(Decoded::Nothing);
             }
             self.info.as_mut().unwrap().animation_control = Some(actl);
-            Ok(Decoded::AnimationControl(actl))
+            Ok(Decoded::Nothing)
         }
     }
 
@@ -1290,7 +1289,7 @@ impl StreamingDecoder {
             };
             let pixel_dims = PixelDimensions { xppu, yppu, unit };
             info.pixel_dims = Some(pixel_dims);
-            Ok(Decoded::PixelDimensions(pixel_dims))
+            Ok(Decoded::Nothing)
         }
     }
 
@@ -1665,9 +1664,7 @@ impl StreamingDecoder {
             ..Default::default()
         });
 
-        Ok(Decoded::Header(
-            width, height, bit_depth, color_type, interlaced,
-        ))
+        Ok(Decoded::Nothing)
     }
 
     fn split_keyword(buf: &[u8]) -> Result<(&[u8], &[u8]), DecodingError> {

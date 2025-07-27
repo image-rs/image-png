@@ -8,6 +8,7 @@ use crc32fast::Hasher as Crc32;
 
 use super::zlib::UnfilterBuf;
 use super::zlib::ZlibStream;
+use crate::chunk::is_critical;
 use crate::chunk::{self, ChunkType, IDAT, IEND, IHDR};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, ColorType, ContentLightLevelInfo, DisposeOp, FrameControl,
@@ -87,8 +88,15 @@ pub enum Decoded {
     /// A chunk header (length and type fields) has been read.
     ChunkBegin(u32, ChunkType),
 
-    /// Chunk has been read.
+    /// Chunk has been read successfully.
     ChunkComplete(ChunkType),
+
+    /// An ancillary chunk has been read but it had bad contents or an invalid CRC.
+    CorruptAncillaryChunk(ChunkType),
+
+    /// Skipped an ancillary chunk because it was unrecognized or the decoder was configured to skip
+    /// this type of chunk.
+    SkippedAncillaryChunk(ChunkType),
 
     /// Decoded raw image data.
     ImageData,
@@ -265,6 +273,10 @@ pub(crate) enum FormatErrorInner {
     ChunkTooShort {
         kind: ChunkType,
     },
+    UnrecognizedCriticalChunk {
+        /// The type of the unrecognized critical chunk.
+        type_str: ChunkType,
+    },
 }
 
 impl error::Error for DecodingError {
@@ -403,6 +415,9 @@ impl fmt::Display for FormatError {
             }
             ChunkTooShort { kind } => {
                 write!(fmt, "Chunk is too short: {:?}", kind)
+            }
+            UnrecognizedCriticalChunk { type_str } => {
+                write!(fmt, "Unrecognized critical chunk: {:?}", type_str)
             }
         }
     }
@@ -768,7 +783,6 @@ impl StreamingDecoder {
                     if *remaining == 0 {
                         debug_assert!(type_str != IDAT && type_str != chunk::fdAT);
                         self.state = Some(State::new_u32(U32ValueKind::Crc(type_str)));
-                        self.parse_chunk(type_str)?;
                     } else {
                         self.state = Some(ReadChunkData(type_str));
                     }
@@ -911,18 +925,21 @@ impl StreamingDecoder {
                 };
 
                 if val == sum || CHECKSUM_DISABLED {
+                    // A fatal error in chunk parsing leaves the decoder in state 'None' to enforce
+                    // that parsing can't continue after an error.
                     debug_assert!(self.state.is_none());
+                    let decoded = self.parse_chunk(type_str)?;
+
                     if type_str != IEND {
                         self.state = Some(State::new_u32(U32ValueKind::Length));
                     }
-
-                    Ok(Decoded::ChunkComplete(type_str))
+                    Ok(decoded)
                 } else if self.decode_options.skip_ancillary_crc_failures
                     && !chunk::is_critical(type_str)
                 {
                     // Ignore ancillary chunk with invalid CRC
                     self.state = Some(State::new_u32(U32ValueKind::Length));
-                    Ok(Decoded::Nothing)
+                    Ok(Decoded::CorruptAncillaryChunk(type_str))
                 } else {
                     Err(DecodingError::Format(
                         FormatErrorInner::CrcMismatch {
@@ -968,11 +985,16 @@ impl StreamingDecoder {
         }
     }
 
-    fn parse_chunk(&mut self, type_str: ChunkType) -> Result<(), DecodingError> {
+    fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
         let mut parse_result = match type_str {
+            // Critical chunks
             IHDR => self.parse_ihdr(),
-            chunk::sBIT => self.parse_sbit(),
             chunk::PLTE => self.parse_plte(),
+            chunk::IDAT => Ok(()),
+            chunk::IEND => Ok(()), // TODO: Check chunk size.
+
+            // Recognized bounded-size ancillary chunks.
+            chunk::sBIT => self.parse_sbit(),
             chunk::tRNS => self.parse_trns(),
             chunk::pHYs => self.parse_phys(),
             chunk::gAMA => self.parse_gama(),
@@ -983,13 +1005,25 @@ impl StreamingDecoder {
             chunk::cICP => Ok(self.parse_cicp()),
             chunk::mDCV => Ok(self.parse_mdcv()),
             chunk::cLLI => Ok(self.parse_clli()),
-            chunk::eXIf => Ok(self.parse_exif()),
             chunk::bKGD => Ok(self.parse_bkgd()),
+
+            // Ancillary chunks with unbounded size.
+            chunk::eXIf => Ok(self.parse_exif()), // TODO: allow skipping.
             chunk::iCCP if !self.decode_options.ignore_iccp_chunk => self.parse_iccp(),
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
             chunk::iTXt if !self.decode_options.ignore_text_chunk => self.parse_itxt(),
-            _ => Ok(()),
+
+            // Unrecognized chunks
+            _ => {
+                if is_critical(type_str) {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::UnrecognizedCriticalChunk { type_str }.into(),
+                    ));
+                } else {
+                    return Ok(Decoded::SkippedAncillaryChunk(type_str));
+                }
+            }
         };
 
         parse_result = parse_result.map_err(|e| {
@@ -1007,25 +1041,22 @@ impl StreamingDecoder {
             }
         });
 
-        // Ignore benign errors in some auxiliary chunks.  `LimitsExceeded`, `Parameter`
-        // and other error kinds are *not* treated as benign.  We only ignore errors in *some*
-        // auxiliary chunks (i.e. we don't use `chunk::is_critical`), because for chunks like
-        // `fcTL` or `fdAT` the fallback to the static/non-animated image has to be implemented
-        // *on top* of the `StreamingDecoder` API.
-        //
-        // TODO: Consider supporting a strict mode where even benign errors are reported up.
-        // See https://github.com/image-rs/image-png/pull/569#issuecomment-2642062285
-        if matches!(parse_result.as_ref(), Err(DecodingError::Format(_))) && type_str != chunk::fcTL
-        {
-            parse_result = Ok(());
+        match parse_result {
+            Ok(()) => Ok(Decoded::ChunkComplete(type_str)),
+            Err(DecodingError::Format(_))
+                if type_str != chunk::fcTL && !chunk::is_critical(type_str) =>
+            {
+                // Ignore benign errors in most auxiliary chunks. `LimitsExceeded`, `Parameter` and
+                // other error kinds are *not* treated as benign. We don't ignore errors in `fcTL`
+                // chunks because the fallback to the static/non-animated image has to be
+                // implemented *on top* of the `StreamingDecoder` API.
+                //
+                // TODO: Consider supporting a strict mode where even benign errors are reported up.
+                // See https://github.com/image-rs/image-png/pull/569#issuecomment-2642062285
+                Ok(Decoded::CorruptAncillaryChunk(type_str))
+            }
+            Err(e) => Err(e),
         }
-
-        // Clear the parsing state to enforce that parsing can't continue after an error.
-        if parse_result.is_err() {
-            self.state = None;
-        }
-
-        parse_result
     }
 
     fn parse_fctl(&mut self) -> Result<(), DecodingError> {
@@ -2189,9 +2220,10 @@ mod tests {
     /// Test handling of `cICP`, `mDCV`, and `cLLI` chunks.
     #[test]
     fn test_cicp_mdcv_and_clli_chunks() {
-        let decoder = crate::Decoder::new(BufReader::new(
+        let mut decoder = crate::Decoder::new(BufReader::new(
             File::open("tests/bugfixes/cicp_pq.png").unwrap(),
         ));
+        decoder.ignore_checksums(true);
         let reader = decoder.read_info().unwrap();
         let info = reader.info();
 

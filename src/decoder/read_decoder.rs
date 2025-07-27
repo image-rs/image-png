@@ -118,9 +118,7 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
             Decoded::ImageData => Ok(ImageDataCompletionStatus::ExpectingMoreData),
             Decoded::ImageDataFlushed => Ok(ImageDataCompletionStatus::Done),
             // Ignore other events that may happen within an `IDAT` / `fdAT` chunks sequence.
-            Decoded::Nothing | Decoded::ChunkBegin(_, _) | Decoded::ChunkComplete(_) => {
-                Ok(ImageDataCompletionStatus::ExpectingMoreData)
-            }
+            _ => Ok(ImageDataCompletionStatus::ExpectingMoreData),
         }
     }
 

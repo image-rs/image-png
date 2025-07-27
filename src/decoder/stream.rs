@@ -1013,6 +1013,7 @@ impl StreamingDecoder {
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
             chunk::iTXt if !self.decode_options.ignore_text_chunk => self.parse_itxt(),
+            chunk::fdAT => Ok(()),
 
             // Unrecognized chunks
             _ => {

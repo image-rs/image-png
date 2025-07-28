@@ -91,8 +91,9 @@ pub enum Decoded {
     /// Chunk has been read successfully.
     ChunkComplete(ChunkType),
 
-    /// An ancillary chunk has been read but it had bad contents or an invalid CRC.
-    CorruptAncillaryChunk(ChunkType),
+    /// An ancillary chunk has been read but it was in the wrong place, had corrupt contents, or had
+    /// an invalid CRC.
+    BadAncillaryChunk(ChunkType),
 
     /// Skipped an ancillary chunk because it was unrecognized or the decoder was configured to skip
     /// this type of chunk.
@@ -939,7 +940,7 @@ impl StreamingDecoder {
                 {
                     // Ignore ancillary chunk with invalid CRC
                     self.state = Some(State::new_u32(U32ValueKind::Length));
-                    Ok(Decoded::CorruptAncillaryChunk(type_str))
+                    Ok(Decoded::BadAncillaryChunk(type_str))
                 } else {
                     Err(DecodingError::Format(
                         FormatErrorInner::CrcMismatch {
@@ -1056,7 +1057,7 @@ impl StreamingDecoder {
                 //
                 // TODO: Consider supporting a strict mode where even benign errors are reported up.
                 // See https://github.com/image-rs/image-png/pull/569#issuecomment-2642062285
-                Ok(Decoded::CorruptAncillaryChunk(type_str))
+                Ok(Decoded::BadAncillaryChunk(type_str))
             }
             Err(e) => Err(e),
         }

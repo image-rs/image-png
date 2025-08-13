@@ -74,21 +74,12 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
         Ok(result)
     }
 
-    fn decode_next_without_image_data(&mut self) -> Result<Decoded, DecodingError> {
-        let state = self.decode_next(None)?;
-        Ok(state)
-    }
-
-    fn decode_next_and_discard_image_data(&mut self) -> Result<Decoded, DecodingError> {
-        self.decode_next(None)
-    }
-
     /// Reads until the end of `IHDR` chunk.
     ///
     /// Prerequisite: None (idempotent).
     pub fn read_header_info(&mut self) -> Result<&Info<'static>, DecodingError> {
         while self.info().is_none() {
-            if let Decoded::ImageEnd = self.decode_next_without_image_data()? {
+            if let Decoded::ChunkComplete(chunk::IEND) = self.decode_next(None)? {
                 unreachable!()
             }
         }
@@ -100,9 +91,9 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
     /// Prerequisite: **Not** within `IDAT` / `fdAT` chunk sequence.
     pub fn read_until_image_data(&mut self) -> Result<(), DecodingError> {
         loop {
-            match self.decode_next_without_image_data()? {
+            match self.decode_next(None)? {
                 Decoded::ChunkBegin(_, chunk::IDAT) | Decoded::ChunkBegin(_, chunk::fdAT) => break,
-                Decoded::ImageEnd => {
+                Decoded::ChunkComplete(chunk::IEND) => {
                     return Err(DecodingError::Format(
                         FormatErrorInner::MissingImageData.into(),
                     ))
@@ -127,13 +118,7 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
             Decoded::ImageData => Ok(ImageDataCompletionStatus::ExpectingMoreData),
             Decoded::ImageDataFlushed => Ok(ImageDataCompletionStatus::Done),
             // Ignore other events that may happen within an `IDAT` / `fdAT` chunks sequence.
-            Decoded::Nothing
-            | Decoded::ChunkComplete(_, _)
-            | Decoded::ChunkBegin(_, _)
-            | Decoded::PartialChunk(_) => Ok(ImageDataCompletionStatus::ExpectingMoreData),
-            // Other kinds of events shouldn't happen, unless we have been (incorrectly) called
-            // when outside of a sequence of `IDAT` / `fdAT` chunks.
-            unexpected => unreachable!("{:?}", unexpected),
+            _ => Ok(ImageDataCompletionStatus::ExpectingMoreData),
         }
     }
 
@@ -152,10 +137,7 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
     ///
     /// Prerequisite: `IEND` chunk hasn't been reached yet.
     pub fn read_until_end_of_input(&mut self) -> Result<(), DecodingError> {
-        while !matches!(
-            self.decode_next_and_discard_image_data()?,
-            Decoded::ImageEnd
-        ) {}
+        while !matches!(self.decode_next(None)?, Decoded::ChunkComplete(chunk::IEND)) {}
         Ok(())
     }
 

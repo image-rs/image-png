@@ -1354,6 +1354,12 @@ impl StreamingDecoder {
             let source_gamma: u32 = buf.read_be()?;
             let source_gamma = ScaledFloat::from_scaled(source_gamma);
 
+            // The spec says that "A gAMA chunk containing zero is meaningless".
+            // So let's ignore such `gAMA` chunks.
+            if source_gamma == 0 {
+                return Ok(Decoded::Nothing);
+            }
+
             info.gama_chunk = Some(source_gamma);
             Ok(Decoded::Nothing)
         }

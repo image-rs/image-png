@@ -278,6 +278,7 @@ pub(crate) enum FormatErrorInner {
         /// The type of the unrecognized critical chunk.
         type_str: ChunkType,
     },
+    BadGammaValue,
 }
 
 impl error::Error for DecodingError {
@@ -420,6 +421,7 @@ impl fmt::Display for FormatError {
             UnrecognizedCriticalChunk { type_str } => {
                 write!(fmt, "Unrecognized critical chunk: {:?}", type_str)
             }
+            BadGammaValue => write!(fmt, "Bad gamma value."),
         }
     }
 }
@@ -1385,10 +1387,10 @@ impl StreamingDecoder {
         } else {
             let mut buf = &self.current_chunk.raw_bytes[..];
             let source_gamma: u32 = buf.read_be()?;
-            // The spec says that "A gAMA chunk containing zero is meaningless".
-            // So let's ignore such `gAMA` chunks.
             if source_gamma == 0 {
-                return Ok(Decoded::Nothing);
+                return Err(DecodingError::Format(
+                    FormatErrorInner::BadGammaValue.into(),
+                ));
             }
 
             let source_gamma = ScaledFloat::from_scaled(source_gamma);

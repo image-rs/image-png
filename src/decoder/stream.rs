@@ -1012,7 +1012,7 @@ impl StreamingDecoder {
             chunk::bKGD => self.parse_bkgd(),
 
             // Ancillary chunks with unbounded size.
-            chunk::eXIf => Ok(self.parse_exif()), // TODO: allow skipping.
+            chunk::eXIf => self.parse_exif(), // TODO: allow skipping.
             chunk::iCCP if !self.decode_options.ignore_iccp_chunk => self.parse_iccp(),
             chunk::tEXt if !self.decode_options.ignore_text_chunk => self.parse_text(),
             chunk::zTXt if !self.decode_options.ignore_text_chunk => self.parse_ztxt(),
@@ -1419,7 +1419,6 @@ impl StreamingDecoder {
         let info = self.info.as_mut().unwrap();
 
         // The spec requires that the cICP chunk MUST come before the PLTE and IDAT chunks.
-        // Additionally, we ignore a second, duplicated cICP chunk (if any).
         if info.coding_independent_code_points.is_some() {
             return Err(DecodingError::Format(
                 FormatErrorInner::DuplicateChunk { kind: chunk::cICP }.into(),
@@ -1479,7 +1478,6 @@ impl StreamingDecoder {
         let info = self.info.as_mut().unwrap();
 
         // The spec requires that the mDCV chunk MUST come before the PLTE and IDAT chunks.
-        // Additionally, we ignore a second, duplicated mDCV chunk (if any).
         if info.mastering_display_color_volume.is_some() {
             return Err(DecodingError::Format(
                 FormatErrorInner::DuplicateChunk { kind: chunk::mDCV }.into(),
@@ -1558,12 +1556,16 @@ impl StreamingDecoder {
         Ok(())
     }
 
-    fn parse_exif(&mut self) {
-        // We ignore a second, duplicated eXIf chunk (if any).
+    fn parse_exif(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
-        if info.exif_metadata.is_none() {
-            info.exif_metadata = Some(self.current_chunk.raw_bytes.clone().into());
+        if info.exif_metadata.is_some() {
+            return Err(DecodingError::Format(
+                FormatErrorInner::DuplicateChunk { kind: chunk::eXIf }.into(),
+            ));
         }
+
+        info.exif_metadata = Some(self.current_chunk.raw_bytes.clone().into());
+        Ok(())
     }
 
     fn parse_iccp(&mut self) -> Result<(), DecodingError> {
@@ -1572,18 +1574,9 @@ impl StreamingDecoder {
                 FormatErrorInner::AfterIdat { kind: chunk::iCCP }.into(),
             ))
         } else if self.have_iccp {
-            // We have already encountered an iCCP chunk before.
-            //
-            // Section "4.2.2.4. iCCP Embedded ICC profile" of the spec says:
-            //   > A file should contain at most one embedded profile,
-            //   > whether explicit like iCCP or implicit like sRGB.
-            // but
-            //   * This is a "should", not a "must"
-            //   * The spec also says that "All ancillary chunks are optional, in the sense that
-            //     [...] decoders can ignore them."
-            //   * The reference implementation (libpng) ignores the subsequent iCCP chunks
-            //     (treating them as a benign error).
-            Ok(())
+            Err(DecodingError::Format(
+                FormatErrorInner::DuplicateChunk { kind: chunk::iCCP }.into(),
+            ))
         } else {
             self.have_iccp = true;
             let _ = self.parse_iccp_raw();
@@ -1814,9 +1807,6 @@ impl StreamingDecoder {
         Ok(())
     }
 
-    // NOTE: This function cannot return `DecodingError` and handles parsing
-    // errors or spec violations as-if the chunk was missing.  See
-    // https://github.com/image-rs/image-png/issues/525 for more discussion.
     fn parse_bkgd(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if info.bkgd.is_some() {
@@ -1844,8 +1834,8 @@ impl StreamingDecoder {
         };
         let vec = self.current_chunk.raw_bytes.clone();
         if vec.len() != expected {
-            return Err(DecodingError::IoError(
-                std::io::ErrorKind::InvalidData.into(),
+            return Err(DecodingError::Format(
+                FormatErrorInner::ChunkTooShort { kind: chunk::bKGD }.into(),
             ));
         }
 

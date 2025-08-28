@@ -1,6 +1,5 @@
 // Microbenchmark for all the various filters
 
-use png::benchable_apis::unfilter;
 use png::Filter;
 use std::hint::black_box;
 
@@ -85,7 +84,9 @@ const PREV_ROW: [u8; 771] = [
     168, 212, 150, 135, 18, 147, 235, 110, 251, 165, 75, 185, 96, 21, 126, 155, 191,
 ];
 
+#[cfg(feature = "benchmarks")]
 fn main() {
+    use png::benchable_apis::unfilter;
     let bpps: [u8; 1] = [3];
     let filters: [Filter; 1] = [
         //Filter::Sub
@@ -102,4 +103,9 @@ fn main() {
             }
         }
     }
+}
+
+#[cfg(not(feature = "benchmarks"))]
+fn main() {
+    println!("This testbench requires --features=unstable")
 }

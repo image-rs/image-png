@@ -1,42 +1,27 @@
 #![allow(non_upper_case_globals)]
 
-use std::env;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use getopts::{Matches, Options, ParsingStyle};
+use clap::Parser;
+
 use png::chunk;
 
-fn parse_args() -> Matches {
-    let args: Vec<String> = env::args().collect();
-    let mut opts = Options::new();
-    opts.optflag("c", "", "colorize output (for ANSI terminals)")
-        .optflag("q", "", "test quietly (output only errors)")
-        .optflag(
-            "t",
-            "",
-            "print contents of tEXt/zTXt/iTXt chunks (can be used with -q)",
-        )
-        .optflag("v", "", "test verbosely (print most chunk data)")
-        .parsing_style(ParsingStyle::StopAtFirstFree);
-    if args.len() > 1 {
-        match opts.parse(&args[1..]) {
-            Ok(matches) => return matches,
-            Err(err) => println!("{}", err),
-        }
-    }
-    println!("{}", opts.usage("Usage: pngcheck [-cpt] [file ...]"));
-    std::process::exit(0);
-}
-
-#[derive(Clone, Copy)]
+#[derive(Parser)]
+#[command(about, version)]
 struct Config {
+    /// test quietly (output only errors)
+    #[arg(short, long)]
     quiet: bool,
+    /// test verbosely (print most chunk data)
+    #[arg(short, long)]
     verbose: bool,
-    _color: bool,
+    /// print contents of tEXt/zTXt/iTXt chunks (can be used with -q)
+    #[arg(short, long)]
     text: bool,
+    paths: Vec<PathBuf>,
 }
 
 fn display_interlaced(i: bool) -> &'static str {
@@ -72,7 +57,8 @@ fn final_channels(c: png::ColorType, trns: bool) -> u8 {
         Rgba => 4,
     }
 }
-fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
+
+fn check_image<P: AsRef<Path>>(c: &Config, fname: P) -> io::Result<()> {
     // TODO improve performance by reusing allocations from decoder
     use png::Decoded::*;
     let data = &mut vec![0; 10 * 1024][..];
@@ -284,32 +270,25 @@ fn check_image<P: AsRef<Path>>(c: Config, fname: P) -> io::Result<()> {
 }
 
 fn main() {
-    let m = parse_args();
+    let config = Config::parse();
 
-    let config = Config {
-        quiet: m.opt_present("q"),
-        verbose: m.opt_present("v"),
-        _color: m.opt_present("c"),
-        text: m.opt_present("t"),
-    };
-
-    for file in m.free {
-        let result = if file.contains('*') {
-            glob::glob(&file)
+    for file in &config.paths {
+        let result = if let Some(glob) = file.to_str().filter(|n| n.contains('*')) {
+            glob::glob(glob)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
                 .and_then(|mut glob| {
                     glob.try_for_each(|entry| {
                         entry
                             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
-                            .and_then(|file| check_image(config, file))
+                            .and_then(|file| check_image(&config, file))
                     })
                 })
         } else {
-            check_image(config, &file)
+            check_image(&config, &file)
         };
 
         result.unwrap_or_else(|err| {
-            println!("{}: {}", file, err);
+            println!("{}: {}", file.display(), err);
             std::process::exit(1)
         });
     }

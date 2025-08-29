@@ -1781,7 +1781,7 @@ mod tests {
     use crate::Decoder;
 
     use io::BufReader;
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     use std::cmp;
     use std::fs::File;
     use std::io::Cursor;
@@ -1819,7 +1819,7 @@ mod tests {
                     let mut out = Vec::new();
                     {
                         let mut wrapper = RandomChunkWriter {
-                            rng: thread_rng(),
+                            rng: rng(),
                             w: &mut out,
                         };
 
@@ -1877,7 +1877,7 @@ mod tests {
                     let mut out = Vec::new();
                     {
                         let mut wrapper = RandomChunkWriter {
-                            rng: thread_rng(),
+                            rng: rng(),
                             w: &mut out,
                         };
 
@@ -1892,7 +1892,7 @@ mod tests {
                         let mut stream_writer = encoder.stream_writer().unwrap();
 
                         let mut outer_wrapper = RandomChunkWriter {
-                            rng: thread_rng(),
+                            rng: rng(),
                             w: &mut stream_writer,
                         };
 
@@ -2547,7 +2547,7 @@ mod tests {
     impl<R: Rng, W: Write> Write for RandomChunkWriter<R, W> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             // choose a random length to write
-            let len = cmp::min(self.rng.gen_range(1..50), buf.len());
+            let len = cmp::min(self.rng.random_range(1..50), buf.len());
 
             self.w.write(&buf[0..len])
         }

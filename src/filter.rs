@@ -767,29 +767,27 @@ pub(crate) fn unfilter(
                     #[cfg(feature = "unstable")]
                     {
                         simd::paeth_unfilter_3bpp(current, previous);
+                        return;
                     }
-                    #[cfg(not(feature = "unstable"))]
+                    let mut a_bpp = [0; 3];
+                    let mut c_bpp = [0; 3];
+
+                    let mut previous = &previous[..previous.len() / 3 * 3];
+                    let current_len = current.len();
+                    let mut current = &mut current[..current_len / 3 * 3];
+
+                    while let ([c0, c1, c2, c_rest @ ..], [p0, p1, p2, p_rest @ ..]) =
+                        (current, previous)
                     {
-                        let mut a_bpp = [0; 3];
-                        let mut c_bpp = [0; 3];
+                        current = c_rest;
+                        previous = p_rest;
 
-                        let mut previous = &previous[..previous.len() / 3 * 3];
-                        let current_len = current.len();
-                        let mut current = &mut current[..current_len / 3 * 3];
+                        *c0 = c0.wrapping_add(filter_paeth_decode(a_bpp[0], *p0, c_bpp[0]));
+                        *c1 = c1.wrapping_add(filter_paeth_decode(a_bpp[1], *p1, c_bpp[1]));
+                        *c2 = c2.wrapping_add(filter_paeth_decode(a_bpp[2], *p2, c_bpp[2]));
 
-                        while let ([c0, c1, c2, c_rest @ ..], [p0, p1, p2, p_rest @ ..]) =
-                            (current, previous)
-                        {
-                            current = c_rest;
-                            previous = p_rest;
-
-                            *c0 = c0.wrapping_add(filter_paeth_decode(a_bpp[0], *p0, c_bpp[0]));
-                            *c1 = c1.wrapping_add(filter_paeth_decode(a_bpp[1], *p1, c_bpp[1]));
-                            *c2 = c2.wrapping_add(filter_paeth_decode(a_bpp[2], *p2, c_bpp[2]));
-
-                            a_bpp = [*c0, *c1, *c2];
-                            c_bpp = [*p0, *p1, *p2];
-                        }
+                        a_bpp = [*c0, *c1, *c2];
+                        c_bpp = [*p0, *p1, *p2];
                     }
                 }
                 BytesPerPixel::Four => {

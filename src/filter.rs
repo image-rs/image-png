@@ -12,10 +12,10 @@ mod simd {
     use core::simd::{LaneCount, Simd, SupportedLaneCount};
 
     // Import the fastest arch-specific scalar implementations from the outer crate.
-    #[cfg(target_arch = "aarch64")]
-    use crate::filter::filter_paeth as filter_paeth_decode;
+    #[cfg(not(target_arch = "x86_64"))]
+    use crate::filter::filter_paeth as filter_paeth_chosen;
     #[cfg(target_arch = "x86_64")]
-    use crate::filter::filter_paeth_stbi as filter_paeth_decode;
+    use crate::filter::filter_paeth_stbi as filter_paeth_chosen;
 
     /// Paeth predictor specialized for AArch64 systems. Ported from the libpng
     /// implementation at
@@ -180,9 +180,9 @@ mod simd {
             .zip(remainder_prev_row.chunks_exact(BPP))
         {
             let new_chunk = [
-                chunk[0].wrapping_add(filter_paeth_decode(a_bpp[0], b_bpp[0], c_bpp[0])),
-                chunk[1].wrapping_add(filter_paeth_decode(a_bpp[1], b_bpp[1], c_bpp[1])),
-                chunk[2].wrapping_add(filter_paeth_decode(a_bpp[2], b_bpp[2], c_bpp[2])),
+                chunk[0].wrapping_add(filter_paeth_chosen(a_bpp[0], b_bpp[0], c_bpp[0])),
+                chunk[1].wrapping_add(filter_paeth_chosen(a_bpp[1], b_bpp[1], c_bpp[1])),
+                chunk[2].wrapping_add(filter_paeth_chosen(a_bpp[2], b_bpp[2], c_bpp[2])),
             ];
             *TryInto::<&mut [u8; BPP]>::try_into(chunk).unwrap() = new_chunk;
             a_bpp = new_chunk;
@@ -282,6 +282,7 @@ impl RowFilter {
     }
 }
 
+#[allow(dead_code)]
 fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     // On ARM this algorithm performs much better than the one above adapted from stb,
     // and this is the better-studied algorithm we've always used here,
@@ -304,6 +305,7 @@ fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     out
 }
 
+#[allow(dead_code)]
 fn filter_paeth_stbi(a: u8, b: u8, c: u8) -> u8 {
     // Decoding optimizes better with this algorithm than with `filter_paeth`
     //
@@ -724,11 +726,10 @@ pub(crate) fn unfilter(
         #[allow(unreachable_code)]
         Paeth => {
             // Select the fastest Paeth filter implementation based on the target architecture.
-            let filter_paeth_decode = if cfg!(target_arch = "x86_64") {
-                filter_paeth_stbi
-            } else {
-                filter_paeth
-            };
+            #[cfg(not(target_arch = "x86_64"))]
+            use crate::filter::filter_paeth as filter_paeth_decode;
+            #[cfg(target_arch = "x86_64")]
+            use crate::filter::filter_paeth_stbi as filter_paeth_decode;
 
             // Paeth filter pixels:
             // C B D

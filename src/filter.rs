@@ -271,7 +271,7 @@ mod simd {
             a = process_paeth_chunk_bpp4_s64(a, &b, c, &mut x);
 
             // Update `vlast` for the next chunk: last BPP bytes of `b`
-            c = b.extract::<{STRIDE_BYTES - BPP}, BPP>();
+            c = b.extract::<{ STRIDE_BYTES - BPP }, BPP>();
 
             x.copy_to_slice(chunk);
         }

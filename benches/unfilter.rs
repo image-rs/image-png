@@ -34,7 +34,7 @@ fn bench_unfilter(c: &mut Criterion, filter: Filter, bpp: u8) {
         rng.try_fill_bytes(result.as_mut_slice()).unwrap();
         result
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let row_size = 4096 * (bpp as usize);
     let two_rows = get_random_bytes(&mut rng, row_size * 2);
 

@@ -2,9 +2,10 @@ use core::convert::TryInto;
 
 use crate::{common::BytesPerPixel, Compression};
 
+/// Optional module containing `portable_simd` versions of the most
+/// important unfiltering algorithms. Enable using the `unstable` feature.
 #[cfg(feature = "unstable")]
 mod simd {
-    // Optional module that contains portable_simd versions of the most important unfiltering algorithms.
     use core::convert::TryInto;
     use core::simd::cmp::{SimdOrd, SimdPartialOrd};
     use core::simd::num::{SimdInt, SimdUint};
@@ -16,8 +17,9 @@ mod simd {
     #[cfg(target_arch = "x86_64")]
     use crate::filter::filter_paeth_stbi as filter_paeth_decode;
 
-    // AArch64 Paeth predictor. Ported from the libpng implementation at
-    // https://github.com/pnggroup/libpng/blob/master/arm/filter_neon_intrinsics.c
+    /// Paeth predictor specialized for AArch64 systems. Ported from the libpng
+    /// implementation at
+    /// https://github.com/pnggroup/libpng/blob/master/arm/filter_neon_intrinsics.c
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     fn paeth_predictor_simd<const SIZE: usize>(
@@ -46,7 +48,8 @@ mod simd {
         nearest.cast::<u8>()
     }
 
-    // Paeth Predictor based on STBI formulation (often better for x64).
+    /// Paeth predictor based on the `filter_paeth_stbi` formulation, which
+    /// performs better on x86_64 systems.
     #[cfg(not(target_arch = "aarch64"))]
     #[inline(always)]
     fn paeth_predictor_simd<const SIZE: usize>(
@@ -64,14 +67,19 @@ mod simd {
         thresh.simd_le(lo).select(hi, t0).cast::<u8>()
     }
 
-    // Core kernel for 3bpp paeth. Returns the next 'a' pixel.
+    /// Core kernel for 3bpp Paeth unfiltering. Takes a `b_vec` consisting of
+    /// 16 RGB above the starting offset, a `c_vec_initial` which is the
+    /// previous pixel from before the starting offset, and a `current_a`
+    /// which is the previous pixel to the left of `x_out`, which is the 16
+    /// pixels we're unfiltering. Returns the next `a` pixel and also updates
+    /// `x_out`.
     #[inline(always)]
     fn process_paeth_chunk_bpp3_s48(
-        // Previous 'a' pixel from the last pump, or zero if this is the first.
+        // Previous `a` pixel from the last pump, or zero if this is the first.
         mut current_a: Simd<u8, 3>,
         // 48 bytes from the row above.
         b_vec: &Simd<u8, 48>,
-        // The last three bytes of the previous b_vec, or zero if this if the first.
+        // The last three bytes of the previous `b_vec`, or zero if this if the first.
         c_vec_initial: Simd<u8, 3>,
         // 48 bytes from the current row (filtered) also re-used as the output.
         x_out: &mut Simd<u8, 48>,
@@ -82,7 +90,7 @@ mod simd {
         // a wide vectorized add at the end of the loop.
         let mut preds = [0u8; 48];
 
-        // Shift b and sift in the lowest 'b' elements from the previous pump
+        // Shift b and sift in the lowest 3 elements from the previous pump
         // to form c.
         let mut c_vec = b_vec.shift_elements_right::<3>(0u8);
         c_vec.as_mut_array()[0..3].copy_from_slice(c_vec_initial.as_array());
@@ -126,7 +134,8 @@ mod simd {
         current_a
     }
 
-    // Apply Paeth unfiltering in 16 pixel chunks (3bpp).
+    /// Applies Paeth unfiltering on the `current` pixel row using `prev` row,
+    /// interpreting the input data as RGB.
     pub fn paeth_unfilter_3bpp(current: &mut [u8], prev: &[u8]) {
         const BPP: usize = 3;
         const STRIDE_BYTES: usize = 48; // 16 pixels * 3 bytes/pixel.
@@ -159,6 +168,7 @@ mod simd {
             // which corresponds to the upper-right of the current chunk's `b` vector.
             c = b.extract::<{ STRIDE_BYTES - BPP }, BPP>();
 
+            // `TryInto` and `copy_to_slice` have similar performance here.
             x.copy_to_slice(chunk);
         }
 

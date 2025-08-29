@@ -13,6 +13,16 @@
   `Option<usize>` to reflect that these calculations no longer overflow on some
   targets where the required buffers can not be represented in the address
   space. They return the mathematically correct size where possible.
+* The `Decoded` enum returned from `StreamingDecoder::update` was simplified to
+  no longer contains any chunk payload data. Instead, it now contains only
+  chunk events where every chunk that was started will eventually be ended by
+  `ChunkComplete`, `BadAncillaryChunk` or `SkippedAncillaryChunk`.
+* Ancillary chunks, i.e. those not critical to decoder interpretation of the
+  file, which fail to parse are now terminated with a `BadAncillaryChunk` event
+  but no longer returned a `DecodingError`. This includes text chunks as well
+  as many metadata chunks (except for `fcTL` that we deem crucial to the
+  parser's understanding of the image sequence in an APNG despite being
+  technically ancillary).
 
 ### Additions
 

@@ -55,9 +55,9 @@ criterion_group!(benches, expand_paletted_all);
 criterion_main!(benches);
 
 fn get_random_bytes<R: Rng>(rng: &mut R, n: usize) -> Vec<u8> {
-    use rand::Fill;
+    use rand::TryRngCore;
     let mut result = vec![0u8; n];
-    result.as_mut_slice().try_fill(rng).unwrap();
+    rng.try_fill_bytes(result.as_mut_slice()).unwrap();
     result
 }
 

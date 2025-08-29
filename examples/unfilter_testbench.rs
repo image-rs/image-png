@@ -87,7 +87,7 @@ const PREV_ROW: [u8; 771] = [
 #[cfg(feature = "benchmarks")]
 fn main() {
     use png::benchable_apis::unfilter;
-    let bpps: [u8; 1] = [3];
+    let bpps: [u8; 1] = [4];
     let filters: [Filter; 1] = [
         //Filter::Sub
         //Filter::Up,

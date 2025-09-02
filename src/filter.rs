@@ -2,6 +2,145 @@ use core::convert::TryInto;
 
 use crate::{common::BytesPerPixel, Compression};
 
+#[cfg(all(feature = "unstable", target_arch="aarch64"))]
+mod neon {
+
+    use crate::filter::filter_paeth;
+    use core::arch::aarch64::*;
+    use core::mem::transmute;
+
+    #[inline(always)]
+    unsafe fn paeth(a: uint8x8_t, b: uint8x8_t, c: uint8x8_t) -> uint8x8_t {
+        let p1 = vaddl_u8(a, b); // a + b, widen to u16
+        let pc_2 = vaddl_u8(c, c); // 2 * c, siden to u16 - TODO: can we replace with a widening shift?
+        let pa = vabdl_u8(b, c); // pa = abs(b - c);
+        let pb = vabdl_u8(a, c); // abs(a-c);
+        let pc = vabdq_u16(p1, pc_2); // abs(p1 - pc_2);
+
+        let p1 = vcleq_u16(pa, pb); // pa <= pb
+        let pa = vcleq_u16(pa, pc); // pa <= pc
+        let pb = vcleq_u16(pb, pc); // pb <= pc
+
+        let p1 = vandq_u16(p1, pa); // pa <= pb && pa <= pc
+
+        let d = vmovn_u16(pb);
+        let e = vmovn_u16(p1);
+
+        let d = vbsl_u8(d, b, c); // if x[i] { b[i] } else c[i]
+        vbsl_u8(e, a, d)
+    }
+
+    /// Implement 3bpp Paeth unfiltering with Neon. Mostly a port of the code in libpng
+    /// with some Rust-specific corrections.
+    ///
+    /// https://github.com/pnggroup/libpng/blame/be81ebe1a45c2da3c5788485cd55408fe2e328df/arm/filter_neon_intrinsics.c#L260
+    pub unsafe fn paeth_unfilter_neon_3bpp(row: &mut [u8], prev_row: &[u8]) {
+        // We must ensure that we have enough space at the final chunk to write a 4th byte of garbage
+        // to the output.
+        let chunks = (row.len() / 12);
+        let (simd_row, remainder_row) = row.split_at_mut(chunks * 12);
+        let (simd_prev_row, remainder_prev_row) = prev_row.split_at(chunks * 12);
+
+        let row_iter = simd_row.chunks_exact_mut(12);
+        let prev_iter = simd_prev_row.chunks_exact(12);
+        let combined_iter = row_iter.zip(prev_iter).enumerate();
+
+        let mut a_vec: uint8x8_t = vdup_n_u8(0);
+        let mut c_vec: uint8x8_t = vdup_n_u8(0);
+
+        let mut vrp_last: uint8x16_t = vdupq_n_u8(0);
+
+        for (i, (chunk, prev_chunk)) in combined_iter {
+            let mut vdest: [uint8x8_t; 4] = [vdup_n_u8(0); 4];
+            // `vld1q_u8` takes a `*const u8` and returns a `uint8x16_t`.
+            // We then `transmute` it to the `uint8x8x2_t` struct to access `val[0]` and `val[1]`.
+            let vrp: uint8x8x2_t = if i == 0 {
+                transmute(vld1q_u8(chunk.as_ptr()))
+            } else {
+                transmute(vrp_last)
+            };
+
+            let vpp_tmp: uint8x16_t = vld1q_u8(prev_chunk.as_ptr());
+            let vpp: uint8x8x2_t = transmute(vpp_tmp);
+
+            // Pixel 0 (bytes 0-2)
+            vdest[0] = paeth(a_vec, vpp.0, c_vec);
+            vdest[0] = vadd_u8(vdest[0], vrp.0);
+
+            // Pixel 1 (bytes 3-5)
+            let vtmp1 = vext_u8(vrp.0, vrp.1, 3);
+            let vtmp2 = vext_u8(vpp.0, vpp.1, 3);
+            vdest[1] = paeth(vdest[0], vtmp2, vpp.0);
+            vdest[1] = vadd_u8(vdest[1], vtmp1);
+
+            // Pixel 2 (bytes 6-8)
+            let vtmp1 = vext_u8(vrp.0, vrp.1, 6);
+            let vtmp3 = vext_u8(vpp.0, vpp.1, 6);
+            vdest[2] = paeth(vdest[1], vtmp3, vtmp2);
+            vdest[2] = vadd_u8(vdest[2], vtmp1);
+
+            // Pixel 3 (bytes 9-11)
+            let vtmp1 = vext_u8(vrp.1, vrp.1, 1);
+            let vtmp2 = vext_u8(vpp.1, vpp.1, 1); // vtmp2 is overwritten here
+            vdest[3] = paeth(vdest[2], vtmp2, vtmp3);
+            vdest[3] = vadd_u8(vdest[3], vtmp1);
+
+            // Update state for the next chunk
+            a_vec = vdest[3];
+            c_vec = vtmp2;
+
+            // Store 4 contiguous pixels
+            let p = chunk.as_mut_ptr();
+            // Write out the first three pixels with a garbage value at the end.
+            // This is immediately overwritten by the next pixel.
+            vst1_lane_u32(p.add(0).cast(), transmute(vdest[0]), 0);
+            vst1_lane_u32(p.add(3).cast(), transmute(vdest[1]), 0);
+            vst1_lane_u32(p.add(6).cast(), transmute(vdest[2]), 0);
+            if i < chunks - 1 {
+                // Load the next line in here to avoid reading the corrupted
+                // extra store we're about to do.
+                vrp_last = vld1q_u8(p.add(12));
+                // Store the final three pixels with one extraneous garbage byte.
+                // TODO: we might be able to efficiently mix the next byte
+                // into vdest[3] so we can avoid doing this.
+                vst1_lane_u32(p.add(9).cast(), transmute(vdest[3]), 0);
+            } else {
+                // Final chunk, need to avoid an extraneous garbage write on the last store.
+                let p_last = p.add(9);
+                let v_last = vdest[3];
+                vst1_lane_u8(p_last.add(0), v_last, 0); // Write byte 9
+                vst1_lane_u8(p_last.add(1), v_last, 1); // Write byte 10
+                vst1_lane_u8(p_last.add(2), v_last, 2); // Write byte 11
+            }
+        }
+        // Process any remaining scalar tail
+        // First move any SIMD elements over
+        let mut a_bpp: [u8; 3] = [
+            vget_lane_u8(a_vec, 0),
+            vget_lane_u8(a_vec, 1),
+            vget_lane_u8(a_vec, 2),
+        ];
+        let mut c_bpp: [u8; 3] = [
+            vget_lane_u8(c_vec, 0),
+            vget_lane_u8(c_vec, 1),
+            vget_lane_u8(c_vec, 2),
+        ];
+        for (chunk, b_bpp) in remainder_row
+            .chunks_exact_mut(3)
+            .zip(remainder_prev_row.chunks_exact(3))
+        {
+            let new_chunk = [
+                chunk[0].wrapping_add(filter_paeth(a_bpp[0], b_bpp[0], c_bpp[0])),
+                chunk[1].wrapping_add(filter_paeth(a_bpp[1], b_bpp[1], c_bpp[1])),
+                chunk[2].wrapping_add(filter_paeth(a_bpp[2], b_bpp[2], c_bpp[2])),
+            ];
+            *TryInto::<&mut [u8; 3]>::try_into(chunk).unwrap() = new_chunk;
+            a_bpp = new_chunk;
+            c_bpp = b_bpp.try_into().unwrap();
+        }
+    }
+}
+
 /// The byte level filter applied to scanlines to prepare them for compression.
 ///
 /// Compression in general benefits from repetitive data. The filter is a content-aware method of
@@ -573,6 +712,11 @@ pub(crate) fn unfilter(
                         }
                     }
                     BytesPerPixel::Three => {
+                        #[cfg(all(feature = "unstable", target_arch="aarch64"))]
+                        unsafe {
+                            neon::paeth_unfilter_neon_3bpp(current, previous);
+                            return;
+                        }
                         let mut a_bpp = [0; 3];
                         let mut c_bpp = [0; 3];
 

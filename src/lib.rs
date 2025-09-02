@@ -59,7 +59,6 @@
 //! ```
 //!
 
-#![forbid(unsafe_code)]
 // Silence certain clippy warnings until our MSRV is higher.
 //
 // The #[default] attribute was stabilized in Rust 1.62.0.

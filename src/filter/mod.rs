@@ -154,6 +154,11 @@ pub(crate) fn unfilter(
                 }
             }
             BytesPerPixel::Four => {
+                #[cfg(feature = "unstable")]
+                {
+                    simd::sub_unfilter_4bpp(current);
+                    return;
+                }
                 let mut prev = [0; 4];
                 for chunk in current.chunks_exact_mut(4) {
                     let new_chunk = [

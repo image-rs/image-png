@@ -34,10 +34,16 @@ impl UnfilteringBuffer {
     /// Asserts in debug builds that all the invariants hold.  No-op in release
     /// builds.  Intended to be called after creating or mutating `self` to
     /// ensure that the final state preserves the invariants.
+    #[track_caller]
     fn debug_assert_invariants(&self) {
+        // The previous row pointer is always behind the current row pointer.
         debug_assert!(self.prev_start <= self.current_start);
-        debug_assert!(self.current_start <= self.available);
+        // The current row pointer is always into filled bytes (but sometimes may point to
+        // read-only back reference buffer, see `curr_row_len_with_unfilter_ahead`).
+        debug_assert!(self.current_start <= self.filled);
+        // The mut-available region is always well-defined.
         debug_assert!(self.available <= self.filled);
+        // The logically filled region is always within bounds of the data stream.
         debug_assert!(self.filled <= self.data_stream.len());
     }
 
@@ -111,6 +117,7 @@ impl UnfilteringBuffer {
         self.current_start = 0;
         self.filled = 0;
         self.available = 0;
+        self.debug_assert_invariants();
     }
 
     /// Returns the previous (already `unfilter`-ed) row.
@@ -123,6 +130,20 @@ impl UnfilteringBuffer {
         self.available - self.current_start
     }
 
+    /// Returns how many bytes of the current row are available in the buffer.
+    ///
+    /// Why negative? There's a backreference section in the buffer that is reserved for the zlib /
+    /// deflate decoder (or any other for that matter). We must not modify that part of the data
+    /// but if we only *read* the row then the start of our current_start is allowed to run _into_
+    /// that section. So as a less efficient fallback where partial data is crucial we can unfilter
+    /// outside the read area instead of in-place but still indicate how many bytes we have
+    /// consumed. In that case, this number is negative.
+    pub(crate) fn curr_row_len_with_unfilter_ahead(&self) -> isize {
+        // Both are indices into the buffer that is an allocation of bytes. Allocations are at most
+        // isize::MAX in size hence this is valid.
+        self.available as isize - self.current_start as isize
+    }
+
     /// Returns a `&mut Vec<u8>` suitable for passing to
     /// `ReadDecoder.decode_image_data` or `StreamingDecoder.update`.
     ///
@@ -132,7 +153,9 @@ impl UnfilteringBuffer {
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn as_unfilled_buffer(&mut self) -> UnfilterBuf<'_> {
-        if self.prev_start >= self.shift_back_limit
+        let shift_back = self.prev_start.min(self.available);
+
+        if shift_back >= self.shift_back_limit
             // Avoid the shift back if the buffer is still very empty. Consider how we got here: a
             // previous decompression filled the buffer, then we unfiltered, we're now refilling
             // the buffer again. The condition implies, the previous decompression filled at most
@@ -147,18 +170,21 @@ impl UnfilteringBuffer {
             // question if we could be a little smarter and avoid crossing page boundaries when
             // that is not required. Alas, microbenchmarking TBD.
             if let Some(16..) = self.data_stream.len().checked_sub(self.filled) {
-                self.data_stream
-                    .copy_within(self.prev_start..self.filled, 0);
+                self.data_stream.copy_within(shift_back..self.filled, 0);
             } else {
-                self.data_stream.copy_within(self.prev_start.., 0);
+                self.data_stream.copy_within(shift_back.., 0);
             }
+
+            self.debug_assert_invariants();
 
             // The data kept its relative position to `filled` which now lands exactly at
             // the distance between prev_start and filled.
-            self.current_start -= self.prev_start;
-            self.available -= self.prev_start;
-            self.filled -= self.prev_start;
-            self.prev_start = 0;
+            self.current_start -= shift_back;
+            self.available -= shift_back;
+            self.filled -= shift_back;
+            self.prev_start -= shift_back;
+
+            self.debug_assert_invariants();
         }
 
         if self.filled + Self::GROWTH_BYTES > self.data_stream.len() {
@@ -175,17 +201,26 @@ impl UnfilteringBuffer {
     /// Runs `unfilter` on the current row, and then shifts rows so that the current row becomes the previous row.
     ///
     /// Will panic if `self.curr_row_len() < rowlen`.
+    ///
+    /// For correctness this also assumes that `curr_row_len_with_unfilter_ahead` is greater than
+    /// `rowlen`.
     pub fn unfilter_curr_row(
         &mut self,
         rowlen: usize,
         bpp: BytesPerPixel,
     ) -> Result<(), DecodingError> {
         debug_assert!(rowlen >= 2); // 1 byte for `FilterType` and at least 1 byte of pixel data.
+        debug_assert_eq!(rowlen as isize as usize, rowlen);
+        debug_assert!(self.curr_row_len_with_unfilter_ahead() >= rowlen as isize);
 
         let (prev, row) = self.data_stream.split_at_mut(self.current_start);
         let prev: &[u8] = &prev[self.prev_start..];
 
-        debug_assert!(prev.is_empty() || prev.len() == (rowlen - 1));
+        let prev = if prev.is_empty() {
+            prev
+        } else {
+            &prev[..rowlen - 1]
+        };
 
         // Get the filter type.
         let filter = RowFilter::from_u8(row[0]).ok_or(DecodingError::Format(
@@ -201,6 +236,106 @@ impl UnfilteringBuffer {
         self.debug_assert_invariants();
 
         Ok(())
+    }
+
+    /// Unfilter but allow the current_start to exceed `available` at the cost of some compute.
+    /// This will be called when we encounter an `UnexpectedEof` and want to push out all
+    /// interlaced rows that we can, i.e. it is not in the usual critical path of decoding.
+    pub(crate) fn unfilter_ahead_row(
+        &mut self,
+        rowlen: usize,
+        bpp: BytesPerPixel,
+    ) -> Result<bool, DecodingError> {
+        if self.filled - self.current_start < rowlen {
+            return Ok(false);
+        }
+
+        // We can not really mutate the row data to unfilter it! So where do we put the unfiltered
+        // row then? In our interface it should occur at `self.prev_start` after this method is
+        // finished. So really simple, we just copy it back there.
+        //
+        // There is of course subtlety. First we need to make sure that the buffer of the previous
+        // row does not overlap with the data for the decoder as we will overwrite it. That is
+        // usually trivial, when it was previously unfiltered we had already mutated it so just
+        // reuse, except that at the first line of each interlace pass we start with an _empty_
+        // previous row and consequently need to potentially move all our data further back.
+
+        // The fixup discussed. Make space for a previous row. It does not matter where we put it
+        // so just put it right before the minimum of `current_start` and `available`. In this case
+        // however we should also pass an empty row to `unfilter`.
+        if self.prev_start == self.current_start {
+            let potential_end_of_new_prev = self.current_start.min(self.available);
+            // Insert free space between what we treat as the previous row and the current row.
+            // NOTE: this is because of the decoder's `commit` function which will take a fixed
+            // window of data back from its filled state before it is done. But we move that region
+            // upwards so it may erroneously point backwards by more than necessary. That just
+            // freezes data but it might also freeze a portion that we are using as the unfilter
+            // buffer / the space to put the 'previous row'.
+            let padding = rowlen - 1;
+
+            let start_of_new_prev = potential_end_of_new_prev.saturating_sub(padding);
+            let end_of_new_prev = start_of_new_prev + padding;
+
+            // Shift everything up as required.
+            let current_shift = end_of_new_prev - potential_end_of_new_prev;
+
+            self.data_stream.splice(
+                start_of_new_prev..start_of_new_prev,
+                core::iter::repeat(0u8).take(current_shift),
+            );
+
+            self.current_start += current_shift;
+            // Temporary in case of error.
+            self.prev_start = self.current_start;
+            self.available += current_shift;
+            self.filled += current_shift;
+
+            self.debug_assert_invariants();
+
+            let (prev, row) = self.data_stream.split_at_mut(self.current_start);
+            let prev = &mut prev[start_of_new_prev..][..rowlen - 1];
+
+            let filter = RowFilter::from_u8(row[0]).ok_or(DecodingError::Format(
+                FormatErrorInner::UnknownFilterMethod(row[0]).into(),
+            ))?;
+
+            prev.copy_from_slice(&row[1..rowlen]);
+            unfilter(filter, bpp, &[], prev);
+
+            self.prev_start = start_of_new_prev;
+            self.current_start += rowlen;
+            self.debug_assert_invariants();
+
+            Ok(true)
+        } else {
+            let (prev, row) = self.data_stream.split_at_mut(self.current_start);
+
+            assert!(
+                self.available - self.prev_start >= rowlen - 1,
+                "prev {prev}, cur {cur}, avail {avail}, fill {fill}, rowlen {rowlen}",
+                prev = self.prev_start,
+                cur = self.current_start,
+                avail = self.available,
+                fill = self.filled,
+            );
+
+            let prev = &mut prev[self.prev_start..][..rowlen - 1];
+
+            let filter = RowFilter::from_u8(row[0]).ok_or(DecodingError::Format(
+                FormatErrorInner::UnknownFilterMethod(row[0]).into(),
+            ))?;
+
+            // Unfilter this in a temporary buffer.
+            let mut row = row[1..rowlen].to_vec();
+            unfilter(filter, bpp, prev, &mut row);
+            prev.copy_from_slice(&row);
+
+            // Do NOT modify prev_start
+            self.current_start += rowlen;
+            self.debug_assert_invariants();
+
+            Ok(true)
+        }
     }
 }
 

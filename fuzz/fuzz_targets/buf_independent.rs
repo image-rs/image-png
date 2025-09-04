@@ -294,6 +294,7 @@ fn assert_same_info(lhs: &png::Info, rhs: &png::Info) {
 trait IteratorExtensionsForFuzzing: Iterator + Sized {
     /// Verifies that either 1) all items in the iterator are `Ok(_)` or 2) all items in the
     /// iterator are `Err(_)`.  Passes through unmodified iterator items.
+    #[track_caller]
     fn assert_all_results_are_consistent<T>(self) -> impl Iterator<Item = Self::Item>
     where
         Self: Iterator<Item = Result<T, png::DecodingError>>,
@@ -321,6 +322,7 @@ trait IteratorExtensionsForFuzzing: Iterator + Sized {
 
     /// Verifies that all items in the iterator are the same (according to their `Eq`
     /// implementation).  Returns one of the items.
+    #[track_caller]
     fn assert_all_items_are_equal(self) -> Self::Item
     where
         Self::Item: Debug + Eq,
@@ -330,6 +332,7 @@ trait IteratorExtensionsForFuzzing: Iterator + Sized {
 
     /// Verifies that all items in the iterator are the same (according to the `assert_same`
     /// function.  Returns one of the items.
+    #[track_caller]
     fn assert_all_items_are_same<F>(self, mut assert_same: F) -> <Self as Iterator>::Item
     where
         F: for<'a, 'b> FnMut(&'a Self::Item, &'b Self::Item),

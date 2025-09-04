@@ -313,4 +313,74 @@ pub fn paeth_unfilter_4bpp(row: &mut [u8], prev_row: &[u8]) {
         a_bpp = new_chunk;
         c_bpp = b_bpp.try_into().unwrap();
     }
+
+    /// Unfilters a row of pixels using the Sub filter. Implements via a prefix sum.
+    pub fn sub_unfilter_3bpp(current: &mut [u8]) {
+        const BPP: usize = 3;
+        const STRIDE_BYTES: usize = 48; // 16 pixels * 3 bytes/pixel
+        type SimdVector = Simd<u8, STRIDE_BYTES>;
+
+        let mut prev_simd_a: Simd<u8, BPP> = Default::default(); // Unfiltered value of the pixel to the left
+
+        const UNROLL_FACTOR: usize = 2;
+        const UNROLLED_STRIDE_BYTES: usize = STRIDE_BYTES * UNROLL_FACTOR;
+
+        let chunks_unrolled = current.len() / UNROLLED_STRIDE_BYTES;
+        let (simd_current_unrolled, mut remainder_current_simd_tail) =
+            current.split_at_mut(chunks_unrolled * UNROLLED_STRIDE_BYTES);
+
+        for unrolled_chunk in simd_current_unrolled.chunks_exact_mut(UNROLLED_STRIDE_BYTES) {
+            let (chunk1_slice, chunk2_slice) = unrolled_chunk.split_at_mut(STRIDE_BYTES);
+
+            // Process chunk 1
+            let mut x_vec1: SimdVector = SimdVector::from_slice(chunk1_slice);
+            let carry_in_vec1 = prev_simd_a.resize::<STRIDE_BYTES>(0u8);
+            x_vec1 = x_vec1 + carry_in_vec1;
+            x_vec1 = x_vec1 + x_vec1.shift_elements_right::<BPP>(0u8);
+            x_vec1 = x_vec1 + x_vec1.shift_elements_right::<{ 2 * BPP }>(0u8);
+            x_vec1 = x_vec1 + x_vec1.shift_elements_right::<{ 4 * BPP }>(0u8);
+            x_vec1 = x_vec1 + x_vec1.shift_elements_right::<{ 8 * BPP }>(0u8);
+            let prev_simd_a_for_chunk2 = x_vec1.extract::<{ STRIDE_BYTES - BPP }, BPP>();
+            x_vec1.copy_to_slice(chunk1_slice);
+
+            // Process chunk 2
+            let mut x_vec2: SimdVector = SimdVector::from_slice(chunk2_slice);
+            let carry_in_vec2 = prev_simd_a_for_chunk2.resize::<STRIDE_BYTES>(0u8);
+            x_vec2 = x_vec2 + carry_in_vec2;
+            x_vec2 = x_vec2 + x_vec2.shift_elements_right::<BPP>(0u8);
+            x_vec2 = x_vec2 + x_vec2.shift_elements_right::<{ 2 * BPP }>(0u8);
+            x_vec2 = x_vec2 + x_vec2.shift_elements_right::<{ 4 * BPP }>(0u8);
+            x_vec2 = x_vec2 + x_vec2.shift_elements_right::<{ 8 * BPP }>(0u8);
+            prev_simd_a = x_vec2.extract::<{ STRIDE_BYTES - BPP }, BPP>();
+            x_vec2.copy_to_slice(chunk2_slice);
+        }
+
+        // Process any remaining single STRIDE_BYTES chunk
+        if remainder_current_simd_tail.len() >= STRIDE_BYTES {
+            let (chunk_single_slice, scalar_remainder_slice) =
+                remainder_current_simd_tail.split_at_mut(STRIDE_BYTES);
+            let mut x_vec: SimdVector = SimdVector::from_slice(chunk_single_slice);
+            let carry_in_vec = prev_simd_a.resize::<STRIDE_BYTES>(0u8);
+            x_vec = x_vec + carry_in_vec;
+            x_vec = x_vec + x_vec.shift_elements_right::<BPP>(0u8);
+            x_vec = x_vec + x_vec.shift_elements_right::<{ 2 * BPP }>(0u8);
+            x_vec = x_vec + x_vec.shift_elements_right::<{ 4 * BPP }>(0u8);
+            x_vec = x_vec + x_vec.shift_elements_right::<{ 8 * BPP }>(0u8);
+            prev_simd_a = x_vec.extract::<{ STRIDE_BYTES - BPP }, BPP>();
+            x_vec.copy_to_slice(chunk_single_slice);
+            remainder_current_simd_tail = scalar_remainder_slice;
+        }
+
+        // Scalar remainder processing
+        let mut prev_scalar_a = prev_simd_a.to_array();
+        for chunk in remainder_current_simd_tail.chunks_exact_mut(BPP) {
+            let new_chunk = [
+                chunk[0].wrapping_add(prev_scalar_a[0]),
+                chunk[1].wrapping_add(prev_scalar_a[1]),
+                chunk[2].wrapping_add(prev_scalar_a[2]),
+            ];
+            *TryInto::<&mut [u8; BPP]>::try_into(chunk).unwrap() = new_chunk;
+            prev_scalar_a = new_chunk;
+        }
+    }
 }

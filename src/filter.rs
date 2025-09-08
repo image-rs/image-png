@@ -774,7 +774,7 @@ pub(crate) fn unfilter(
                         }
                     }
                     BytesPerPixel::Three => {
-                        #[cfg(feature = "unstable")]
+                        #[cfg(all(feature = "unstable", not(target_vendor = "apple")))]
                         {
                             simd::paeth_unfilter_3bpp(current, previous);
                             return;

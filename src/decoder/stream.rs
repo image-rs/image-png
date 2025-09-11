@@ -29,7 +29,7 @@ pub const CHUNK_BUFFER_SIZE: usize = 128;
 const CHECKSUM_DISABLED: bool = cfg!(fuzzing);
 
 /// Kind of `u32` value that is being read via `State::U32`.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum U32ValueKind {
     /// First 4 bytes of the PNG signature - see
     /// http://www.libpng.org/pub/png/spec/1.2/PNG-Structure.html#PNG-file-signature
@@ -721,40 +721,87 @@ impl StreamingDecoder {
             U32 {
                 kind,
                 mut bytes,
-                mut accumulated_count,
+                accumulated_count,
             } => {
+                // note on the weirdness of handling here: we can reach this point with remaining
+                // buffered image data. The amount of buffered data depends quite a lot on the
+                // sequence of state transitions before, i.e. if we feed individual bytes of input
+                // then the image_data had more time to grow whereas if we feed large chunks then
+                // there may be more buffered symbol left (deflate has 32kB lookback window). But
+                // we also use the presence of `image_data` to decide whether to enforce stream
+                // end-of-file requirements or not. If the previous calls were enough to finish out
+                // all buffered lines then `None` is passed but otherwise we get a buffer. So we
+                // have two seemingly conflicting goals:
+                //
+                // - the flush-deflate check must run *before* we have updated our state. In
+                //   particular, consuming all input data would not allow us to equivalently run
+                //   the check afterwards if the input stream ends _exactly_ on that boundary.
+                //   (Then the input would be `is_empty` and an UnexpectedEof occurs before we had
+                //   a chance to run again, instead of the check).
+                // - we must return before the flush-deflate check if we were able to flush some
+                //   more image data into the `UnfilterBuf`.
+                let consumed_count;
+
                 debug_assert!(accumulated_count <= 4);
-                if accumulated_count == 0 && buf.len() >= 4 {
+                let parse = if accumulated_count == 0 && buf.len() >= 4 {
                     // Handling these `accumulated_count` and `buf.len()` values in a separate `if`
                     // branch is not strictly necessary - the `else` statement below is already
                     // capable of handling these values.  The main reason for special-casing these
                     // values is that they occur fairly frequently and special-casing them results
                     // in performance gains.
-                    const CONSUMED_BYTES: usize = 4;
-                    self.parse_u32(kind, &buf[0..4], image_data)
-                        .map(|decoded| (CONSUMED_BYTES, decoded))
+                    consumed_count = 4;
+                    bytes.copy_from_slice(&buf[0..4]);
+                    self.parse_u32(kind, &bytes, image_data)?
                 } else {
-                    let remaining_count = 4 - accumulated_count;
-                    let consumed_bytes = {
+                    let mut updated_count = accumulated_count;
+
+                    {
+                        let remaining_count = 4 - accumulated_count;
                         let available_count = min(remaining_count, buf.len());
                         bytes[accumulated_count..accumulated_count + available_count]
                             .copy_from_slice(&buf[0..available_count]);
-                        accumulated_count += available_count;
-                        available_count
+                        consumed_count = available_count;
+                        updated_count += available_count;
                     };
 
-                    if accumulated_count < 4 {
+                    if updated_count < 4 {
                         self.state = Some(U32 {
+                            kind,
+                            bytes,
+                            accumulated_count: updated_count,
+                        });
+
+                        return Ok((consumed_count, Decoded::Nothing));
+                    }
+
+                    debug_assert_eq!(updated_count, 4);
+                    self.parse_u32(kind, &bytes, image_data)?
+                };
+
+                match parse {
+                    // See above, handle the case where we must *not* update our state yet.
+                    Decoded::ImageData => {
+                        // Put the previous state back.
+                        self.state = Some(State::U32 {
                             kind,
                             bytes,
                             accumulated_count,
                         });
-                        Ok((consumed_bytes, Decoded::Nothing))
-                    } else {
-                        debug_assert_eq!(accumulated_count, 4);
-                        self.parse_u32(kind, &bytes, image_data)
-                            .map(|decoded| (consumed_bytes, decoded))
+
+                        // We produced more image data, so return now without updating the state or
+                        // producing any data.
+                        Ok((0, Decoded::ImageData))
                     }
+                    Decoded::ImageDataFlushed => {
+                        self.state = Some(State::U32 {
+                            kind,
+                            bytes,
+                            accumulated_count: 4,
+                        });
+
+                        Ok((consumed_count, parse))
+                    }
+                    _ => Ok((consumed_count, parse)),
                 }
             }
             ReadChunkData(type_str) => {
@@ -877,18 +924,18 @@ impl StreamingDecoder {
                 if type_str != self.current_chunk.type_
                     && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
                 {
-                    self.current_chunk.type_ = type_str;
                     if let Some(image_data) = image_data {
-                        self.inflater.finish_compressed_chunks(image_data)?;
+                        if let crate::decoder::zlib::Flush::ProducedMoreData =
+                            self.inflater.finish_compressed_chunks(image_data)?
+                        {
+                            return Ok(Decoded::ImageData);
+                        }
                     }
 
+                    self.current_chunk.type_ = type_str;
                     self.ready_for_idat_chunks = false;
                     self.ready_for_fdat_chunks = false;
-                    self.state = Some(State::U32 {
-                        kind,
-                        bytes,
-                        accumulated_count: 4,
-                    });
+
                     return Ok(Decoded::ImageDataFlushed);
                 }
 

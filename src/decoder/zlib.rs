@@ -189,6 +189,10 @@ impl ZlibStream {
             return Ok(Flush::ProducedMoreData);
         }
 
+        if image_data.commit_all_and_check_for_more() {
+            return Ok(Flush::ProducedMoreData);
+        }
+
         let (buffer, filled) = image_data.borrow_mut();
         let (_in_consumed, out_consumed) =
             self.state.read(&[], buffer, filled, true).map_err(|err| {
@@ -205,6 +209,7 @@ impl ZlibStream {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum Flush {
     ProducedMoreData,
     Complete,
@@ -236,6 +241,17 @@ impl UnfilterBuf<'_> {
 
     pub(crate) fn commit(&mut self, howmany: usize) {
         *self.available = howmany;
+    }
+
+    /// Effectively close the stream, making all bytes available.
+    ///
+    /// Returns if that made any more bytes available.
+    pub(crate) fn commit_all_and_check_for_more(&mut self) -> bool {
+        let available = *self.available;
+        let filled = *self.filled;
+
+        *self.available = filled;
+        available != filled
     }
 
     pub(crate) fn flush_allocate(&mut self) {

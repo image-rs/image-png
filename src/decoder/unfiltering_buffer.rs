@@ -364,3 +364,87 @@ fn next_multiple_of_backport_testsuite() {
     assert_eq!(checked_next_multiple_of(1, usize::MAX), Some(usize::MAX));
     assert_eq!(checked_next_multiple_of(usize::MAX, 2), None);
 }
+
+/// Checks that intermittent `unfilter_ahead_row` is equivalent to doing unfilters on the complete
+/// data without any read-ahead.
+#[test]
+fn independent_of_readahead() {
+    // Simulate a decompression as if by `UnfilterBuf::decompress`.
+    fn decompress_from_constant(buf: UnfilterBuf<'_>, data: &mut &[u8]) {
+        let target_region = *buf.filled..;
+        let target = &mut buf.buffer[target_region];
+
+        let to_copy = target.len().min(data.len());
+        target[..to_copy].copy_from_slice(&data[..to_copy]);
+
+        *buf.filled += to_copy;
+        let available = (*buf.filled).saturating_sub(UnfilterBuf::LOOKBACK_SIZE);
+        *buf.available = available.max(*buf.available);
+    }
+
+    let mut line = vec![];
+    for _ in 0..1024 {
+        line.push(crate::filter::RowFilter::Sub as u8);
+        line.extend_from_slice(&core::array::from_fn::<u8, 16, _>(|i| i as u8));
+    }
+
+    // We will unfilter in two different ways and compare results. Once where we do call read-ahead
+    // and once where we do not.
+
+    let mut data = line.as_slice();
+    let rows_with_no_readahead = {
+        let mut buf = UnfilteringBuffer::new(&Info::with_size(1024, 16));
+        let mut rows = vec![];
+
+        while rows.len() < 1024 {
+            let xbuf = buf.as_unfilled_buffer();
+
+            decompress_from_constant(xbuf, &mut data);
+            if data.is_empty() {
+                buf.available = buf.filled;
+            }
+
+            while buf.mutable_rowdata_length() >= 17 && rows.len() < 1024 {
+                buf.unfilter_curr_row(17, BytesPerPixel::One).unwrap();
+                rows.push(buf.prev_row().to_vec());
+            }
+        }
+
+        rows
+    };
+
+    let rows_with_readahead = {
+        let mut buf = UnfilteringBuffer::new(&Info::with_size(1024, 16));
+        let mut rows = vec![];
+
+        while rows.len() < 1024 {
+            let xbuf = buf.as_unfilled_buffer();
+
+            decompress_from_constant(xbuf, &mut data);
+            if data.is_empty() {
+                buf.available = buf.filled;
+            }
+
+            while buf.mutable_rowdata_length() >= 17 && rows.len() < 1024 {
+                buf.unfilter_curr_row(17, BytesPerPixel::One).unwrap();
+                rows.push(buf.prev_row().to_vec());
+            }
+
+            if rows.len() < 1024 && buf.unfilter_ahead_row(17, BytesPerPixel::One).unwrap() {
+                rows.push(buf.prev_row().to_vec());
+            }
+        }
+
+        rows
+    };
+
+    assert_eq!(rows_with_no_readahead.len(), rows_with_readahead.len());
+
+    for (idx, (a, b)) in rows_with_no_readahead
+        .iter()
+        .zip(rows_with_readahead.iter())
+        .enumerate()
+    {
+        assert_eq!(a, b, "row {idx} differs");
+    }
+}

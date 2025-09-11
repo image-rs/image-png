@@ -12,7 +12,7 @@ cargo-fuzz = true
 [dependencies.png]
 path = ".."
 [dependencies.libfuzzer-sys]
-git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
+version = "0.4.10"
 
 # Prevent this from interfering with workspaces
 [workspace]

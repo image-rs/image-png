@@ -144,19 +144,41 @@ impl ZlibStream {
     pub(crate) fn finish_compressed_chunks(
         &mut self,
         image_data: &mut UnfilterBuf<'_>,
-    ) -> Result<(), DecodingError> {
+    ) -> Result<Flush, DecodingError> {
         if !self.started {
-            return Ok(());
+            return Ok(Flush::Complete);
         }
 
         if self.state.is_done() {
             // We can end up here only after the [`decompress`] call above has detected the state
             // to be done, too. In this case the filled and committed amount of data are already
             // equal to each other. So neither of them needs to be touched in any way.
-            return Ok(());
+            return Ok(Flush::Complete);
         }
 
-        let (_, mut filled) = image_data.borrow_mut();
+        let (buffer, mut filled) = image_data.borrow_mut();
+
+        // First read without indicating an end. The caller can then react to the total amount of
+        // available bytes in this stream, before we check for an _missing_ end of stream. This
+        // ensures that the error signalled on a missing EOF is consistent no matter into which
+        // slices the input file has been split when passed to the decoder.
+        let (_, dry_consumed) = self.state.read(&[], buffer, filled, false).map_err(|err| {
+            DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
+        })?;
+
+        if dry_consumed > 0 {
+            let filled = filled + dry_consumed;
+            image_data.filled(filled);
+
+            if self.state.is_done() {
+                image_data.commit(filled);
+            } else {
+                image_data.commit(filled.saturating_sub(Self::LOOKBACK_SIZE));
+            }
+
+            return Ok(Flush::ProducedMoreData);
+        }
+
         while !self.state.is_done() {
             let (buffer, _) = image_data.borrow_mut();
             let (_in_consumed, out_consumed) =
@@ -174,8 +196,13 @@ impl ZlibStream {
         image_data.filled(filled);
         image_data.commit(filled);
 
-        Ok(())
+        Ok(Flush::Complete)
     }
+}
+
+pub(crate) enum Flush {
+    ProducedMoreData,
+    Complete,
 }
 
 impl UnfilterRegion {

@@ -863,19 +863,29 @@ impl StreamingDecoder {
                 if type_str != self.current_chunk.type_
                     && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
                 {
-                    self.current_chunk.type_ = type_str;
-                    if let Some(image_data) = image_data {
-                        self.inflater.finish_compressed_chunks(image_data)?;
+                    let status = if let Some(image_data) = image_data {
+                        match self.inflater.finish_compressed_chunks(image_data)? {
+                            crate::decoder::zlib::Flush::ProducedMoreData => Decoded::ImageData,
+                            crate::decoder::zlib::Flush::Complete => Decoded::ImageDataFlushed,
+                        }
+                    } else{
+                        Decoded::ImageDataFlushed
+                    };
+
+                    if matches!(status, Decoded::ImageDataFlushed) {
+                        self.current_chunk.type_ = type_str;
+                        self.ready_for_idat_chunks = false;
+                        self.ready_for_fdat_chunks = false;
                     }
 
-                    self.ready_for_idat_chunks = false;
-                    self.ready_for_fdat_chunks = false;
+                    // Redo this state, either as the new chunk or as the IDAT continued flush.
                     self.state = Some(State::U32 {
                         kind,
                         bytes,
                         accumulated_count: 4,
                     });
-                    return Ok(Decoded::ImageDataFlushed);
+
+                    return Ok(status);
                 }
                 self.state = match type_str {
                     chunk::fdAT => {

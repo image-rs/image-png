@@ -241,12 +241,9 @@ mod simd {
         let mut c: Simd<u8, BPP> = Default::default(); // Upper-left pixel (unfiltered)
 
         // Decide the number of chunks and setup iterators for the SIMD body and scalar fallback.
-        let chunks = current.len() / STRIDE_BYTES;
-        let (simd_row, remainder_row) = current.split_at_mut(chunks * STRIDE_BYTES);
-        let (simd_prev_row, remainder_prev_row) = prev.split_at(chunks * STRIDE_BYTES);
-        let row_iter = simd_row.chunks_exact_mut(STRIDE_BYTES);
-        let prev_iter = simd_prev_row.chunks_exact(STRIDE_BYTES);
-        let combined_iter = row_iter.zip(prev_iter);
+        let mut current_iter = current.chunks_exact_mut(STRIDE_BYTES);
+        let mut previous_iter = prev.chunks_exact(STRIDE_BYTES);
+        let combined_iter = (&mut current_iter).zip(&mut previous_iter);
 
         for (chunk, prev_chunk) in combined_iter {
             let mut x: Simd<u8, STRIDE_BYTES> = Simd::<u8, STRIDE_BYTES>::from_slice(chunk);
@@ -255,7 +252,7 @@ mod simd {
             // Process the chunk using the SIMD helper, passing the initial `c`.
             a = process_paeth_chunk_bpp3_s48(a, &b, c, &mut x);
 
-            // Update `c` for the next chunk: it's the upper-left of the next chunk,
+            // Update `c` for the next chunk: it's the upper-left of the next   chunk,
             // which corresponds to the upper-right of the current chunk's `b` vector.
             c = b.extract::<{ STRIDE_BYTES - BPP }, BPP>();
 
@@ -266,9 +263,10 @@ mod simd {
         // Scalar remainder.
         let mut a_bpp = a.to_array();
         let mut c_bpp = c.to_array();
-        for (chunk, b_bpp) in remainder_row
+        for (chunk, b_bpp) in current_iter
+            .into_remainder()
             .chunks_exact_mut(BPP)
-            .zip(remainder_prev_row.chunks_exact(BPP))
+            .zip(previous_iter.remainder().chunks_exact(BPP))
         {
             let new_chunk = [
                 chunk[0].wrapping_add(filter_paeth_chosen(

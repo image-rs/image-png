@@ -895,7 +895,7 @@ pub(crate) fn unfilter(
                     BytesPerPixel::Three => {
                         #[cfg(all(feature = "unstable", not(target_vendor = "apple")))]
                         {
-                            // Results in PR: https://github.com/image-rs/image-png/pull/63
+                            // Results in PR: https://github.com/image-rs/image-png/pull/632
                             // Approximately 30% better on Arm Cortex A520, 7%
                             // regression on Arm Cortex X4. Switched off on Apple
                             // Silicon due to 10-12% regression.
@@ -1052,7 +1052,7 @@ pub(crate) fn unfilter(
                     BytesPerPixel::Three => {
                         #[cfg(feature = "unstable")]
                         {
-                            // Results in PR: https://github.com/image-rs/image-png/pull/63
+                            // Results in PR: https://github.com/image-rs/image-png/pull/632
                             // 23% better on an Epyc 7B13, 10% on a Zen 3 part.
                             // ~30% when targeting x86-64-v2.
                             simd::paeth_unfilter_3bpp(current, previous);

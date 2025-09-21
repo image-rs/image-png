@@ -20,6 +20,7 @@ pub enum Filter {
     Avg,
     Paeth,
     Adaptive,
+    MinEntropy,
 }
 
 impl Default for Filter {
@@ -88,7 +89,7 @@ impl RowFilter {
             Filter::Up => Some(Self::Up),
             Filter::Avg => Some(Self::Avg),
             Filter::Paeth => Some(Self::Paeth),
-            Filter::Adaptive => None,
+            Filter::Adaptive | Filter::MinEntropy => None,
         }
     }
 }
@@ -1195,6 +1196,36 @@ fn filter_internal(
     }
 }
 
+fn adaptive_filter(
+    f: impl Fn(&[u8]) -> u64,
+    bpp: usize,
+    len: usize,
+    previous: &[u8],
+    current: &[u8],
+    output: &mut [u8],
+) -> RowFilter {
+    use RowFilter::*;
+
+    let mut min_cost: u64 = u64::MAX;
+    let mut filter_choice = RowFilter::NoFilter;
+    for &filter in [Up, Sub, Avg, Paeth].iter() {
+        filter_internal(filter, bpp, len, previous, current, output);
+        let cost = f(output);
+        if cost <= min_cost {
+            min_cost = cost;
+            filter_choice = filter;
+
+            if cost == 0 {
+                return filter_choice;
+            }
+        }
+    }
+    if filter_choice != Paeth {
+        filter_internal(filter_choice, bpp, len, previous, current, output);
+    }
+    filter_choice
+}
+
 pub(crate) fn filter(
     method: Filter,
     bpp: BytesPerPixel,
@@ -1202,37 +1233,66 @@ pub(crate) fn filter(
     current: &[u8],
     output: &mut [u8],
 ) -> RowFilter {
-    use RowFilter::*;
     let bpp = bpp.into_usize();
     let len = current.len();
 
     match method {
-        Filter::Adaptive => {
-            let mut min_sum: u64 = u64::MAX;
-            let mut filter_choice = RowFilter::NoFilter;
-            for &filter in [Up, Sub, Avg, Paeth].iter() {
-                filter_internal(filter, bpp, len, previous, current, output);
-                let sum = sum_buffer(output);
-                if sum <= min_sum {
-                    min_sum = sum;
-                    filter_choice = filter;
-
-                    if sum == 0 {
-                        return filter_choice;
-                    }
-                }
-            }
-
-            if filter_choice != Paeth {
-                filter_internal(filter_choice, bpp, len, previous, current, output);
-            }
-            filter_choice
-        }
+        Filter::Adaptive => adaptive_filter(sum_buffer, bpp, len, previous, current, output),
+        Filter::MinEntropy => adaptive_filter(entropy, bpp, len, previous, current, output),
         _ => {
             let filter = RowFilter::from_method(method).unwrap();
             filter_internal(filter, bpp, len, previous, current, output)
         }
     }
+}
+
+/// Estimate the value of i * log2(i) without using floating point operations,
+/// implementation originally from oxipng.
+fn ilog2i(i: u32) -> u32 {
+    let log = 32 - i.leading_zeros() - 1;
+    i * log + ((i - (1 << log)) << 1)
+}
+
+fn entropy(buf: &[u8]) -> u64 {
+    let mut counts = [[0_u32; 256]; 4];
+    let mut total = 0;
+
+    // Count the number of occurrences of each byte value.
+    let mut chunks = buf.chunks_exact(8);
+    for chunk in &mut chunks {
+        // Runs of zeros are common and very compressible, so treat them as free.
+        if chunk == [0; 8] {
+            continue;
+        }
+
+        // Scatter the counts into 4 separate arrays to reduce contention.
+        for j in 0..2 {
+            counts[0][chunk[0 + j * 4] as usize] += 1;
+            counts[1][chunk[1 + j * 4] as usize] += 1;
+            counts[2][chunk[2 + j * 4] as usize] += 1;
+            counts[3][chunk[3 + j * 4] as usize] += 1;
+        }
+        total += 8;
+    }
+    for &lit in chunks.remainder() {
+        counts[0][lit as usize] += 1;
+        total += 1;
+    }
+
+    // Consolidate the counts.
+    for i in 0..256 {
+        counts[0][i] += counts[1][i] + counts[2][i] + counts[3][i];
+    }
+
+    // Compute the entropy.
+    let mut entropy = ilog2i(total);
+    for &count in &counts[0] {
+        if count > 0 {
+            entropy = entropy.saturating_sub(ilog2i(count));
+        }
+    }
+
+    entropy as u64
 }
 
 // Helper function for Adaptive filter buffer summation

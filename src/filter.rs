@@ -1210,12 +1210,16 @@ pub(crate) fn filter(
         Filter::Adaptive => {
             let mut min_sum: u64 = u64::MAX;
             let mut filter_choice = RowFilter::NoFilter;
-            for &filter in [Sub, Up, Avg, Paeth].iter() {
+            for &filter in [Up, Sub, Avg, Paeth].iter() {
                 filter_internal(filter, bpp, len, previous, current, output);
                 let sum = sum_buffer(output);
                 if sum <= min_sum {
                     min_sum = sum;
                     filter_choice = filter;
+
+                    if sum == 0 {
+                        return filter_choice;
+                    }
                 }
             }
 

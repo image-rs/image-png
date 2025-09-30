@@ -420,12 +420,12 @@ impl DeflateCompression {
 }
 
 /// An unsigned integer scaled version of a floating point value,
-/// equivalent to an integer quotient with fixed denominator (100_000)).
+/// equivalent to an integer quotient with [fixed denominator][ScaledFloat::SCALING]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScaledFloat(u32);
 
 impl ScaledFloat {
-    const SCALING: f32 = 100_000.0;
+    pub const SCALING: f32 = 100_000.0;
 
     /// Gets whether the value is within the clamped range of this type.
     pub fn in_range(value: f32) -> bool {

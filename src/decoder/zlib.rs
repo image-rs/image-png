@@ -144,38 +144,75 @@ impl ZlibStream {
     pub(crate) fn finish_compressed_chunks(
         &mut self,
         image_data: &mut UnfilterBuf<'_>,
-    ) -> Result<(), DecodingError> {
+    ) -> Result<Flush, DecodingError> {
         if !self.started {
-            return Ok(());
+            return Ok(Flush::Complete);
         }
 
         if self.state.is_done() {
             // We can end up here only after the [`decompress`] call above has detected the state
             // to be done, too. In this case the filled and committed amount of data are already
             // equal to each other. So neither of them needs to be touched in any way.
-            return Ok(());
+            return Ok(Flush::Complete);
         }
 
-        let (_, mut filled) = image_data.borrow_mut();
+        let (_, filled) = image_data.borrow_mut();
+        let mut provided = 0;
+
+        // First read without indicating an end. The caller can then react to the total amount of
+        // available bytes in this stream, before we check for an _missing_ end of stream. This
+        // ensures that the error signalled on a missing EOF is consistent no matter into which
+        // slices the input file has been split when passed to the decoder.
         while !self.state.is_done() {
             let (buffer, _) = image_data.borrow_mut();
+
             let (_in_consumed, out_consumed) =
-                self.state.read(&[], buffer, filled, true).map_err(|err| {
+                self.state.read(&[], buffer, filled, false).map_err(|err| {
                     DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
                 })?;
 
-            filled += out_consumed;
+            if out_consumed == 0 {
+                break;
+            }
+
+            provided += out_consumed;
 
             if !self.state.is_done() {
                 image_data.flush_allocate();
             }
         }
 
+        if provided > 0 {
+            let filled = filled + provided;
+            image_data.filled(filled);
+            image_data.commit(filled);
+            return Ok(Flush::ProducedMoreData);
+        }
+
+        if image_data.commit_all_and_check_for_more() {
+            return Ok(Flush::ProducedMoreData);
+        }
+
+        let (buffer, filled) = image_data.borrow_mut();
+        let (_in_consumed, out_consumed) =
+            self.state.read(&[], buffer, filled, true).map_err(|err| {
+                DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
+            })?;
+
+        // We mustn't produce any more data after this point
+        debug_assert_eq!(out_consumed, 0);
+
         image_data.filled(filled);
         image_data.commit(filled);
 
-        Ok(())
+        Ok(Flush::Complete)
     }
+}
+
+#[derive(Debug)]
+pub(crate) enum Flush {
+    ProducedMoreData,
+    Complete,
 }
 
 impl UnfilterRegion {
@@ -204,6 +241,17 @@ impl UnfilterBuf<'_> {
 
     pub(crate) fn commit(&mut self, howmany: usize) {
         *self.available = howmany;
+    }
+
+    /// Effectively close the stream, making all bytes available.
+    ///
+    /// Returns if that made any more bytes available.
+    pub(crate) fn commit_all_and_check_for_more(&mut self) -> bool {
+        let available = *self.available;
+        let filled = *self.filled;
+
+        *self.available = filled;
+        available != filled
     }
 
     pub(crate) fn flush_allocate(&mut self) {

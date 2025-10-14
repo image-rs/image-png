@@ -1135,9 +1135,14 @@ impl StreamingDecoder {
     }
 
     fn parse_actl(&mut self) -> Result<(), DecodingError> {
+        let info = self.info.as_mut().unwrap();
         if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::acTL }.into(),
+            ))
+        } else if info.animation_control.is_some() {
+            Err(DecodingError::Format(
+                FormatErrorInner::DuplicateChunk { kind: chunk::acTL }.into(),
             ))
         } else {
             let mut buf = &self.current_chunk.raw_bytes[..];
@@ -1150,7 +1155,7 @@ impl StreamingDecoder {
             if actl.num_frames == 0 {
                 return Ok(());
             }
-            self.info.as_mut().unwrap().animation_control = Some(actl);
+            info.animation_control = Some(actl);
             Ok(())
         }
     }
@@ -3209,5 +3214,39 @@ mod tests {
         let info = reader.info();
         assert_eq!(info.width, SIZE);
         assert_eq!(info.uncompressed_latin1_text.len(), 0);
+    }
+
+    /// This is a regression test for https://crbug.com/451710590.
+    #[test]
+    fn test_duplicate_actl_chunk() {
+        let width = 16;
+        let frame_data = generate_rgba8_with_width_and_height(width, width);
+
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+        write_actl(
+            &mut png,
+            &crate::AnimationControl {
+                num_frames: 2,
+                num_plays: 123,
+            },
+        );
+        write_actl(
+            &mut png,
+            &crate::AnimationControl {
+                num_frames: 1, // <- should be ignored
+                num_plays: 456,
+            },
+        );
+        write_chunk(&mut png, b"IDAT", &frame_data);
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(png)).read_info().unwrap();
+        let Some(actl) = reader.info().animation_control.as_ref() else {
+            panic!("No `animation_control`?")
+        };
+        assert_eq!(actl.num_frames, 2);
+        assert_eq!(actl.num_plays, 123);
     }
 }

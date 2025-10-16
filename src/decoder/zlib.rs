@@ -203,7 +203,7 @@ impl UnfilterBuf<'_> {
     }
 
     pub(crate) fn commit(&mut self, howmany: usize) {
-        *self.available = howmany;
+        *self.available = howmany.max(*self.available);
     }
 
     pub(crate) fn flush_allocate(&mut self) {

@@ -1267,7 +1267,7 @@ fn entropy(buf: &[u8]) -> u64 {
 
         // Scatter the counts into 4 separate arrays to reduce contention.
         for j in 0..2 {
-            counts[0][chunk[0 + j * 4] as usize] += 1;
+            counts[0][chunk[j * 4] as usize] += 1;
             counts[1][chunk[1 + j * 4] as usize] += 1;
             counts[2][chunk[2 + j * 4] as usize] += 1;
             counts[3][chunk[3 + j * 4] as usize] += 1;

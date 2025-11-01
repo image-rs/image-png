@@ -1279,6 +1279,11 @@ fn entropy(buf: &[u8]) -> u64 {
         total += 1;
     }
 
+    // If the input is entirely zeros, short-circuit the entropy calculation.
+    if counts[0][0] == total {
+        return 0;
+    }
+
     // Consolidate the counts.
     for i in 0..256 {
         counts[0][i] += counts[1][i] + counts[2][i] + counts[3][i];

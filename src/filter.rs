@@ -291,6 +291,127 @@ mod simd {
             c_bpp = b_bpp.try_into().unwrap();
         }
     }
+
+    /// Core kernel for 4bpp Paeth unfiltering. Takes a `b_vec` consisting of
+    /// 16 RGB above the starting offset, a `c_vec_initial` which is the
+    /// previous pixel from before the starting offset, and a `current_a`
+    /// which is the previous pixel to the left of `x_out`, which is the 16
+    /// pixels we're unfiltering. Returns the next `a` pixel and also updates
+    /// `x_out`.
+    #[inline(always)]
+    fn process_paeth_chunk_bpp4_s64(
+        mut current_a: Simd<u8, 4>,
+        b_vec: &Simd<u8, 64>,
+        c_vec_initial: Simd<u8, 4>,
+        x_out: &mut Simd<u8, 64>,
+    ) -> Simd<u8, 4> {
+        let x_in = *x_out;
+        let mut preds = [0u8; 64];
+
+        // Mix and shift the previous pixel into b to form c
+        let mut c_vec = b_vec.shift_elements_right::<4>(0u8);
+        c_vec.as_mut_array()[0..4].copy_from_slice(c_vec_initial.as_array());
+
+        // For each RGB pixel in the 48-byte window, we a) extract the relevant
+        // parts of a, b, c and input x, then b) apply the paeth predictor to
+        // what's extracted, then c) merge them to form the 'a' pixel for the
+        // next part of the calculation, and update the predictor buffer.
+        macro_rules! process_pixel {
+            ($shift:expr) => {
+                let a_i16 = current_a.cast::<i16>();
+                let b_i16 = b_vec.extract::<$shift, 4>().cast::<i16>();
+                let c_i16 = c_vec.extract::<$shift, 4>().cast::<i16>();
+                let pred = paeth_predictor_simd(a_i16, b_i16, c_i16);
+                current_a = x_in.extract::<$shift, 4>() + pred;
+                preds[$shift..$shift + 4].copy_from_slice(pred.as_array());
+            };
+        }
+
+        process_pixel!(0);
+        process_pixel!(4);
+        process_pixel!(8);
+        process_pixel!(12);
+        process_pixel!(16);
+        process_pixel!(20);
+        process_pixel!(24);
+        process_pixel!(28);
+        process_pixel!(32);
+        process_pixel!(36);
+        process_pixel!(40);
+        process_pixel!(44);
+        process_pixel!(48);
+        process_pixel!(52);
+        process_pixel!(56);
+        process_pixel!(60);
+
+        // Do a wide vectorized add to commit the predictions and return the next `a` pixel.
+        *x_out += Simd::from_array(preds);
+        current_a
+    }
+
+    /// Applies Paeth unfiltering on the `current` pixel row using `prev` row,
+    /// interpreting the input data as RGBA.
+    pub fn paeth_unfilter_4bpp(row: &mut [u8], prev_row: &[u8]) {
+        const BPP: usize = 4;
+        const STRIDE_BYTES: usize = 64; // 16 pixels * 4 bytes/pixel
+
+        let mut a: Simd<u8, BPP> = Default::default(); // Left pixel (unfiltered)
+        let mut c: Simd<u8, BPP> = Default::default(); // Upper-left pixel (unfiltered)
+
+        // Set up iterators for SIMD body and scalar remainder.
+        let chunks = row.len() / STRIDE_BYTES;
+        let (simd_row, remainder_row) = row.split_at_mut(chunks * STRIDE_BYTES);
+        let (simd_prev_row, remainder_prev_row) = prev_row.split_at(chunks * STRIDE_BYTES);
+        let row_iter = simd_row.chunks_exact_mut(STRIDE_BYTES);
+        let prev_iter = simd_prev_row.chunks_exact(STRIDE_BYTES);
+        let combined_iter = row_iter.zip(prev_iter);
+
+        for (chunk, prev_chunk) in combined_iter {
+            let mut x: Simd<u8, STRIDE_BYTES> = Simd::<u8, STRIDE_BYTES>::from_slice(chunk);
+            let b: Simd<u8, STRIDE_BYTES> = Simd::<u8, STRIDE_BYTES>::from_slice(prev_chunk);
+
+            a = process_paeth_chunk_bpp4_s64(a, &b, c, &mut x);
+
+            // Update `vlast` for the next chunk: last BPP bytes of `b`
+            c = b.extract::<{ STRIDE_BYTES - BPP }, BPP>();
+
+            x.copy_to_slice(chunk);
+        }
+
+        // Scalar remainder.
+        let mut a_bpp = a.to_array();
+        let mut c_bpp = c.to_array();
+        for (chunk, b_bpp) in remainder_row
+            .chunks_exact_mut(BPP)
+            .zip(remainder_prev_row.chunks_exact(BPP))
+        {
+            let new_chunk = [
+                chunk[0].wrapping_add(filter_paeth_chosen(
+                    a_bpp[0].into(),
+                    b_bpp[0].into(),
+                    c_bpp[0].into(),
+                )),
+                chunk[1].wrapping_add(filter_paeth_chosen(
+                    a_bpp[1].into(),
+                    b_bpp[1].into(),
+                    c_bpp[1].into(),
+                )),
+                chunk[2].wrapping_add(filter_paeth_chosen(
+                    a_bpp[2].into(),
+                    b_bpp[2].into(),
+                    c_bpp[2].into(),
+                )),
+                chunk[3].wrapping_add(filter_paeth_chosen(
+                    a_bpp[3].into(),
+                    b_bpp[3].into(),
+                    c_bpp[3].into(),
+                )),
+            ];
+            *TryInto::<&mut [u8; BPP]>::try_into(chunk).unwrap() = new_chunk;
+            a_bpp = new_chunk;
+            c_bpp = b_bpp.try_into().unwrap();
+        }
+    }
 }
 
 // This code path is used on non-x86_64 architectures but we allow dead code
@@ -775,7 +896,7 @@ pub(crate) fn unfilter(
                     BytesPerPixel::Three => {
                         #[cfg(all(feature = "unstable", not(target_vendor = "apple")))]
                         {
-                            // Results in PR: https://github.com/image-rs/image-png/pull/63
+                            // Results in PR: https://github.com/image-rs/image-png/pull/632
                             // Approximately 30% better on Arm Cortex A520, 7%
                             // regression on Arm Cortex X4. Switched off on Apple
                             // Silicon due to 10-12% regression.
@@ -804,9 +925,14 @@ pub(crate) fn unfilter(
                         }
                     }
                     BytesPerPixel::Four => {
-                        // Using the `simd` module here has no effect on Linux
-                        // and appears to regress performance on Windows, so we don't use it here.
-                        // See https://github.com/image-rs/image-png/issues/567
+                        #[cfg(feature = "unstable")]
+                        {
+                            // Results in PR: https://github.com/image-rs/image-png/pull/633
+                            // No change on Apple Silicon, 42% better on Arm Cortex A520,
+                            // 10% better on Arm Cortex X4.
+                            simd::paeth_unfilter_4bpp(current, previous);
+                            return;
+                        }
 
                         let mut a_bpp = [0; 4];
                         let mut c_bpp = [0; 4];
@@ -927,7 +1053,7 @@ pub(crate) fn unfilter(
                     BytesPerPixel::Three => {
                         #[cfg(feature = "unstable")]
                         {
-                            // Results in PR: https://github.com/image-rs/image-png/pull/63
+                            // Results in PR: https://github.com/image-rs/image-png/pull/632
                             // 23% better on an Epyc 7B13, 10% on a Zen 3 part.
                             // ~30% when targeting x86-64-v2.
                             simd::paeth_unfilter_3bpp(current, previous);
@@ -954,9 +1080,13 @@ pub(crate) fn unfilter(
                         }
                     }
                     BytesPerPixel::Four => {
-                        // Using the `simd` module here has no effect on Linux
-                        // and appears to regress performance on Windows, so we don't use it here.
-                        // See https://github.com/image-rs/image-png/issues/567
+                        #[cfg(feature = "unstable")]
+                        {
+                            // Results in PR: https://github.com/image-rs/image-png/pull/633
+                            // May be slightly faster on AMD EPYC 7B13.
+                            simd::paeth_unfilter_4bpp(current, previous);
+                            return;
+                        }
                         const BPP: usize = 4;
                         let mut a_bpp = [0; BPP];
                         let mut c_bpp = [0; BPP];

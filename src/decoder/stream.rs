@@ -1094,7 +1094,7 @@ impl StreamingDecoder {
             0
         });
         self.inflater.reset();
-        self.ready_for_fdat_chunks = true;
+        self.ready_for_fdat_chunks = self.have_idat;
         let fc = FrameControl {
             sequence_number: next_seq_no,
             width: buf.read_be()?,
@@ -2393,6 +2393,50 @@ mod tests {
 
         fctl.sequence_number += 1;
         write_fctl(w, &fctl);
+    }
+
+    #[test]
+    fn test_fdat_chunk_without_idat() {
+        let png = {
+            let width = 1;
+            let mut png = Vec::new();
+            write_png_sig(&mut png);
+            write_rgba8_ihdr_with_width(&mut png, width);
+            let image_data = generate_rgba8_with_width_and_height(width, width);
+            write_actl(
+                &mut png,
+                &crate::AnimationControl {
+                    num_frames: 2,
+                    num_plays: 1,
+                },
+            );
+            let mut fctl = crate::FrameControl {
+                sequence_number: 0,
+                width,
+                height: width,
+                ..Default::default()
+            };
+            write_fctl(&mut png, &fctl);
+            fctl.sequence_number = 1;
+            write_fctl(&mut png, &fctl);
+            write_fdat(&mut png, 1, &image_data[..]);
+            write_iend(&mut png);
+            png
+        };
+        let decoder = Decoder::new(Cursor::new(&png));
+        let Err(err) = decoder.read_info() else {
+            panic!("Expected an error")
+        };
+        assert!(matches!(&err, DecodingError::Format(_)));
+        assert_eq!(
+            "Unexpected restart of ChunkType { type: fdAT, \
+                         critical: false, \
+                         private: true, \
+                         reserved: false, \
+                         safecopy: false \
+             } chunk sequence",
+            format!("{err}"),
+        );
     }
 
     #[test]

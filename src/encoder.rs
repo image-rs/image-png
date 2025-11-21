@@ -28,12 +28,23 @@ pub enum EncodingError {
     LimitsExceeded,
 }
 
-#[derive(Debug)]
+impl PartialEq for EncodingError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Format(l0), Self::Format(r0)) => l0 == r0,
+            (Self::Parameter(l0), Self::Parameter(r0)) => l0 == r0,
+            (Self::IoError(_), _) | (_, Self::IoError(_)) => false,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct FormatError {
     inner: FormatErrorKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum FormatErrorKind {
     ZeroWidth,
     ZeroHeight,

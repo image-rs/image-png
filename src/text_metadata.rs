@@ -108,7 +108,7 @@ use std::{convert::TryFrom, io::Write};
 pub const DECOMPRESSION_LIMIT: usize = 2097152; // 2 MiB
 
 /// Text encoding errors that is wrapped by the standard EncodingError type
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TextEncodingError {
     /// Unrepresentable characters in string
     Unrepresentable,

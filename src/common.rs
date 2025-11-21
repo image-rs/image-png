@@ -923,12 +923,12 @@ impl Default for Transformations {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ParameterError {
     inner: ParameterErrorKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum ParameterErrorKind {
     /// A provided buffer must be have the exact size to hold the image data. Where the buffer can
     /// be allocated by the caller, they must ensure that it has a minimum size as hinted previously.

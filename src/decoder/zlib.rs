@@ -18,7 +18,9 @@ pub struct UnfilterBuf<'data> {
 
 /// `UnfilterRegion` divides a `Vec<u8>` buffer into three consecutive regions:
 ///
-/// * `vector[0..available]` - already decompressed bytes that may be mutated
+/// * `vector[0..available]` - bytes that may be mutated (this typically means
+///   bytes that were decompressed earlier, but user of the buffer may also use
+///   this region for storing other data)
 /// * `vector[available..filled]` - already decompressed bytes that need to be
 ///   preserved. (Future decompressor calls may reference and copy bytes from
 ///   this region.  The maximum `filled - available` "look back" distance for
@@ -191,7 +193,12 @@ impl UnfilterBuf<'_> {
     ) -> Result<usize, DecodingError> {
         let output_limit = (*self.filled + UnfilteringBuffer::GROWTH_BYTES).min(self.buffer.len());
         let (in_consumed, out_consumed) = decompressor
-            .read(input, &mut self.buffer[..output_limit], *self.filled, end_of_input)
+            .read(
+                input,
+                &mut self.buffer[*self.available..output_limit],
+                *self.filled - *self.available,
+                end_of_input,
+            )
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
             })?;
@@ -199,8 +206,10 @@ impl UnfilterBuf<'_> {
         *self.filled += out_consumed;
         if decompressor.is_done() {
             *self.available = *self.filled;
-        } else {
-            *self.available = self.filled.saturating_sub(Self::LOOKBACK_SIZE);
+        } else if let Some(new_available) = self.filled.checked_sub(Self::LOOKBACK_SIZE) {
+            if new_available > *self.available {
+                *self.available = new_available;
+            }
         }
 
         Ok(in_consumed)

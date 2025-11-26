@@ -59,15 +59,6 @@ pub(super) struct ZlibStream {
 }
 
 impl ZlibStream {
-    // [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
-    // "deflate/inflate compression with a sliding window (which is an upper bound on the
-    // distances appearing in the deflate stream) of at most 32768 bytes".
-    //
-    // `fdeflate` requires that we keep this many most recently decompressed bytes in the
-    // `out_buffer` - this allows referring back to them when handling "length and distance
-    // codes" in the deflate stream).
-    const LOOKBACK_SIZE: usize = 32768;
-
     pub(crate) fn new() -> Self {
         ZlibStream {
             state: Box::new(Decompressor::new()),
@@ -120,25 +111,8 @@ impl ZlibStream {
             self.state.ignore_adler32();
         }
 
-        let (buffer, filled) = image_data.borrow_mut();
-        let output_limit = (filled + UnfilteringBuffer::GROWTH_BYTES).min(buffer.len());
-        let (in_consumed, out_consumed) = self
-            .state
-            .read(data, &mut buffer[..output_limit], filled, false)
-            .map_err(|err| {
-                DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
-            })?;
-
+        let in_consumed = image_data.decompress(&mut self.state, data, false)?;
         self.started = true;
-        let filled = filled + out_consumed;
-        image_data.filled(filled);
-
-        if self.state.is_done() {
-            image_data.commit(filled);
-        } else {
-            // See [`Self::LOOKBACK_SIZE`].
-            image_data.commit(filled.saturating_sub(Self::LOOKBACK_SIZE));
-        }
 
         Ok(in_consumed)
     }
@@ -163,23 +137,12 @@ impl ZlibStream {
             return Ok(());
         }
 
-        let (_, mut filled) = image_data.borrow_mut();
         while !self.state.is_done() {
-            let (buffer, _) = image_data.borrow_mut();
-            let (_in_consumed, out_consumed) =
-                self.state.read(&[], buffer, filled, true).map_err(|err| {
-                    DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
-                })?;
-
-            filled += out_consumed;
-
+            let _in_consumed = image_data.decompress(&mut self.state, &[], true)?;
             if !self.state.is_done() {
-                image_data.flush_allocate();
+                image_data.grow_buffer_if_needed_for_final_flushing();
             }
         }
-
-        image_data.filled(filled);
-        image_data.commit(filled);
 
         Ok(())
     }
@@ -205,20 +168,54 @@ impl UnfilterRegion {
 }
 
 impl UnfilterBuf<'_> {
-    pub(crate) fn borrow_mut(&mut self) -> (&mut [u8], usize) {
-        (self.buffer, *self.filled)
+    /// [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
+    /// "deflate/inflate compression with a sliding window (which is an upper bound on the
+    /// distances appearing in the deflate stream) of at most 32768 bytes".
+    ///
+    /// `fdeflate` requires that we keep this many most recently decompressed bytes in the
+    /// `out_buffer` - this allows referring back to them when handling "length and distance
+    /// codes" in the deflate stream).
+    const LOOKBACK_SIZE: usize = 32768;
+
+    /// Pushes `input` into `fdeflate` crate and appends decompressed bytes to `self.buffer`
+    /// (adjusting `self.filled` and `self.available` depending on how many bytes have been
+    /// decompressed).
+    ///
+    /// Returns how many bytes of `input` have been consumed.
+    #[inline]
+    fn decompress(
+        &mut self,
+        decompressor: &mut fdeflate::Decompressor,
+        input: &[u8],
+        end_of_input: bool,
+    ) -> Result<usize, DecodingError> {
+        let output_limit = (*self.filled + UnfilteringBuffer::GROWTH_BYTES).min(self.buffer.len());
+        let (in_consumed, out_consumed) = decompressor
+            .read(input, &mut self.buffer[..output_limit], *self.filled, end_of_input)
+            .map_err(|err| {
+                DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
+            })?;
+
+        *self.filled += out_consumed;
+        if decompressor.is_done() {
+            *self.available = *self.filled;
+        } else {
+            *self.available = self.filled.saturating_sub(Self::LOOKBACK_SIZE);
+        }
+
+        Ok(in_consumed)
     }
 
-    pub(crate) fn filled(&mut self, filled: usize) {
-        *self.filled = filled;
-    }
-
-    pub(crate) fn commit(&mut self, howmany: usize) {
-        *self.available = howmany;
-    }
-
-    pub(crate) fn flush_allocate(&mut self) {
-        let len = self.buffer.len() + 32 * 1024;
-        self.buffer.resize(len, 0);
+    /// Grows buffer if needed for final flushing of decompressor output.
+    fn grow_buffer_if_needed_for_final_flushing(&mut self) {
+        // Only grow the buffer if needed / if the buffer is full.  In particular,
+        // calls from `ZlibStream::decompress` to `UnfilterBuf::decompress` will
+        // output at most `GROWTH_BYTES` bytes, which may be insufficient to fill
+        // all of the buffer grown by `SIZE_DELTA`.
+        if *self.filled == self.buffer.len() {
+            const SIZE_DELTA: usize = 32 * 1024;
+            let len = self.buffer.len() + SIZE_DELTA;
+            self.buffer.resize(len, 0);
+        }
     }
 }

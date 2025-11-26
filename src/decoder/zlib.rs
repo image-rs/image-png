@@ -113,7 +113,7 @@ impl ZlibStream {
             self.state.ignore_adler32();
         }
 
-        let in_consumed = image_data.decompress(&mut self.state, data, false)?;
+        let in_consumed = image_data.decompress(&mut self.state, Some(data))?;
         self.started = true;
 
         Ok(in_consumed)
@@ -140,7 +140,7 @@ impl ZlibStream {
         }
 
         while !self.state.is_done() {
-            let _in_consumed = image_data.decompress(&mut self.state, &[], true)?;
+            let _in_consumed = image_data.decompress(&mut self.state, None)?;
             if !self.state.is_done() {
                 image_data.grow_buffer_if_needed_for_final_flushing();
             }
@@ -188,9 +188,13 @@ impl UnfilterBuf<'_> {
     fn decompress(
         &mut self,
         decompressor: &mut fdeflate::Decompressor,
-        input: &[u8],
-        end_of_input: bool,
+        input: Option<&[u8]>,
     ) -> Result<usize, DecodingError> {
+        let (input, end_of_input) = match input {
+            Some(input) => (input, false),
+            None => ([].as_slice(), true),
+        };
+
         let output_limit = (*self.filled + UnfilteringBuffer::GROWTH_BYTES).min(self.buffer.len());
         let (in_consumed, out_consumed) = decompressor
             .read(

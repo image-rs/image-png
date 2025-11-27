@@ -64,8 +64,6 @@ enum State {
     /// In this state we are reading chunk data from external input, and appending it to
     /// `ChunkState::raw_bytes`. Then if all data has been read, we parse the chunk.
     ReadChunkData(ChunkType),
-    /// Skip past chunk without processing it and then return the given value for the decoding result.
-    SkipChunk(Decoded),
     /// In this state we are reading image data from external input and feeding it directly into
     /// `StreamingDecoder::inflater`.
     ImageData(ChunkType),
@@ -572,6 +570,16 @@ struct ChunkState {
 
     /// Non-decoded bytes in the chunk.
     raw_bytes: Vec<u8>,
+
+    /// Whether this chunk should be skipped or decoded.
+    action: ChunkAction,
+}
+
+#[derive(Debug, PartialEq)]
+enum ChunkAction {
+    Process,
+    Skip,
+    Reject,
 }
 
 impl StreamingDecoder {
@@ -593,6 +601,7 @@ impl StreamingDecoder {
                 crc: Crc32::new(),
                 remaining: 0,
                 raw_bytes: Vec::with_capacity(CHUNK_BUFFER_SIZE),
+                action: ChunkAction::Process,
             },
             inflater,
             info: None,
@@ -759,30 +768,33 @@ impl StreamingDecoder {
                         remaining,
                         raw_bytes,
                         type_: _,
+                        action,
                     } = &mut self.current_chunk;
-
-                    if raw_bytes.len() == raw_bytes.capacity() {
-                        if self.limits.bytes == 0 {
-                            return Err(DecodingError::LimitsExceeded);
-                        }
-
-                        // Double the size of the Vec, but not beyond the allocation limit.
-                        debug_assert!(raw_bytes.capacity() > 0);
-                        let reserve_size = raw_bytes.capacity().min(self.limits.bytes);
-
-                        self.limits.reserve_bytes(reserve_size)?;
-                        raw_bytes.reserve_exact(reserve_size);
-                    }
 
                     let buf_avail = raw_bytes.capacity() - raw_bytes.len();
                     let bytes_avail = min(buf.len(), buf_avail);
                     let n = min(*remaining, bytes_avail as u32);
-
                     let buf = &buf[..n as usize];
+
                     if !self.decode_options.ignore_crc {
                         crc.update(buf);
                     }
-                    raw_bytes.extend_from_slice(buf);
+
+                    if *action == ChunkAction::Process {
+                        if raw_bytes.len() == raw_bytes.capacity() {
+                            if self.limits.bytes == 0 {
+                                return Err(DecodingError::LimitsExceeded);
+                            }
+
+                            // Double the size of the Vec, but not beyond the allocation limit.
+                            debug_assert!(raw_bytes.capacity() > 0);
+                            let reserve_size = raw_bytes.capacity().min(self.limits.bytes);
+
+                            self.limits.reserve_bytes(reserve_size)?;
+                            raw_bytes.reserve_exact(reserve_size);
+                        }
+                        raw_bytes.extend_from_slice(buf);
+                    }
 
                     *remaining -= n;
                     if *remaining == 0 {
@@ -791,18 +803,6 @@ impl StreamingDecoder {
                     } else {
                         self.state = Some(ReadChunkData(type_str));
                     }
-                    Ok((n as usize, Decoded::Nothing))
-                }
-            }
-            SkipChunk(result) => {
-                let n = self.current_chunk.remaining.min(buf.len() as u32);
-
-                self.current_chunk.remaining -= n;
-                if self.current_chunk.remaining == 0 {
-                    self.state = Some(State::new_u32(U32ValueKind::Length));
-                    Ok((n as usize, result))
-                } else {
-                    self.state = Some(SkipChunk(result));
                     Ok((n as usize, Decoded::Nothing))
                 }
             }
@@ -944,15 +944,27 @@ impl StreamingDecoder {
                 };
 
                 if val == sum || CHECKSUM_DISABLED {
-                    // A fatal error in chunk parsing leaves the decoder in state 'None' to enforce
-                    // that parsing can't continue after an error.
-                    debug_assert!(self.state.is_none());
-                    let decoded = self.parse_chunk(type_str)?;
+                    match self.current_chunk.action {
+                        ChunkAction::Process => {
+                            // A fatal error in chunk parsing leaves the decoder in state 'None' to enforce
+                            // that parsing can't continue after an error.
+                            debug_assert!(self.state.is_none());
+                            let decoded = self.parse_chunk(type_str)?;
 
-                    if type_str != IEND {
-                        self.state = Some(State::new_u32(U32ValueKind::Length));
+                            if type_str != IEND {
+                                self.state = Some(State::new_u32(U32ValueKind::Length));
+                            }
+                            Ok(decoded)
+                        }
+                        ChunkAction::Skip => {
+                            self.state = Some(State::new_u32(U32ValueKind::Length));
+                            Ok(Decoded::SkippedAncillaryChunk(self.current_chunk.type_))
+                        }
+                        ChunkAction::Reject => {
+                            self.state = Some(State::new_u32(U32ValueKind::Length));
+                            Ok(Decoded::BadAncillaryChunk(type_str))
+                        }
                     }
-                    Ok(decoded)
                 } else if self.decode_options.skip_ancillary_crc_failures
                     && !chunk::is_critical(type_str)
                 {
@@ -1037,8 +1049,8 @@ impl StreamingDecoder {
                 ));
             }
             _ => {
-                self.current_chunk.remaining += 4; // Also skip the CRC
-                return Ok(State::SkipChunk(Decoded::SkippedAncillaryChunk(type_str)));
+                self.current_chunk.action = ChunkAction::Skip;
+                return Ok(State::ReadChunkData(type_str));
             }
         };
 
@@ -1052,10 +1064,11 @@ impl StreamingDecoder {
                     ));
                 }
                 _ => {
-                    self.current_chunk.remaining += 4; // Also skip the CRC
-                    return Ok(State::SkipChunk(Decoded::BadAncillaryChunk(type_str)));
+                    self.current_chunk.action = ChunkAction::Reject;
                 }
             }
+        } else {
+            self.current_chunk.action = ChunkAction::Process;
         }
 
         Ok(State::ReadChunkData(type_str))

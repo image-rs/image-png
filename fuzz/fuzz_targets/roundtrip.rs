@@ -23,6 +23,10 @@ fn encode_png<'a>(width: u8, filter: u8, compression: u8, color_type: u8, raw_bi
     let mut palette = raw_palette;
     let color_type = ColorType::from_u8(color_type)?;
     if let ColorType::Indexed = color_type {
+        if raw_palette.is_empty() || raw_palette.len() % 3 != 0 {
+            return None;
+        }
+
         // when palette is needed, ensure that palette.len() <= 2 ^ bit_depth
         if raw_palette.len() > max_palette_length {
             palette = &raw_palette[..max_palette_length];

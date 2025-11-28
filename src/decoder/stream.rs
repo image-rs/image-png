@@ -467,8 +467,10 @@ pub struct DecodeOptions {
     ignore_adler32: bool,
     ignore_crc: bool,
     ignore_text_chunk: bool,
+    ignore_exif_chunk: bool,
     ignore_iccp_chunk: bool,
     skip_ancillary_crc_failures: bool,
+    record_skipped_chunks: bool,
 }
 
 impl Default for DecodeOptions {
@@ -477,8 +479,10 @@ impl Default for DecodeOptions {
             ignore_adler32: true,
             ignore_crc: false,
             ignore_text_chunk: false,
+            ignore_exif_chunk: false,
             ignore_iccp_chunk: false,
             skip_ancillary_crc_failures: true,
+            record_skipped_chunks: false,
         }
     }
 }
@@ -510,6 +514,13 @@ impl DecodeOptions {
     /// Defaults to `false`.
     pub fn set_ignore_text_chunk(&mut self, ignore_text_chunk: bool) {
         self.ignore_text_chunk = ignore_text_chunk;
+    }
+
+    /// Ignore EXIF chunks while decoding.
+    ///
+    /// Defaults to `false`.
+    pub fn set_ignore_exif_chunk(&mut self, ignore_exif_chunk: bool) {
+        self.ignore_exif_chunk = ignore_exif_chunk;
     }
 
     /// Ignore ICCP chunks while decoding.
@@ -555,6 +566,11 @@ pub struct StreamingDecoder {
     have_iccp: bool,
     decode_options: DecodeOptions,
     pub(crate) limits: Limits,
+    pub(crate) stream_position: u64,
+
+    pub(crate) exif_position: Option<u64>,
+    pub(crate) iccp_position: Option<u64>,
+    pub(crate) text_chunk_positions: Vec<u64>,
 }
 
 struct ChunkState {
@@ -564,6 +580,9 @@ struct ChunkState {
 
     /// Partial crc until now.
     crc: Crc32,
+
+    /// Total bytes in the chunk.
+    total_bytes: u32,
 
     /// Remaining bytes to be read.
     remaining: u32,
@@ -580,6 +599,7 @@ enum ChunkAction {
     Process,
     Skip,
     Reject,
+    Record,
 }
 
 impl StreamingDecoder {
@@ -600,6 +620,7 @@ impl StreamingDecoder {
                 type_: ChunkType([0; 4]),
                 crc: Crc32::new(),
                 remaining: 0,
+                total_bytes: 0,
                 raw_bytes: Vec::with_capacity(CHUNK_BUFFER_SIZE),
                 action: ChunkAction::Process,
             },
@@ -612,6 +633,10 @@ impl StreamingDecoder {
             ready_for_fdat_chunks: false,
             decode_options,
             limits: Limits { bytes: usize::MAX },
+            stream_position: 0,
+            exif_position: None,
+            iccp_position: None,
+            text_chunk_positions: Vec::new(),
         }
     }
 
@@ -625,6 +650,7 @@ impl StreamingDecoder {
         self.info = None;
         self.current_seq_no = None;
         self.have_idat = false;
+        self.stream_position = 0;
     }
 
     /// Provides access to the inner `info` field
@@ -634,6 +660,10 @@ impl StreamingDecoder {
 
     pub fn set_ignore_text_chunk(&mut self, ignore_text_chunk: bool) {
         self.decode_options.set_ignore_text_chunk(ignore_text_chunk);
+    }
+
+    pub fn set_ignore_exif_chunk(&mut self, ignore_exif_chunk: bool) {
+        self.decode_options.set_ignore_exif_chunk(ignore_exif_chunk);
     }
 
     pub fn set_ignore_iccp_chunk(&mut self, ignore_iccp_chunk: bool) {
@@ -696,6 +726,7 @@ impl StreamingDecoder {
                 Ok((bytes, Decoded::Nothing)) => buf = &buf[bytes..],
                 Ok((bytes, result)) => {
                     buf = &buf[bytes..];
+                    self.stream_position += bytes as u64;
                     return Ok((len - buf.len(), result));
                 }
                 Err(err) => {
@@ -704,6 +735,7 @@ impl StreamingDecoder {
                 }
             }
         }
+        self.stream_position += (len - buf.len()) as u64;
         Ok((len - buf.len(), Decoded::Nothing))
     }
 
@@ -731,8 +763,13 @@ impl StreamingDecoder {
                     // values is that they occur fairly frequently and special-casing them results
                     // in performance gains.
                     const CONSUMED_BYTES: usize = 4;
-                    self.parse_u32(kind, &buf[0..4], image_data)
-                        .map(|decoded| (CONSUMED_BYTES, decoded))
+                    self.parse_u32(
+                        kind,
+                        &buf[0..4],
+                        image_data,
+                        self.stream_position + CONSUMED_BYTES as u64,
+                    )
+                    .map(|decoded| (CONSUMED_BYTES, decoded))
                 } else {
                     let remaining_count = 4 - accumulated_count;
                     let consumed_bytes = {
@@ -752,8 +789,13 @@ impl StreamingDecoder {
                         Ok((consumed_bytes, Decoded::Nothing))
                     } else {
                         debug_assert_eq!(accumulated_count, 4);
-                        self.parse_u32(kind, &bytes, image_data)
-                            .map(|decoded| (consumed_bytes, decoded))
+                        self.parse_u32(
+                            kind,
+                            &bytes,
+                            image_data,
+                            self.stream_position + consumed_bytes as u64,
+                        )
+                        .map(|decoded| (consumed_bytes, decoded))
                     }
                 }
             }
@@ -767,8 +809,8 @@ impl StreamingDecoder {
                         crc,
                         remaining,
                         raw_bytes,
-                        type_: _,
                         action,
+                        ..
                     } = &mut self.current_chunk;
 
                     let buf_avail = raw_bytes.capacity() - raw_bytes.len();
@@ -837,6 +879,7 @@ impl StreamingDecoder {
         kind: U32ValueKind,
         u32_be_bytes: &[u8],
         image_data: Option<&mut UnfilterBuf<'_>>,
+        stream_position: u64,
     ) -> Result<Decoded, DecodingError> {
         debug_assert_eq!(u32_be_bytes.len(), 4);
         let bytes = u32_be_bytes.try_into().unwrap();
@@ -898,6 +941,7 @@ impl StreamingDecoder {
                     self.current_chunk.crc.update(&type_str.0);
                 }
                 self.current_chunk.remaining = length;
+                self.current_chunk.total_bytes = length;
                 self.current_chunk.raw_bytes.clear();
 
                 self.state = match type_str {
@@ -958,11 +1002,16 @@ impl StreamingDecoder {
                         }
                         ChunkAction::Skip => {
                             self.state = Some(State::new_u32(U32ValueKind::Length));
-                            Ok(Decoded::SkippedAncillaryChunk(self.current_chunk.type_))
+                            Ok(Decoded::SkippedAncillaryChunk(type_str))
                         }
                         ChunkAction::Reject => {
                             self.state = Some(State::new_u32(U32ValueKind::Length));
                             Ok(Decoded::BadAncillaryChunk(type_str))
+                        }
+                        ChunkAction::Record => {
+                            self.record_ancillary_chunk(stream_position);
+                            self.state = Some(State::new_u32(U32ValueKind::Length));
+                            Ok(Decoded::SkippedAncillaryChunk(type_str))
                         }
                     }
                 } else if self.decode_options.skip_ancillary_crc_failures
@@ -1035,11 +1084,16 @@ impl StreamingDecoder {
             chunk::bKGD => 1..=6,
 
             // Unbounded size chunks
-            chunk::eXIf => 0..=u32::MAX >> 1, // TODO: allow skipping.
+            chunk::eXIf if !self.decode_options.ignore_exif_chunk => 0..=u32::MAX >> 1,
             chunk::iCCP if !self.decode_options.ignore_iccp_chunk => 0..=u32::MAX >> 1,
             chunk::tEXt if !self.decode_options.ignore_text_chunk => 0..=u32::MAX >> 1,
             chunk::zTXt if !self.decode_options.ignore_text_chunk => 0..=u32::MAX >> 1,
             chunk::iTXt if !self.decode_options.ignore_text_chunk => 0..=u32::MAX >> 1,
+            chunk::eXIf | chunk::iCCP | chunk::tEXt | chunk::zTXt | chunk::iTXt => {
+                // If the chunk type is being ignored, still record its position.
+                self.current_chunk.action = ChunkAction::Record;
+                return Ok(State::ReadChunkData(type_str));
+            }
 
             chunk::IDAT | chunk::fdAT => unreachable!(),
 
@@ -1072,6 +1126,33 @@ impl StreamingDecoder {
         }
 
         Ok(State::ReadChunkData(type_str))
+    }
+
+    fn record_ancillary_chunk(&mut self, stream_position: u64) {
+        if !self.decode_options.record_skipped_chunks {
+            return;
+        }
+
+        let chunk_start = stream_position - 8 - self.current_chunk.raw_bytes.len() as u64;
+
+        match self.current_chunk.type_ {
+            chunk::tEXt | chunk::zTXt | chunk::iTXt => {
+                if self.limits.reserve_bytes(8).is_ok() {
+                    self.text_chunk_positions.push(chunk_start);
+                }
+            }
+            chunk::eXIf => {
+                if self.exif_position.is_none() {
+                    self.exif_position = Some(chunk_start);
+                }
+            }
+            chunk::iCCP => {
+                if self.iccp_position.is_none() {
+                    self.iccp_position = Some(chunk_start);
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {

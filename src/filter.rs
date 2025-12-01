@@ -412,6 +412,31 @@ mod simd {
             c_bpp = b_bpp.try_into().unwrap();
         }
     }
+
+    pub fn up_unfilter(current: &mut [u8], previous: &[u8]) {
+        const STRIDE_BYTES: usize = 64; // Maximum supported width
+
+        let chunks = current.len() / STRIDE_BYTES;
+
+        let (simd_current, remainder_current) = current.split_at_mut(chunks * STRIDE_BYTES);
+        let (simd_previous, remainder_previous) = previous.split_at(chunks * STRIDE_BYTES);
+
+        let current_iter = simd_current.chunks_exact_mut(STRIDE_BYTES);
+        let previous_iter = simd_previous.chunks_exact(STRIDE_BYTES);
+        let combined_iter = current_iter.zip(previous_iter);
+
+        for (current_chunk, previous_chunk) in combined_iter {
+            let mut x: Simd<u8, STRIDE_BYTES> = Simd::<u8, STRIDE_BYTES>::from_slice(current_chunk);
+            let b: Simd<u8, STRIDE_BYTES> = Simd::<u8, STRIDE_BYTES>::from_slice(previous_chunk);
+            x = x + b; // Wrapping addition
+            x.copy_to_slice(current_chunk);
+        }
+
+        // Scalar remainder
+        for (curr, &above) in remainder_current.iter_mut().zip(remainder_previous) {
+            *curr = curr.wrapping_add(above);
+        }
+    }
 }
 
 // This code path is used on non-x86_64 architectures but we allow dead code
@@ -697,6 +722,11 @@ pub(crate) fn unfilter(
             }
         },
         Up => {
+            #[cfg(feature = "unstable")]
+            {
+                simd::up_unfilter(current, previous);
+                return;
+            }
             for (curr, &above) in current.iter_mut().zip(previous) {
                 *curr = curr.wrapping_add(above);
             }

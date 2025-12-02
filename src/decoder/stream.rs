@@ -915,6 +915,7 @@ impl StreamingDecoder {
                                 FormatErrorInner::FdatShorterThanFourBytes.into(),
                             ));
                         }
+                        self.current_chunk.action = ChunkAction::Process;
                         Some(State::new_u32(U32ValueKind::ApngSequenceNumber))
                     }
                     IDAT => {
@@ -927,6 +928,7 @@ impl StreamingDecoder {
                             ));
                         }
                         self.have_idat = true;
+                        self.current_chunk.action = ChunkAction::Process;
                         Some(State::ImageData(type_str))
                     }
                     _ => Some(self.start_chunk(type_str, length)?),

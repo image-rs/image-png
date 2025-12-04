@@ -211,6 +211,11 @@ impl UnfilterBuf<'_> {
         if decompressor.is_done() {
             *self.available = *self.filled;
         } else if let Some(new_available) = self.filled.checked_sub(Self::LOOKBACK_SIZE) {
+            // The decompressed data may have started in the middle of the buffer,
+            // so ensure that `self.available` never goes backward.  This is needed
+            // to avoid miscommunicating the size of the "look-back" window when calling
+            // `fdeflate::Decompressor::read` a bit earlier and passing
+            // `&mut self.buffer[*self.available..output_limit]`.
             if new_available > *self.available {
                 *self.available = new_available;
             }

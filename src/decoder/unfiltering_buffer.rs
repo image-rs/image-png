@@ -26,6 +26,9 @@ pub(crate) struct UnfilteringBuffer {
     available: usize,
     /// The number of bytes before we shift the buffer back.
     shift_back_limit: usize,
+    /// Size of the previously unfiltered row. For interlaced images this changes over time, from
+    /// pass to pass. Also if we get other subframes.
+    unfiltered_len: usize,
 }
 
 impl UnfilteringBuffer {
@@ -45,6 +48,9 @@ impl UnfilteringBuffer {
         debug_assert!(self.available <= self.filled);
         // The logically filled region is always within bounds of the data stream.
         debug_assert!(self.filled <= self.data_stream.len());
+        // Note: `unfiltered_len`, `prev_start` and `current_start` do not always hold, for
+        // instance at the end of an image, since we update some of this lazily. We do not care
+        // about that invariant right now.
     }
 
     /// Create a buffer tuned for filtering rows of the image type.
@@ -98,6 +104,7 @@ impl UnfilteringBuffer {
             filled: 0,
             available: 0,
             shift_back_limit,
+            unfiltered_len: 0,
         };
 
         result.debug_assert_invariants();
@@ -117,17 +124,13 @@ impl UnfilteringBuffer {
         self.current_start = 0;
         self.filled = 0;
         self.available = 0;
+        self.unfiltered_len = 0;
         self.debug_assert_invariants();
     }
 
     /// Returns the previous (already `unfilter`-ed) row.
     pub fn prev_row(&self) -> &[u8] {
-        &self.data_stream[self.prev_start..self.current_start]
-    }
-
-    /// Returns how many bytes of the current row are present in the buffer.
-    pub fn curr_row_len(&self) -> usize {
-        self.available - self.current_start
+        &self.data_stream[self.prev_start..self.current_start][..self.unfiltered_len]
     }
 
     /// Returns how many bytes of the current row are available in the buffer in the mutable region.
@@ -233,6 +236,7 @@ impl UnfilteringBuffer {
 
         self.prev_start = self.current_start + 1;
         self.current_start += rowlen;
+        self.unfiltered_len = row.len();
 
         self.debug_assert_invariants();
 
@@ -265,7 +269,7 @@ impl UnfilteringBuffer {
         // so just put it right before the minimum of `current_start` and `available`. In this case
         // however we should also pass an empty row to `unfilter`.
         if self.prev_start == self.current_start {
-            let potential_end_of_new_prev = self.current_start.min(self.available);
+            let potential_end_of_new_prev = self.prev_start.min(self.available);
             // Insert free space between what we treat as the previous row and the current row.
             // NOTE: this is because of the decoder's `commit` function which will take a fixed
             // window of data back from its filled state before it is done. But we move that region
@@ -302,6 +306,7 @@ impl UnfilteringBuffer {
 
             prev.copy_from_slice(&row[1..rowlen]);
             unfilter(filter, bpp, &[], prev);
+            self.unfiltered_len = prev.len();
 
             self.prev_start = start_of_new_prev;
             self.current_start += rowlen;
@@ -333,6 +338,7 @@ impl UnfilteringBuffer {
 
             // Do NOT modify prev_start
             self.current_start += rowlen;
+            self.unfiltered_len = prev.len();
             self.debug_assert_invariants();
 
             Ok(true)

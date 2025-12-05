@@ -589,7 +589,7 @@ impl<R: BufRead + Seek> Reader<R> {
     ) -> Result<(), DecodingError> {
         self.next_raw_interlaced_row(rowlen)?;
         let row = self.unfiltering_buffer.prev_row();
-        let row = &row[..rowlen - 1];
+        debug_assert_eq!(row.len(), rowlen - 1);
 
         // Apply transformations and write resulting data to buffer.
         let transform_fn = {

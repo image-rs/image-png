@@ -127,27 +127,59 @@ impl ZlibStream {
     pub(crate) fn finish_compressed_chunks(
         &mut self,
         image_data: &mut UnfilterBuf<'_>,
-    ) -> Result<(), DecodingError> {
+    ) -> Result<Flush, DecodingError> {
         if !self.started {
-            return Ok(());
+            return Ok(Flush::Complete);
         }
 
         if self.state.is_done() {
             // We can end up here only after the [`decompress`] call above has detected the state
             // to be done, too. In this case the filled and committed amount of data are already
             // equal to each other. So neither of them needs to be touched in any way.
-            return Ok(());
+            return Ok(Flush::Complete);
         }
 
+        // First read without indicating an end. The caller can then react to the total amount of
+        // available bytes in this stream, before we check for an _missing_ end of stream. This
+        // ensures that the error signalled on a missing EOF is consistent no matter into which
+        // slices the input file has been split when passed to the decoder.
+        let mut eof_input = Some(&[][..]);
+        let mut decompression_produced = 0;
+
         while !self.state.is_done() {
-            let _in_consumed = image_data.decompress(&mut self.state, None)?;
+            let in_consumed = image_data.decompress(&mut self.state, eof_input)?;
+            decompression_produced += in_consumed;
+
+            if in_consumed == 0 {
+                if decompression_produced > 0 {
+                    return Ok(Flush::ProducedMoreData);
+                };
+
+                // There is no more data produced and we have no more input. We're done. As a final
+                // step we offer all decompressed bytes to be unfiltered. Maybe it's incidentally
+                // enough. If not, we will reach this point again with the condition being `false`.
+                // We then let the decompressor fail with an appropriate error if it has not
+                // reached its end of stream.
+                if image_data.commit_all_and_check_for_more() {
+                    return Ok(Flush::ProducedMoreData);
+                }
+
+                // Now indicate EOF input for the next read, causing an error if there was no EOF.
+                eof_input = None;
+            }
+
             if !self.state.is_done() {
                 image_data.grow_buffer_if_needed_for_final_flushing();
             }
         }
 
-        Ok(())
+        Ok(Flush::Complete)
     }
+}
+
+pub(crate) enum Flush {
+    ProducedMoreData,
+    Complete,
 }
 
 impl UnfilterRegion {
@@ -208,6 +240,7 @@ impl UnfilterBuf<'_> {
             })?;
 
         *self.filled += out_consumed;
+
         if decompressor.is_done() {
             *self.available = *self.filled;
         } else if let Some(new_available) = self.filled.checked_sub(Self::LOOKBACK_SIZE) {
@@ -235,5 +268,16 @@ impl UnfilterBuf<'_> {
             let len = self.buffer.len() + SIZE_DELTA;
             self.buffer.resize(len, 0);
         }
+    }
+
+    /// Effectively close the stream, making all bytes available.
+    ///
+    /// Returns if that made any more bytes available.
+    pub(crate) fn commit_all_and_check_for_more(&mut self) -> bool {
+        let available = *self.available;
+        let filled = *self.filled;
+
+        *self.available = filled;
+        available != filled
     }
 }

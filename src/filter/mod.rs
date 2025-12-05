@@ -309,6 +309,11 @@ pub(crate) fn unfilter(
                 }
             }
             BytesPerPixel::Four => {
+                #[cfg(feature = "unstable")]
+                {
+                    simd::avg_unfilter_bpp4(current, previous);
+                    return;
+                }
                 let mut lprev = [0; 4];
                 for (chunk, above) in current.chunks_exact_mut(4).zip(previous.chunks_exact(4)) {
                     let new_chunk = [

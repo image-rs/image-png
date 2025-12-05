@@ -48,6 +48,10 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
         self.decoder.set_ignore_text_chunk(ignore_text_chunk);
     }
 
+    pub fn set_ignore_exif_chunk(&mut self, ignore_exif_chunk: bool) {
+        self.decoder.set_ignore_exif_chunk(ignore_exif_chunk);
+    }
+
     pub fn set_ignore_iccp_chunk(&mut self, ignore_iccp_chunk: bool) {
         self.decoder.set_ignore_iccp_chunk(ignore_iccp_chunk);
     }
@@ -143,6 +147,29 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
 
     pub fn info(&self) -> Option<&Info<'static>> {
         self.decoder.info.as_ref()
+    }
+
+    pub fn read_exif(&mut self) -> Result<Option<Vec<u8>>, DecodingError> {
+        let Some(position) = self.decoder.exif_position else {
+            return Ok(None);
+        };
+
+        let offset = self.decoder.stream_position as i64 - position as i64;
+        self.reader.seek_relative(offset)?;
+
+        let mut length_buf = [0u8; 4];
+        self.reader.read_exact(&mut length_buf)?;
+        let length = u32::from_be_bytes(length_buf);
+
+        self.reader.seek_relative(4)?;
+
+        let mut exif_data = Vec::new();
+        (&mut self.reader)
+            .take(length.into())
+            .read_to_end(&mut exif_data)?;
+
+        self.reader.seek_relative(-offset)?;
+        Ok(Some(exif_data))
     }
 }
 

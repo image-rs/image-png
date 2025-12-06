@@ -130,18 +130,19 @@ impl UnfilteringBuffer {
         self.available - self.current_start
     }
 
-    /// Returns how many bytes of the current row are available in the buffer.
+    /// Returns how many bytes of the current row are available in the buffer in the mutable region.
     ///
-    /// Why negative? There's a backreference section in the buffer that is reserved for the zlib /
+    /// A return value of `0` indicates that no mutable row is available. You can still try to read
+    /// ahead.
+    ///
+    /// Background: There's a backreference section in the buffer that is reserved for the zlib /
     /// deflate decoder (or any other for that matter). We must not modify that part of the data
-    /// but if we only *read* the row then the start of our current_start is allowed to run _into_
+    /// but if we only *read* the row then the start of our current_start is allowed to run into
     /// that section. So as a less efficient fallback where partial data is crucial we can unfilter
     /// outside the read area instead of in-place but still indicate how many bytes we have
-    /// consumed. In that case, this number is negative.
-    pub(crate) fn curr_row_len_with_unfilter_ahead(&self) -> isize {
-        // Both are indices into the buffer that is an allocation of bytes. Allocations are at most
-        // isize::MAX in size hence this is valid.
-        self.available as isize - self.current_start as isize
+    /// consumed. This lets you check if the fallback path is needed.
+    pub(crate) fn mutable_rowdata_length(&self) -> usize {
+        self.available.saturating_sub(self.current_start)
     }
 
     /// Returns a `&mut Vec<u8>` suitable for passing to
@@ -211,7 +212,7 @@ impl UnfilteringBuffer {
     ) -> Result<(), DecodingError> {
         debug_assert!(rowlen >= 2); // 1 byte for `FilterType` and at least 1 byte of pixel data.
         debug_assert_eq!(rowlen as isize as usize, rowlen);
-        debug_assert!(self.curr_row_len_with_unfilter_ahead() >= rowlen as isize);
+        debug_assert!(self.mutable_rowdata_length() >= rowlen);
 
         let (prev, row) = self.data_stream.split_at_mut(self.current_start);
         let prev: &[u8] = &prev[self.prev_start..];

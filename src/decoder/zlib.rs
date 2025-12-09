@@ -177,7 +177,7 @@ impl UnfilterBuf<'_> {
     /// `fdeflate` requires that we keep this many most recently decompressed bytes in the
     /// `out_buffer` - this allows referring back to them when handling "length and distance
     /// codes" in the deflate stream).
-    const LOOKBACK_SIZE: usize = 32768;
+    pub(crate) const LOOKBACK_SIZE: usize = 32768;
 
     /// Pushes `input` into `fdeflate` crate and appends decompressed bytes to `self.buffer`
     /// (adjusting `self.filled` and `self.available` depending on how many bytes have been

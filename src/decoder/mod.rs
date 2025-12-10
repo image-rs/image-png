@@ -699,7 +699,7 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Unfilter the next raw interlaced row into `self.unfiltering_buffer`.
     fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
         // Read image data until we have at least one full row (but possibly more than one).
-        while self.unfiltering_buffer.curr_row_len() < rowlen {
+        while self.unfiltering_buffer.mutable_len_of_curr_row() < rowlen {
             if self.subframe.consumed_and_flushed {
                 return Err(DecodingError::Format(
                     FormatErrorInner::NoMoreImageData.into(),
@@ -709,15 +709,24 @@ impl<R: BufRead + Seek> Reader<R> {
             assert!(self.unfiltering_buffer.remaining_bytes() > 0);
             let completion_status = self
                 .unfiltering_buffer
-                .with_unfilled_buffer(|buffer| self.decoder.decode_image_data(Some(buffer)))?;
-
+                .with_unfilled_buffer(|buffer| self.decoder.decode_image_data(Some(buffer)));
             match completion_status {
-                ImageDataCompletionStatus::ExpectingMoreData => (),
-                ImageDataCompletionStatus::Done => self.mark_subframe_as_consumed_and_flushed(),
+                Ok(ImageDataCompletionStatus::ExpectingMoreData) => (),
+                Ok(ImageDataCompletionStatus::Done) => self.mark_subframe_as_consumed_and_flushed(),
+                Err(DecodingError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof
+                        && self.unfiltering_buffer.readable_len_of_curr_row() >= rowlen =>
+                {
+                    return self
+                        .unfiltering_buffer
+                        .unfilter_curr_row_using_scratch_buffer(rowlen, self.bpp);
+                }
+                Err(other_error) => return Err(other_error),
             }
         }
 
-        self.unfiltering_buffer.unfilter_curr_row(rowlen, self.bpp)
+        self.unfiltering_buffer
+            .unfilter_curr_row_in_place(rowlen, self.bpp)
     }
 }
 

@@ -132,6 +132,7 @@ impl UnfilteringBuffer {
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
     pub fn as_unfilled_buffer(&mut self) -> UnfilterBuf<'_> {
+        // Potentially shift the buffer left to avoid unbounded growth.
         if self.prev_start >= self.shift_back_limit
             // Avoid the shift back if the buffer is still very empty. Consider how we got here: a
             // previous decompression filled the buffer, then we unfiltered, we're now refilling
@@ -140,25 +141,7 @@ impl UnfilteringBuffer {
             // attempt will not yet be limited by the buffer length.
             && self.filled >= self.data_stream.len() / 2
         {
-            // We have to relocate the data to the start of the buffer. Benchmarking suggests that
-            // the codegen for an unbounded range is better / different than the one for a bounded
-            // range. We prefer the former if the data overhead is not too high. `16` was
-            // determined experimentally and might be system (memory) dependent. There's also the
-            // question if we could be a little smarter and avoid crossing page boundaries when
-            // that is not required. Alas, microbenchmarking TBD.
-            if let Some(16..) = self.data_stream.len().checked_sub(self.filled) {
-                self.data_stream
-                    .copy_within(self.prev_start..self.filled, 0);
-            } else {
-                self.data_stream.copy_within(self.prev_start.., 0);
-            }
-
-            // The data kept its relative position to `filled` which now lands exactly at
-            // the distance between prev_start and filled.
-            self.current_start -= self.prev_start;
-            self.available -= self.prev_start;
-            self.filled -= self.prev_start;
-            self.prev_start = 0;
+            self.shift_buffer_left(self.prev_start);
         }
 
         if self.filled + Self::GROWTH_BYTES > self.data_stream.len() {
@@ -170,6 +153,33 @@ impl UnfilteringBuffer {
             filled: &mut self.filled,
             available: &mut self.available,
         }
+    }
+
+    /// Shifts the contents of `self.data_stream` left,
+    /// discarding the first `discard_size` bytes.
+    fn shift_buffer_left(&mut self, discard_size: usize) {
+        // Violating this assertion will clobber the immutable "lookback"
+        // window that needs to be maintained for decompresor.
+        assert!(discard_size <= self.available);
+
+        // We have to relocate the data to the start of the buffer. Benchmarking suggests that
+        // the codegen for an unbounded range is better / different than the one for a bounded
+        // range. We prefer the former if the data overhead is not too high. `16` was
+        // determined experimentally and might be system (memory) dependent. There's also the
+        // question if we could be a little smarter and avoid crossing page boundaries when
+        // that is not required. Alas, microbenchmarking TBD.
+        if let Some(16..) = self.data_stream.len().checked_sub(self.filled) {
+            self.data_stream.copy_within(discard_size..self.filled, 0);
+        } else {
+            self.data_stream.copy_within(discard_size.., 0);
+        }
+
+        // The data kept its relative position to `filled` which now lands exactly at
+        // the distance between prev_start and filled.
+        self.current_start -= discard_size;
+        self.available -= discard_size;
+        self.filled -= discard_size;
+        self.prev_start -= discard_size;
     }
 
     /// Runs `unfilter` on the current row, and then shifts rows so that the current row becomes the previous row.

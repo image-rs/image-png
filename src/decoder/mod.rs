@@ -480,9 +480,16 @@ impl<R: BufRead + Seek> Reader<R> {
         // `finish_decoding` call below won't be discarding any data).
         assert!(self.subframe.current_interlace_info.is_none());
 
-        // Discard the remaining data in the current sequence of `IDAT` or `fdAT` chunks.
+        // Process the remaining data in the current sequence of `IDAT` or `fdAT` chunks.
         if !self.subframe.consumed_and_flushed {
-            self.decoder.finish_decoding_image_data()?;
+            // At this point all rows have been already read, so the remaining
+            // image data could be discarded in theory.  Nevertheless, `buffer`
+            // needs to be provided to ensure that `ZlibStream::finish_compressed_chunks`
+            // is always called - this helps to ensure that input buffering doesn't
+            // affect whether `ZlibStream` errors are deterministically reported.
+            // See also `test_partial_decode_with_unterminated_redundant_zlib_tail`.
+            let mut buffer = self.unfiltering_buffer.as_unfilled_buffer();
+            self.decoder.finish_decoding_image_data(&mut buffer)?;
             self.mark_subframe_as_consumed_and_flushed();
         }
 
@@ -679,7 +686,7 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Unfilter the next raw interlaced row into `self.unfiltering_buffer`.
     fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
         // Read image data until we have at least one full row (but possibly more than one).
-        while self.unfiltering_buffer.curr_row_len() < rowlen {
+        while self.unfiltering_buffer.mutable_len_of_curr_row() < rowlen {
             if self.subframe.consumed_and_flushed {
                 return Err(DecodingError::Format(
                     FormatErrorInner::NoMoreImageData.into(),
@@ -687,13 +694,23 @@ impl<R: BufRead + Seek> Reader<R> {
             }
 
             let mut buffer = self.unfiltering_buffer.as_unfilled_buffer();
-            match self.decoder.decode_image_data(Some(&mut buffer))? {
-                ImageDataCompletionStatus::ExpectingMoreData => (),
-                ImageDataCompletionStatus::Done => self.mark_subframe_as_consumed_and_flushed(),
+            match self.decoder.decode_image_data(&mut buffer) {
+                Ok(ImageDataCompletionStatus::ExpectingMoreData) => (),
+                Ok(ImageDataCompletionStatus::Done) => self.mark_subframe_as_consumed_and_flushed(),
+                Err(DecodingError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof
+                        && self.unfiltering_buffer.readable_len_of_curr_row() >= rowlen =>
+                {
+                    return self
+                        .unfiltering_buffer
+                        .unfilter_curr_row_using_scratch_buffer(rowlen, self.bpp);
+                }
+                Err(other_error) => return Err(other_error),
             }
         }
 
-        self.unfiltering_buffer.unfilter_curr_row(rowlen, self.bpp)
+        self.unfiltering_buffer
+            .unfilter_curr_row_in_place(rowlen, self.bpp)
     }
 }
 

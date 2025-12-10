@@ -209,6 +209,13 @@ impl UnfilteringBuffer {
         self.prev_start -= discard_size;
     }
 
+    fn curr_row_filter(&self) -> Result<RowFilter, DecodingError> {
+        let filter = self.data_stream[self.current_start];
+        RowFilter::from_u8(filter).ok_or(DecodingError::Format(
+            FormatErrorInner::UnknownFilterMethod(filter).into(),
+        ))
+    }
+
     /// Runs `unfilter` on the current row, and then shifts rows so that the current row becomes the previous row.
     ///
     /// Will panic if `self.curr_row_len() < rowlen`.
@@ -217,24 +224,18 @@ impl UnfilteringBuffer {
         rowlen: usize,
         bpp: BytesPerPixel,
     ) -> Result<(), DecodingError> {
-        debug_assert!(rowlen >= 2); // 1 byte for `FilterType` and at least 1 byte of pixel data.
+        debug_assert!(rowlen >= 2); // 1 byte for `RowFilter` and at least 1 byte of pixel data.
 
+        let filter = self.curr_row_filter()?;
         let (prev, row) = self.data_stream.split_at_mut(self.current_start);
         let prev: &[u8] = &prev[self.prev_start..];
-
-        debug_assert!(prev.is_empty() || prev.len() == (rowlen - 1));
-
-        // Get the filter type.
-        let filter = RowFilter::from_u8(row[0]).ok_or(DecodingError::Format(
-            FormatErrorInner::UnknownFilterMethod(row[0]).into(),
-        ))?;
-        let row = &mut row[1..rowlen];
+        let row = &mut row[1..rowlen]; // Skip the `RowFilter` byte.
+        debug_assert!(prev.is_empty() || prev.len() == row.len());
 
         unfilter(filter, bpp, prev, row);
 
         self.prev_start = self.current_start + 1;
         self.current_start += rowlen;
-
         self.debug_assert_invariants();
 
         Ok(())

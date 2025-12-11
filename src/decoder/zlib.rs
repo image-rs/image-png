@@ -133,11 +133,21 @@ impl ZlibStream {
     /// Returns `Ok(true)` if all data has been decompressed and there is no
     /// more data that will be produced, or `Ok(false)` if there's potentially
     /// more output.
+    ///
+    /// Returns `Err` if the zlib stream is corrupt or truncated too early.
     pub(crate) fn finish(
         &mut self,
         image_data: &mut UnfilterBuf<'_>,
     ) -> Result<bool, DecodingError> {
-        if !self.started || self.state.is_done() || *image_data.filled == image_data.buffer.len() {
+        if !self.started || self.state.is_done() {
+            return Ok(true);
+        }
+
+        // If the zlib stream isn't done but we've already output all the pixel
+        // data needed, then either there's too much compressed data or the
+        // checksum is missing. Those aren't allowed by the spec, but libpng
+        // generally doesn't treat them as fatal.
+        if *image_data.filled == image_data.buffer.len() {
             return Ok(true);
         }
 
@@ -147,28 +157,37 @@ impl ZlibStream {
                 &[],
                 &mut image_data.buffer[*image_data.available..],
                 *image_data.filled - *image_data.available,
-                true,
+                false,
             )
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
             })?;
-
         *image_data.filled += out_consumed;
+
+        if self.state.is_done() {
+            *image_data.available = *image_data.filled;
+            return Ok(true);
+        }
 
         // More output is only possible if zlib stream hasn't finished and the
         // output buffer *is* full. (Empty space in the output buffer tells us
         // there wasn't more data to write into it.)
-        let more_output_expected =
-            !self.state.is_done() && *image_data.filled == image_data.buffer.len();
-
-        if more_output_expected {
+        if *image_data.filled == image_data.buffer.len() {
             *image_data.available =
                 (*image_data.available).max(image_data.filled.saturating_sub(LOOKBACK_SIZE));
-            Ok(false)
-        } else {
-            *image_data.available = *image_data.filled;
-            Ok(true)
+            return Ok(false);
         }
+
+        // The zlib stream was truncated before the end of the pixel data. This
+        // would ordinarily be caught within fdeflate if we'd passed
+        // end_of_input=true. But we intentionally don't pass that flag so that
+        // we're able to drain all available pixel data first.
+        Err(DecodingError::Format(
+            FormatErrorInner::CorruptFlateStream {
+                err: fdeflate::DecompressionError::InsufficientInput,
+            }
+            .into(),
+        ))
     }
 }
 

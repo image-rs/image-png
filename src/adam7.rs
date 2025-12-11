@@ -79,7 +79,7 @@ impl Adam7Info {
 }
 
 #[derive(Clone, Copy)]
-struct PassConstants {
+pub(crate) struct PassConstants {
     x_sampling: u8,
     x_offset: u8,
     y_sampling: u8,
@@ -95,13 +95,13 @@ impl PassConstants {
         self.y_sampling - self.y_offset
     }
 
-    fn count_samples(self, width: u32) -> u32 {
+    pub fn count_samples(self, width: u32) -> u32 {
         width
             .saturating_sub(u32::from(self.x_offset))
             .div_ceil(u32::from(self.x_sampling))
     }
 
-    fn count_lines(self, height: u32) -> u32 {
+    pub fn count_lines(self, height: u32) -> u32 {
         height
             .saturating_sub(u32::from(self.y_offset))
             .div_ceil(u32::from(self.y_sampling))

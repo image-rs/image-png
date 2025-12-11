@@ -881,23 +881,27 @@ impl StreamingDecoder {
                         None => true,
                     };
 
-                    if finished {
-                        self.state = Some(State::U32 {
-                            kind,
-                            bytes,
-                            accumulated_count: 4,
-                        });
+                    // We ended up handling IDAT/fdAT data rather than the chunk
+                    // type header atually received. Thus rewind `self.state` to
+                    // what it was before this function was called.
+                    self.state = Some(State::U32 {
+                        kind,
+                        bytes,
+                        accumulated_count: 4 - consumed_bytes,
+                    });
 
+                    if finished {
+                        // We've processed all the image data necessary. Update
+                        // `current_chunk.type_`so this codepath isn't taken
+                        // again next time.
                         self.current_chunk.type_ = type_str;
                         self.ready_for_idat_chunks = false;
                         self.ready_for_fdat_chunks = false;
-                        return Ok((consumed_bytes, Decoded::ImageDataFlushed));
+                        return Ok((0, Decoded::ImageDataFlushed));
                     } else {
-                        self.state = Some(State::U32 {
-                            kind,
-                            bytes,
-                            accumulated_count: 4 - consumed_bytes,
-                        });
+                        // Report that we processed some image data without
+                        // consuming any input. This gives the caller a chance
+                        // to grow the output buffer and call us again.
                         return Ok((0, Decoded::ImageData));
                     }
                 }

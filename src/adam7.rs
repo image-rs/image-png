@@ -41,7 +41,7 @@ impl Adam7Info {
     /// * `width` describes how many pixels are in a full row of the image. The bytes in each
     ///   passline of the Adam7 are calculated from this number.
     ///
-    /// Note that in typical usage, `Adam7Info`s are returned by [Reader.next_interlaced_row]
+    /// Note that in typical usage, `Adam7Info`s are returned by [`Reader::next_interlaced_row`](crate::decoder::Reader::next_interlaced_row)
     /// and there is no need to create them by calling `Adam7Info::new`.  `Adam7Info::new` is
     /// nevertheless exposed as a public API, because it helps to provide self-contained example
     /// usage of [expand_interlaced_row](crate::expand_interlaced_row).

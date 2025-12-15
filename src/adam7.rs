@@ -6,7 +6,7 @@ use core::ops::RangeTo;
 /// [the Adam7 algorithm](https://en.wikipedia.org/wiki/Adam7_algorithm)
 /// applies to a decoded row.
 ///
-/// See also [Reader.next_interlaced_row](crate::decoder::Reader::next_interlaced_row).
+/// See also [`Reader::next_interlaced_row`](crate::decoder::Reader::next_interlaced_row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Adam7Info {
     /// The Adam7 pass number, 1..7.
@@ -44,7 +44,7 @@ impl Adam7Info {
     /// Note that in typical usage, `Adam7Info`s are returned by [`Reader::next_interlaced_row`](crate::decoder::Reader::next_interlaced_row)
     /// and there is no need to create them by calling `Adam7Info::new`.  `Adam7Info::new` is
     /// nevertheless exposed as a public API, because it helps to provide self-contained example
-    /// usage of [expand_interlaced_row](crate::expand_interlaced_row).
+    /// usage of [`expand_interlaced_row`](crate::expand_interlaced_row).
     pub fn new(pass: u8, line: u32, width: u32) -> Self {
         assert!(1 <= pass && pass <= 7);
         assert!(width > 0);
@@ -221,7 +221,9 @@ pub enum Adam7Variant {
     /// are complete. At least the invalid pixels in the buffer should be masked. However, this
     /// performs the least amount of writes and is optimal when you're only reading full frames.
     ///
-    /// This corresponds to [`crate::expand_interlaced_row`].
+    /// This corresponds to [`expand_interlaced_row`].
+    ///
+    /// [`expand_interlaced_row`]: crate::expand_interlaced_row.
     #[default]
     Sparse,
     /// A variant of the Adam7 de-interlace that ensures that all pixels are initialized after each
@@ -229,7 +231,9 @@ pub enum Adam7Variant {
     /// other variant as some pixels are touched repeatedly, but ensures the buffer can be used as
     /// directly as possible for presentation.
     ///
-    /// This corresponds to [`crate::splat_interlaced_row`].
+    /// This corresponds to [`splat_interlaced_row`].
+    ///
+    /// [`splat_interlaced_row`]: crate::splat_interlaced_row
     Splat,
 }
 
@@ -313,11 +317,13 @@ fn expand_adam7_bytes(
 /// stride may be useful if the frame being decoded is a sub-region of `img`.
 ///
 /// `interlaced_row` and `interlace_info` typically come from
-/// [crate::decoder::Reader::next_interlaced_row], but this is not required.  In particular, before
+/// [`Reader::next_interlaced_row`], but this is not required.  In particular, before
 /// calling `expand_interlaced_row` one may need to expand the decoded row, so that its format and
 /// `bits_per_pixel` matches that of `img`.  Note that in initial Adam7 passes the `interlaced_row`
 /// may contain less pixels that the width of the frame being decoded (e.g. it contains only 1/8th
 /// of pixels in the initial pass).
+///
+/// [`Reader::next_interlaced_row`]: crate::decoder::Reader::next_interlaced_row
 ///
 /// Example:
 ///

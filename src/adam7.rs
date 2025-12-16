@@ -2,11 +2,14 @@
 //! [the Adam7 algorithm](https://en.wikipedia.org/wiki/Adam7_algorithm).
 use core::ops::RangeTo;
 
+#[cfg(doc)]
+use crate::decoder::Reader;
+
 /// Describes which stage of
 /// [the Adam7 algorithm](https://en.wikipedia.org/wiki/Adam7_algorithm)
 /// applies to a decoded row.
 ///
-/// See also [`Reader::next_interlaced_row`](crate::decoder::Reader::next_interlaced_row).
+/// See also [`Reader::next_interlaced_row`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Adam7Info {
     /// The Adam7 pass number, 1..7.
@@ -41,7 +44,7 @@ impl Adam7Info {
     /// * `width` describes how many pixels are in a full row of the image. The bytes in each
     ///   passline of the Adam7 are calculated from this number.
     ///
-    /// Note that in typical usage, `Adam7Info`s are returned by [`Reader::next_interlaced_row`](crate::decoder::Reader::next_interlaced_row)
+    /// Note that in typical usage, `Adam7Info`s are returned by [`Reader::next_interlaced_row`]
     /// and there is no need to create them by calling `Adam7Info::new`.  `Adam7Info::new` is
     /// nevertheless exposed as a public API, because it helps to provide self-contained example
     /// usage of [`expand_interlaced_row`](crate::expand_interlaced_row).
@@ -322,8 +325,6 @@ fn expand_adam7_bytes(
 /// `bits_per_pixel` matches that of `img`.  Note that in initial Adam7 passes the `interlaced_row`
 /// may contain less pixels that the width of the frame being decoded (e.g. it contains only 1/8th
 /// of pixels in the initial pass).
-///
-/// [`Reader::next_interlaced_row`]: crate::decoder::Reader::next_interlaced_row
 ///
 /// Example:
 ///

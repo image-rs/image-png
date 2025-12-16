@@ -180,8 +180,10 @@ impl<R: BufRead + Seek> Decoder<R> {
 
     /// Read the PNG header and return the information contained within.
     ///
-    /// Most image metadata will not be read until `read_info` is called, so those fields will be
+    /// Most image metadata will not be read until [`read_info`] is called, so those fields will be
     /// None or empty.
+    ///
+    /// [`read_info`]: Self::read_info
     pub fn read_header_info(&mut self) -> Result<&Info<'static>, DecodingError> {
         self.read_decoder.read_header_info()
     }
@@ -325,7 +327,7 @@ struct SubframeInfo {
 
 impl<R: BufRead + Seek> Reader<R> {
     /// Advances to the start of the next animation frame and
-    /// returns a reference to the `FrameControl` info that describes it.
+    /// returns a reference to the [`FrameControl`] info that describes it.
     /// Skips and discards the image data of the previous frame if necessary.
     ///
     /// Returns a [`ParameterError`] when there are no more animation frames.
@@ -389,7 +391,7 @@ impl<R: BufRead + Seek> Reader<R> {
     ///
     /// The caller must always provide a buffer large enough to hold a complete frame (the APNG
     /// specification restricts subframes to the dimensions given in the image header). The region
-    /// that has been written be checked afterwards by calling `info` after a successful call and
+    /// that has been written be checked afterwards by calling [`Reader::info`] after a successful call and
     /// inspecting the `frame_control` data. This requirement may be lifted in a later version of
     /// `png`.
     ///
@@ -492,7 +494,7 @@ impl<R: BufRead + Seek> Reader<R> {
         Ok(())
     }
 
-    /// Returns the next processed row of the image (discarding `InterlaceInfo`).
+    /// Returns the next processed row of the image (discarding [`InterlaceInfo`]).
     ///
     /// See also [`Reader::read_row`], which reads into a caller-provided buffer.
     pub fn next_row(&mut self) -> Result<Option<Row<'_>>, DecodingError> {

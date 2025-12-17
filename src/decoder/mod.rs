@@ -610,7 +610,7 @@ impl<R: BufRead + Seek> Reader<R> {
     }
 
     /// Returns the color type and the number of bits per sample
-    /// of the data returned by [`Reader::next_row`] and Reader::frames`.
+    /// of the data returned by [`Reader::next_row`] and [`Reader::next_frame`].
     pub fn output_color_type(&self) -> (ColorType, BitDepth) {
         use crate::common::ColorType::*;
         let t = self.transform;

@@ -180,8 +180,10 @@ impl<R: BufRead + Seek> Decoder<R> {
 
     /// Read the PNG header and return the information contained within.
     ///
-    /// Most image metadata will not be read until `read_info` is called, so those fields will be
+    /// Most image metadata will not be read until [`read_info`] is called, so those fields will be
     /// None or empty.
+    ///
+    /// [`read_info`]: Self::read_info
     pub fn read_header_info(&mut self) -> Result<&Info<'static>, DecodingError> {
         self.read_decoder.read_header_info()
     }
@@ -325,12 +327,15 @@ struct SubframeInfo {
 
 impl<R: BufRead + Seek> Reader<R> {
     /// Advances to the start of the next animation frame and
-    /// returns a reference to the `FrameControl` info that describes it.
+    /// returns a reference to the [`FrameControl`] info that describes it.
     /// Skips and discards the image data of the previous frame if necessary.
     ///
     /// Returns a [`ParameterError`] when there are no more animation frames.
     /// To avoid this the caller can check if [`Info::animation_control`] exists
     /// and consult [`AnimationControl::num_frames`].
+    ///
+    /// [`ParameterError`]: crate::ParameterError
+    /// [`AnimationControl::num_frames`]: crate::AnimationControl::num_frames
     pub fn next_frame_info(&mut self) -> Result<&FrameControl, DecodingError> {
         let remaining_frames = if self.subframe.consumed_and_flushed {
             self.remaining_frames
@@ -386,7 +391,7 @@ impl<R: BufRead + Seek> Reader<R> {
     ///
     /// The caller must always provide a buffer large enough to hold a complete frame (the APNG
     /// specification restricts subframes to the dimensions given in the image header). The region
-    /// that has been written be checked afterwards by calling `info` after a successful call and
+    /// that has been written be checked afterwards by calling [`Reader::info`] after a successful call and
     /// inspecting the `frame_control` data. This requirement may be lifted in a later version of
     /// `png`.
     ///
@@ -489,9 +494,9 @@ impl<R: BufRead + Seek> Reader<R> {
         Ok(())
     }
 
-    /// Returns the next processed row of the image (discarding `InterlaceInfo`).
+    /// Returns the next processed row of the image (discarding [`InterlaceInfo`]).
     ///
-    /// See also [`Reader.read_row`], which reads into a caller-provided buffer.
+    /// See also [`Reader::read_row`], which reads into a caller-provided buffer.
     pub fn next_row(&mut self) -> Result<Option<Row<'_>>, DecodingError> {
         self.next_interlaced_row()
             .map(|v| v.map(|v| Row { data: v.data }))
@@ -499,7 +504,7 @@ impl<R: BufRead + Seek> Reader<R> {
 
     /// Returns the next processed row of the image.
     ///
-    /// See also [`Reader.read_row`], which reads into a caller-provided buffer.
+    /// See also [`Reader::read_row`], which reads into a caller-provided buffer.
     pub fn next_interlaced_row(&mut self) -> Result<Option<InterlacedRow<'_>>, DecodingError> {
         let mut output_buffer = mem::take(&mut self.scratch_buffer);
         let max_line_size = self
@@ -522,10 +527,10 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Reads the next row of the image into the provided `output_buffer`.
     /// `Ok(None)` will be returned if the current image frame has no more rows.
     ///
-    /// `output_buffer` needs to be long enough to accommodate [`Reader.output_line_size`] for
-    /// [`Info.width`] (initial interlaced rows may need less than that).
+    /// `output_buffer` needs to be long enough to accommodate [`Reader::output_line_size`] for
+    /// [`Info::width`] (initial interlaced rows may need less than that).
     ///
-    /// See also [`Reader.next_row`] and [`Reader.next_interlaced_row`], which read into a
+    /// See also [`Reader::next_row`] and [`Reader::next_interlaced_row`], which read into a
     /// `Reader`-owned buffer.
     pub fn read_row(
         &mut self,
@@ -605,7 +610,7 @@ impl<R: BufRead + Seek> Reader<R> {
     }
 
     /// Returns the color type and the number of bits per sample
-    /// of the data returned by `Reader::next_row` and Reader::frames`.
+    /// of the data returned by [`Reader::next_row`] and [`Reader::next_frame`].
     pub fn output_color_type(&self) -> (ColorType, BitDepth) {
         use crate::common::ColorType::*;
         let t = self.transform;

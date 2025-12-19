@@ -338,7 +338,7 @@ pub enum Compression {
     /// implementation tuned for PNG](https://crates.io/crates/fdeflate), while still providing
     /// better compression ratio than the fastest modes of other encoders.
     ///
-    /// Like `Compression::Fast` this can currently produce files larger than `NoCompression` in
+    /// Like [`Compression::Fastest`] this can currently produce files larger than `NoCompression` in
     /// streaming mode when given incompressible data. This may change in the future.
     Fast,
     /// Balances encoding speed and compression ratio

@@ -594,7 +594,7 @@ impl<R: BufRead + Seek> Reader<R> {
     ) -> Result<(), DecodingError> {
         self.next_raw_interlaced_row(rowlen)?;
         let row = self.unfiltering_buffer.prev_row();
-        assert_eq!(row.len(), rowlen - 1);
+        debug_assert_eq!(row.len(), rowlen - 1);
 
         // Apply transformations and write resulting data to buffer.
         let transform_fn = {
@@ -684,7 +684,7 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Unfilter the next raw interlaced row into `self.unfiltering_buffer`.
     fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
         // Read image data until we have at least one full row (but possibly more than one).
-        while self.unfiltering_buffer.curr_row_len() < rowlen {
+        while self.unfiltering_buffer.mutable_rowdata_length() < rowlen {
             if self.subframe.consumed_and_flushed {
                 return Err(DecodingError::Format(
                     FormatErrorInner::NoMoreImageData.into(),
@@ -692,9 +692,30 @@ impl<R: BufRead + Seek> Reader<R> {
             }
 
             let mut buffer = self.unfiltering_buffer.as_unfilled_buffer();
-            match self.decoder.decode_image_data(Some(&mut buffer))? {
-                ImageDataCompletionStatus::ExpectingMoreData => (),
-                ImageDataCompletionStatus::Done => self.mark_subframe_as_consumed_and_flushed(),
+            match self.decoder.decode_image_data(Some(&mut buffer)) {
+                Ok(ImageDataCompletionStatus::ExpectingMoreData) => (),
+                Ok(ImageDataCompletionStatus::Done) => self.mark_subframe_as_consumed_and_flushed(),
+                Err(DecodingError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // We only have partial data but we want to make as much data available as
+                    // possible. The immediate problem is now that zlib requires a lookback buffer
+                    // of prior data which must stay available while our filter code will want to
+                    // modify the data in the rowlines (i.e. prediction). So what to do?
+                    //
+                    // A copy of the data is necessary unless all filters are no-op. We must decide
+                    // how to do this copy without interfering with the main code paths. The
+                    // resulting unfilter operations puts the indices in the buffer into a weird
+                    // state at the cost of having to shuffle data around to make the actual data
+                    // valid for the following rows.
+                    return if self
+                        .unfiltering_buffer
+                        .unfilter_ahead_row(rowlen, self.bpp)?
+                    {
+                        Ok(())
+                    } else {
+                        Err(DecodingError::IoError(e))
+                    };
+                }
+                Err(e) => return Err(e),
             }
         }
 

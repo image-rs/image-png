@@ -112,9 +112,9 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
     /// Prerequisite: Input is currently positioned within `IDAT` / `fdAT` chunk sequence.
     pub fn decode_image_data(
         &mut self,
-        image_data: Option<&mut UnfilterBuf<'_>>,
+        image_data: &mut UnfilterBuf<'_>,
     ) -> Result<ImageDataCompletionStatus, DecodingError> {
-        match self.decode_next(image_data)? {
+        match self.decode_next(Some(image_data))? {
             Decoded::ImageData => Ok(ImageDataCompletionStatus::ExpectingMoreData),
             Decoded::ImageDataFlushed => Ok(ImageDataCompletionStatus::Done),
             // Ignore other events that may happen within an `IDAT` / `fdAT` chunks sequence.
@@ -125,9 +125,12 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
     /// Consumes and discards the rest of an `IDAT` / `fdAT` chunk sequence.
     ///
     /// Prerequisite: Input is currently positioned within `IDAT` / `fdAT` chunk sequence.
-    pub fn finish_decoding_image_data(&mut self) -> Result<(), DecodingError> {
+    pub fn finish_decoding_image_data(
+        &mut self,
+        image_data: &mut UnfilterBuf<'_>,
+    ) -> Result<(), DecodingError> {
         loop {
-            if let ImageDataCompletionStatus::Done = self.decode_image_data(None)? {
+            if let ImageDataCompletionStatus::Done = self.decode_image_data(image_data)? {
                 return Ok(());
             }
         }

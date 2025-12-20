@@ -731,8 +731,7 @@ impl StreamingDecoder {
                     // values is that they occur fairly frequently and special-casing them results
                     // in performance gains.
                     const CONSUMED_BYTES: usize = 4;
-                    self.parse_u32(kind, &buf[0..4], image_data)
-                        .map(|decoded| (CONSUMED_BYTES, decoded))
+                    self.parse_u32(kind, &buf[0..4], image_data, CONSUMED_BYTES)
                 } else {
                     let remaining_count = 4 - accumulated_count;
                     let consumed_bytes = {
@@ -752,8 +751,7 @@ impl StreamingDecoder {
                         Ok((consumed_bytes, Decoded::Nothing))
                     } else {
                         debug_assert_eq!(accumulated_count, 4);
-                        self.parse_u32(kind, &bytes, image_data)
-                            .map(|decoded| (consumed_bytes, decoded))
+                        self.parse_u32(kind, &bytes, image_data, consumed_bytes)
                     }
                 }
             }
@@ -837,7 +835,8 @@ impl StreamingDecoder {
         kind: U32ValueKind,
         u32_be_bytes: &[u8],
         image_data: Option<&mut UnfilterBuf<'_>>,
-    ) -> Result<Decoded, DecodingError> {
+        consumed_bytes: usize,
+    ) -> Result<(usize, Decoded), DecodingError> {
         debug_assert_eq!(u32_be_bytes.len(), 4);
         let bytes = u32_be_bytes.try_into().unwrap();
         let val = u32::from_be_bytes(bytes);
@@ -846,7 +845,7 @@ impl StreamingDecoder {
             U32ValueKind::Signature1stU32 => {
                 if bytes == [137, 80, 78, 71] {
                     self.state = Some(State::new_u32(U32ValueKind::Signature2ndU32));
-                    Ok(Decoded::Nothing)
+                    Ok((consumed_bytes, Decoded::Nothing))
                 } else {
                     Err(DecodingError::Format(
                         FormatErrorInner::InvalidSignature.into(),
@@ -856,7 +855,7 @@ impl StreamingDecoder {
             U32ValueKind::Signature2ndU32 => {
                 if bytes == [13, 10, 26, 10] {
                     self.state = Some(State::new_u32(U32ValueKind::Length));
-                    Ok(Decoded::Nothing)
+                    Ok((consumed_bytes, Decoded::Nothing))
                 } else {
                     Err(DecodingError::Format(
                         FormatErrorInner::InvalidSignature.into(),
@@ -865,7 +864,7 @@ impl StreamingDecoder {
             }
             U32ValueKind::Length => {
                 self.state = Some(State::new_u32(U32ValueKind::Type { length: val }));
-                Ok(Decoded::Nothing)
+                Ok((consumed_bytes, Decoded::Nothing))
             }
             U32ValueKind::Type { length } => {
                 let type_str = ChunkType(bytes);
@@ -877,19 +876,34 @@ impl StreamingDecoder {
                 if type_str != self.current_chunk.type_
                     && (self.current_chunk.type_ == IDAT || self.current_chunk.type_ == chunk::fdAT)
                 {
-                    self.current_chunk.type_ = type_str;
-                    if let Some(image_data) = image_data {
-                        self.inflater.finish_compressed_chunks(image_data)?;
-                    }
+                    let finished = match image_data {
+                        Some(image_data) => self.inflater.finish(image_data)?,
+                        None => true,
+                    };
 
-                    self.ready_for_idat_chunks = false;
-                    self.ready_for_fdat_chunks = false;
+                    // We ended up handling IDAT/fdAT data rather than the chunk
+                    // type header atually received. Thus rewind `self.state` to
+                    // what it was before this function was called.
                     self.state = Some(State::U32 {
                         kind,
                         bytes,
-                        accumulated_count: 4,
+                        accumulated_count: 4 - consumed_bytes,
                     });
-                    return Ok(Decoded::ImageDataFlushed);
+
+                    if finished {
+                        // We've processed all the image data necessary. Update
+                        // `current_chunk.type_`so this codepath isn't taken
+                        // again next time.
+                        self.current_chunk.type_ = type_str;
+                        self.ready_for_idat_chunks = false;
+                        self.ready_for_fdat_chunks = false;
+                        return Ok((0, Decoded::ImageDataFlushed));
+                    } else {
+                        // Report that we processed some image data without
+                        // consuming any input. This gives the caller a chance
+                        // to grow the output buffer and call us again.
+                        return Ok((0, Decoded::ImageData));
+                    }
                 }
 
                 self.current_chunk.type_ = type_str;
@@ -933,7 +947,7 @@ impl StreamingDecoder {
                     }
                     _ => Some(self.start_chunk(type_str, length)?),
                 };
-                Ok(Decoded::ChunkBegin(length, type_str))
+                Ok((consumed_bytes, Decoded::ChunkBegin(length, type_str)))
             }
             U32ValueKind::Crc(type_str) => {
                 // If ignore_crc is set, do not calculate CRC. We set
@@ -956,15 +970,18 @@ impl StreamingDecoder {
                             if type_str != IEND {
                                 self.state = Some(State::new_u32(U32ValueKind::Length));
                             }
-                            Ok(decoded)
+                            Ok((consumed_bytes, decoded))
                         }
                         ChunkAction::Skip => {
                             self.state = Some(State::new_u32(U32ValueKind::Length));
-                            Ok(Decoded::SkippedAncillaryChunk(self.current_chunk.type_))
+                            Ok((
+                                consumed_bytes,
+                                Decoded::SkippedAncillaryChunk(self.current_chunk.type_),
+                            ))
                         }
                         ChunkAction::Reject => {
                             self.state = Some(State::new_u32(U32ValueKind::Length));
-                            Ok(Decoded::BadAncillaryChunk(type_str))
+                            Ok((consumed_bytes, Decoded::BadAncillaryChunk(type_str)))
                         }
                     }
                 } else if self.decode_options.skip_ancillary_crc_failures
@@ -972,7 +989,7 @@ impl StreamingDecoder {
                 {
                     // Ignore ancillary chunk with invalid CRC
                     self.state = Some(State::new_u32(U32ValueKind::Length));
-                    Ok(Decoded::BadAncillaryChunk(type_str))
+                    Ok((consumed_bytes, Decoded::BadAncillaryChunk(type_str)))
                 } else {
                     Err(DecodingError::Format(
                         FormatErrorInner::CrcMismatch {
@@ -1013,7 +1030,7 @@ impl StreamingDecoder {
                 }
 
                 self.state = Some(State::ImageData(chunk::fdAT));
-                Ok(Decoded::Nothing)
+                Ok((consumed_bytes, Decoded::Nothing))
             }
         }
     }

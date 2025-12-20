@@ -368,7 +368,21 @@ impl<R: BufRead + Seek> Reader<R> {
 
         self.subframe = SubframeInfo::new(self.info());
         self.bpp = self.info().bpp_in_prediction();
-        self.unfiltering_buffer.reset_all();
+
+        let frame_bytes = if self.info().interlaced {
+            let mut bytes = 0u64;
+            for pass in crate::adam7::PassConstants::PASSES {
+                bytes += self
+                    .info()
+                    .raw_row_length_from_width(pass.count_samples(self.subframe.width))
+                    as u64
+                    * pass.count_lines(self.subframe.height) as u64;
+            }
+            bytes
+        } else {
+            (self.subframe.rowlen as u64) * self.subframe.height as u64
+        };
+        self.unfiltering_buffer.start_frame(frame_bytes);
 
         // Allocate output buffer.
         let buflen = self.unguarded_output_line_size(self.subframe.width);
@@ -579,7 +593,6 @@ impl<R: BufRead + Seek> Reader<R> {
         }
 
         self.remaining_frames = 0;
-        self.unfiltering_buffer.reset_all();
         self.decoder.read_until_end_of_input()?;
 
         self.finished = true;
@@ -691,8 +704,12 @@ impl<R: BufRead + Seek> Reader<R> {
                 ));
             }
 
-            let mut buffer = self.unfiltering_buffer.as_unfilled_buffer();
-            match self.decoder.decode_image_data(Some(&mut buffer))? {
+            assert!(self.unfiltering_buffer.remaining_bytes() > 0);
+            let completion_status = self
+                .unfiltering_buffer
+                .with_unfilled_buffer(|buffer| self.decoder.decode_image_data(Some(buffer)))?;
+
+            match completion_status {
                 ImageDataCompletionStatus::ExpectingMoreData => (),
                 ImageDataCompletionStatus::Done => self.mark_subframe_as_consumed_and_flushed(),
             }

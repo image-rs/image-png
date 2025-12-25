@@ -188,6 +188,11 @@ impl<R: BufRead + Seek> Decoder<R> {
         self.read_decoder.read_header_info()
     }
 
+    pub fn read_headers(&mut self) -> Result<&Info<'static>, DecodingError> {
+        self.read_decoder.read_until_image_data()?;
+        Ok(self.read_decoder.info().unwrap())
+    }
+
     /// Reads all meta data until the first IDAT chunk
     pub fn read_info(mut self) -> Result<Reader<R>, DecodingError> {
         let info = self.read_header_info()?;
@@ -262,6 +267,10 @@ impl<R: BufRead + Seek> Decoder<R> {
     /// ```
     pub fn set_ignore_text_chunk(&mut self, ignore_text_chunk: bool) {
         self.read_decoder.set_ignore_text_chunk(ignore_text_chunk);
+    }
+
+    pub fn set_ignore_exif_chunk(&mut self, ignore_exif_chunk: bool) {
+        self.read_decoder.set_ignore_exif_chunk(ignore_exif_chunk);
     }
 
     /// Set the decoder to ignore iccp chunks while parsing.
@@ -699,6 +708,13 @@ impl<R: BufRead + Seek> Reader<R> {
         }
 
         self.unfiltering_buffer.unfilter_curr_row(rowlen, self.bpp)
+    }
+
+    pub fn read_exif(&mut self) -> Result<Option<Vec<u8>>, DecodingError> {
+        if let Some(ref exif) = self.decoder.info().unwrap().exif_metadata {
+            return Ok(Some(exif.to_vec()));
+        }
+        self.decoder.read_exif()
     }
 }
 

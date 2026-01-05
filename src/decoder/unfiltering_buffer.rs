@@ -26,6 +26,8 @@ pub(crate) struct UnfilteringBuffer {
     available: usize,
     /// The number of bytes before we shift the buffer back.
     shift_back_limit: usize,
+    /// How many bytes are left to decompress into this buffer for the current frame.
+    remaining_bytes: u64,
 }
 
 impl UnfilteringBuffer {
@@ -92,6 +94,7 @@ impl UnfilteringBuffer {
             filled: 0,
             available: 0,
             shift_back_limit,
+            remaining_bytes: u64::MAX,
         };
 
         result.debug_assert_invariants();
@@ -105,12 +108,17 @@ impl UnfilteringBuffer {
         self.debug_assert_invariants();
     }
 
-    pub fn reset_all(&mut self) {
+    pub fn start_frame(&mut self, frame_bytes: u64) {
         self.data_stream.clear();
         self.prev_start = 0;
         self.current_start = 0;
         self.filled = 0;
         self.available = 0;
+        self.remaining_bytes = frame_bytes;
+    }
+
+    pub fn remaining_bytes(&self) -> u64 {
+        self.remaining_bytes
     }
 
     /// Returns the previous (already `unfilter`-ed) row.
@@ -131,7 +139,10 @@ impl UnfilteringBuffer {
     /// `ReadDecoder` and `StreamingDecoder`).  TODO: Consider protecting the
     /// invariants by returning an append-only view of the vector
     /// (`FnMut(&[u8])`??? or maybe `std::io::Write`???).
-    pub fn as_unfilled_buffer(&mut self) -> UnfilterBuf<'_> {
+    pub fn with_unfilled_buffer<F, T>(&mut self, f: F) -> T
+    where
+        F: FnOnce(&mut UnfilterBuf<'_>) -> T,
+    {
         if self.prev_start >= self.shift_back_limit
             // Avoid the shift back if the buffer is still very empty. Consider how we got here: a
             // previous decompression filled the buffer, then we unfiltered, we're now refilling
@@ -165,11 +176,28 @@ impl UnfilteringBuffer {
             self.data_stream.resize(self.filled + Self::GROWTH_BYTES, 0);
         }
 
-        UnfilterBuf {
+        if self.remaining_bytes < usize::MAX as u64
+            && self.filled.saturating_add(self.remaining_bytes as usize) < self.data_stream.len()
+        {
+            self.data_stream
+                .resize(self.filled + self.remaining_bytes as usize, 0);
+        }
+
+        let old_filled = self.filled;
+        let ret = f(&mut UnfilterBuf {
             buffer: &mut self.data_stream,
             filled: &mut self.filled,
             available: &mut self.available,
+        });
+        assert!(self.filled >= old_filled);
+        self.remaining_bytes -= (self.filled - old_filled) as u64;
+
+        if self.remaining_bytes == 0 {
+            self.available = self.filled;
         }
+
+        self.debug_assert_invariants();
+        ret
     }
 
     /// Runs `unfilter` on the current row, and then shifts rows so that the current row becomes the previous row.

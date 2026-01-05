@@ -2,6 +2,15 @@ use super::{stream::FormatErrorInner, unfiltering_buffer::UnfilteringBuffer, Dec
 
 use fdeflate::Decompressor;
 
+/// [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
+/// "deflate/inflate compression with a sliding window (which is an upper bound on the
+/// distances appearing in the deflate stream) of at most 32768 bytes".
+///
+/// `fdeflate` requires that we keep this many most recently decompressed bytes in the
+/// `out_buffer` - this allows referring back to them when handling "length and distance
+/// codes" in the deflate stream).
+const LOOKBACK_SIZE: usize = 32768;
+
 /// A buffer for decompression and in-place filtering of PNG rowlines.
 ///
 /// The underlying data structure is a vector, with additional markers dividing
@@ -9,7 +18,7 @@ use fdeflate::Decompressor;
 /// details.
 pub struct UnfilterBuf<'data> {
     /// The data container.
-    pub(crate) buffer: &'data mut Vec<u8>,
+    pub(crate) buffer: &'data mut [u8],
     /// The past-the-end index of the region that is allowed to be modified.
     pub(crate) available: &'data mut usize,
     /// The past-the-end index of the region with decompressed bytes.
@@ -113,40 +122,72 @@ impl ZlibStream {
             self.state.ignore_adler32();
         }
 
-        let in_consumed = image_data.decompress(&mut self.state, Some(data))?;
+        let in_consumed = image_data.decompress(&mut self.state, data)?;
         self.started = true;
 
         Ok(in_consumed)
     }
 
-    /// Called after all consecutive IDAT chunks were handled.
+    /// Output any remaining buffered data within the decompressor.
     ///
-    /// The compressed stream can be split on arbitrary byte boundaries. This enables some cleanup
-    /// within the decompressor and flushing additional data which may have been kept back in case
-    /// more data were passed to it.
-    pub(crate) fn finish_compressed_chunks(
+    /// Returns `Ok(true)` if all data has been decompressed and there is no
+    /// more data that will be produced, or `Ok(false)` if there's potentially
+    /// more output.
+    ///
+    /// Returns `Err` if the zlib stream is corrupt or truncated too early.
+    pub(crate) fn finish(
         &mut self,
         image_data: &mut UnfilterBuf<'_>,
-    ) -> Result<(), DecodingError> {
-        if !self.started {
-            return Ok(());
+    ) -> Result<bool, DecodingError> {
+        if !self.started || self.state.is_done() {
+            return Ok(true);
         }
+
+        // If the zlib stream isn't done but we've already output all the pixel
+        // data needed, then either there's too much compressed data or the
+        // checksum is missing. Those aren't allowed by the spec, but libpng
+        // generally doesn't treat them as fatal.
+        if *image_data.filled == image_data.buffer.len() {
+            return Ok(true);
+        }
+
+        let (_, out_consumed) = self
+            .state
+            .read(
+                &[],
+                &mut image_data.buffer[*image_data.available..],
+                *image_data.filled - *image_data.available,
+                false,
+            )
+            .map_err(|err| {
+                DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
+            })?;
+        *image_data.filled += out_consumed;
 
         if self.state.is_done() {
-            // We can end up here only after the [`decompress`] call above has detected the state
-            // to be done, too. In this case the filled and committed amount of data are already
-            // equal to each other. So neither of them needs to be touched in any way.
-            return Ok(());
+            *image_data.available = *image_data.filled;
+            return Ok(true);
         }
 
-        while !self.state.is_done() {
-            let _in_consumed = image_data.decompress(&mut self.state, None)?;
-            if !self.state.is_done() {
-                image_data.grow_buffer_if_needed_for_final_flushing();
+        // More output is only possible if zlib stream hasn't finished and the
+        // output buffer *is* full. (Empty space in the output buffer tells us
+        // there wasn't more data to write into it.)
+        if *image_data.filled == image_data.buffer.len() {
+            *image_data.available =
+                (*image_data.available).max(image_data.filled.saturating_sub(LOOKBACK_SIZE));
+            return Ok(false);
+        }
+
+        // The zlib stream was truncated before the end of the pixel data. This
+        // would ordinarily be caught within fdeflate if we'd passed
+        // end_of_input=true. But we intentionally don't pass that flag so that
+        // we're able to drain all available pixel data first.
+        Err(DecodingError::Format(
+            FormatErrorInner::CorruptFlateStream {
+                err: fdeflate::DecompressionError::InsufficientInput,
             }
-        }
-
-        Ok(())
+            .into(),
+        ))
     }
 }
 
@@ -170,15 +211,6 @@ impl UnfilterRegion {
 }
 
 impl UnfilterBuf<'_> {
-    /// [PNG spec](https://www.w3.org/TR/2003/REC-PNG-20031110/#10Compression) says that
-    /// "deflate/inflate compression with a sliding window (which is an upper bound on the
-    /// distances appearing in the deflate stream) of at most 32768 bytes".
-    ///
-    /// `fdeflate` requires that we keep this many most recently decompressed bytes in the
-    /// `out_buffer` - this allows referring back to them when handling "length and distance
-    /// codes" in the deflate stream).
-    const LOOKBACK_SIZE: usize = 32768;
-
     /// Pushes `input` into `fdeflate` crate and appends decompressed bytes to `self.buffer`
     /// (adjusting `self.filled` and `self.available` depending on how many bytes have been
     /// decompressed).
@@ -188,20 +220,15 @@ impl UnfilterBuf<'_> {
     fn decompress(
         &mut self,
         decompressor: &mut fdeflate::Decompressor,
-        input: Option<&[u8]>,
+        input: &[u8],
     ) -> Result<usize, DecodingError> {
-        let (input, end_of_input) = match input {
-            Some(input) => (input, false),
-            None => ([].as_slice(), true),
-        };
-
         let output_limit = (*self.filled + UnfilteringBuffer::GROWTH_BYTES).min(self.buffer.len());
         let (in_consumed, out_consumed) = decompressor
             .read(
                 input,
                 &mut self.buffer[*self.available..output_limit],
                 *self.filled - *self.available,
-                end_of_input,
+                false,
             )
             .map_err(|err| {
                 DecodingError::Format(FormatErrorInner::CorruptFlateStream { err }.into())
@@ -210,7 +237,7 @@ impl UnfilterBuf<'_> {
         *self.filled += out_consumed;
         if decompressor.is_done() {
             *self.available = *self.filled;
-        } else if let Some(new_available) = self.filled.checked_sub(Self::LOOKBACK_SIZE) {
+        } else if let Some(new_available) = self.filled.checked_sub(LOOKBACK_SIZE) {
             // The decompressed data may have started in the middle of the buffer,
             // so ensure that `self.available` never goes backward.  This is needed
             // to avoid miscommunicating the size of the "look-back" window when calling
@@ -222,18 +249,5 @@ impl UnfilterBuf<'_> {
         }
 
         Ok(in_consumed)
-    }
-
-    /// Grows buffer if needed for final flushing of decompressor output.
-    fn grow_buffer_if_needed_for_final_flushing(&mut self) {
-        // Only grow the buffer if needed / if the buffer is full.  In particular,
-        // calls from `ZlibStream::decompress` to `UnfilterBuf::decompress` will
-        // output at most `GROWTH_BYTES` bytes, which may be insufficient to fill
-        // all of the buffer grown by `SIZE_DELTA`.
-        if *self.filled == self.buffer.len() {
-            const SIZE_DELTA: usize = 32 * 1024;
-            let len = self.buffer.len() + SIZE_DELTA;
-            self.buffer.resize(len, 0);
-        }
     }
 }

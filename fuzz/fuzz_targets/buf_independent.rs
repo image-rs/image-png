@@ -240,6 +240,7 @@ fn test_data<'a>(data: &'a [u8]) -> Result<(), ()> {
                 };
                 retry_after_eofs(eof_controller, || {
                     png_reader.next_frame(buffer.as_mut_slice())
+                        .and_then(|_| png_reader.finish())
                 })
             })
             .assert_all_results_are_consistent()

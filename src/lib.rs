@@ -70,15 +70,21 @@
 
 #[cfg(feature = "decoder")]
 mod adam7;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub mod chunk;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod common;
 #[cfg(feature = "decoder")]
 mod decoder;
 #[cfg(feature = "encoder")]
 mod encoder;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod filter;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod srgb;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub mod text_metadata;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod traits;
 
 #[cfg(feature = "decoder")]
@@ -88,6 +94,7 @@ pub use crate::adam7::{
 
 #[cfg(feature = "decoder")]
 pub use crate::adam7::{Adam7Info, Adam7Variant};
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub use crate::common::*;
 #[cfg(feature = "decoder")]
 pub use crate::decoder::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
@@ -97,10 +104,13 @@ pub use crate::decoder::{Decoder, InterlaceInfo, InterlacedRow, Limits, OutputIn
 pub use crate::decoder::{UnfilterBuf, UnfilterRegion};
 #[cfg(feature = "encoder")]
 pub use crate::encoder::{Encoder, EncodingError, StreamWriter, Writer};
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub use crate::filter::Filter;
 
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 #[cfg(test)]
 pub(crate) mod test_utils;
 
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 #[cfg(feature = "benchmarks")]
 pub mod benchable_apis;

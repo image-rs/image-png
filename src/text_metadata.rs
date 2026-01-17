@@ -98,9 +98,11 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "decoder")]
 use crate::DecodingError;
 #[cfg(feature = "encoder")]
 use crate::{chunk, encoder, EncodingError};
+#[cfg(feature = "decoder")]
 use fdeflate::BoundedDecompressionError;
 #[cfg(feature = "encoder")]
 use flate2::write::ZlibEncoder;
@@ -125,6 +127,7 @@ pub(crate) enum TextEncodingError {
 }
 
 /// Text decoding error that is wrapped by the standard DecodingError type
+#[cfg(feature = "decoder")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TextDecodingError {
     /// Unrepresentable characters in string
@@ -161,6 +164,7 @@ pub struct TEXtChunk {
     pub text: String,
 }
 
+#[cfg(feature = "decoder")]
 fn decode_iso_8859_1(text: &[u8]) -> String {
     text.iter().map(|&b| b as char).collect()
 }
@@ -184,6 +188,7 @@ fn encode_iso_8859_1_iter(text: &str) -> impl Iterator<Item = Result<u8, TextEnc
         .map(|c| u8::try_from(c as u32).map_err(|_| TextEncodingError::Unrepresentable))
 }
 
+#[cfg(feature = "decoder")]
 fn decode_ascii(text: &[u8]) -> Result<&str, TextDecodingError> {
     if text.is_ascii() {
         // `from_utf8` cannot panic because we're already checked that `text` is ASCII-7.
@@ -206,6 +211,7 @@ impl TEXtChunk {
 
     /// Decodes a slice of bytes to a String using Latin-1 decoding.
     /// The decoder runs in strict mode, and any decoding errors are passed along to the caller.
+    #[cfg(feature = "decoder")]
     pub(crate) fn decode(
         keyword_slice: &[u8],
         text_slice: &[u8],
@@ -266,6 +272,7 @@ impl ZTXtChunk {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn decode(
         keyword_slice: &[u8],
         compression_method: u8,
@@ -286,11 +293,13 @@ impl ZTXtChunk {
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `DECOMPRESSION_LIMIT` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text(&mut self) -> Result<(), DecodingError> {
         self.decompress_text_with_limit(DECOMPRESSION_LIMIT)
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `limit` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text_with_limit(&mut self, limit: usize) -> Result<(), DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
@@ -314,6 +323,7 @@ impl ZTXtChunk {
 
     /// Decompresses the inner text, and returns it as a `String`.
     /// If decompression uses more the 2MiB, first call decompress with limit, and then this method.
+    #[cfg(feature = "decoder")]
     pub fn get_text(&self) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
@@ -411,6 +421,7 @@ impl ITXtChunk {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn decode(
         keyword_slice: &[u8],
         compression_flag: u8,
@@ -458,11 +469,13 @@ impl ITXtChunk {
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `DECOMPRESSION_LIMIT` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text(&mut self) -> Result<(), DecodingError> {
         self.decompress_text_with_limit(DECOMPRESSION_LIMIT)
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `limit` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text_with_limit(&mut self, limit: usize) -> Result<(), DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
@@ -489,6 +502,7 @@ impl ITXtChunk {
 
     /// Decompresses the inner text, and returns it as a `String`.
     /// If decompression takes more than 2 MiB, try `decompress_text_with_limit` followed by this method.
+    #[cfg(feature = "decoder")]
     pub fn get_text(&self) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {

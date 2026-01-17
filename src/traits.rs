@@ -1,5 +1,6 @@
 use std::io;
 
+#[cfg(feature = "decoder")]
 macro_rules! read_bytes_ext {
     ($output_type:ty) => {
         impl<W: io::Read + ?Sized> ReadBytesExt<$output_type> for W {
@@ -26,6 +27,7 @@ macro_rules! write_bytes_ext {
 }
 
 /// Read extension to read big endian data
+#[cfg(feature = "decoder")]
 pub trait ReadBytesExt<T>: io::Read {
     /// Read `T` from a bytes stream. Most significant byte first.
     fn read_be(&mut self) -> io::Result<T>;
@@ -38,8 +40,11 @@ pub trait WriteBytesExt<T>: io::Write {
     fn write_be(&mut self, _: T) -> io::Result<()>;
 }
 
+#[cfg(feature = "decoder")]
 read_bytes_ext!(u8);
+#[cfg(feature = "decoder")]
 read_bytes_ext!(u16);
+#[cfg(feature = "decoder")]
 read_bytes_ext!(u32);
 
 #[cfg(feature = "encoder")]

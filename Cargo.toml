@@ -37,7 +37,8 @@ rand = "0.9.2"
 criterion = "0.7.0"
 
 [features]
-default = ["encoder"]
+default = ["decoder", "encoder"]
+decoder = []
 encoder = ["flate2"]
 # Use nightly-only features for a minor performance boost in PNG decoding
 unstable = ["crc32fast/nightly"]

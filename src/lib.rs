@@ -68,9 +68,11 @@
 #![allow(clippy::uninlined_format_args)]
 #![cfg_attr(feature = "unstable", feature(portable_simd))]
 
+#[cfg(feature = "decoder")]
 mod adam7;
 pub mod chunk;
 mod common;
+#[cfg(feature = "decoder")]
 mod decoder;
 #[cfg(feature = "encoder")]
 mod encoder;
@@ -79,14 +81,19 @@ mod srgb;
 pub mod text_metadata;
 mod traits;
 
+#[cfg(feature = "decoder")]
 pub use crate::adam7::{
     expand_pass as expand_interlaced_row, expand_pass_splat as splat_interlaced_row,
 };
 
+#[cfg(feature = "decoder")]
 pub use crate::adam7::{Adam7Info, Adam7Variant};
 pub use crate::common::*;
+#[cfg(feature = "decoder")]
 pub use crate::decoder::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
+#[cfg(feature = "decoder")]
 pub use crate::decoder::{Decoder, InterlaceInfo, InterlacedRow, Limits, OutputInfo, Reader};
+#[cfg(feature = "decoder")]
 pub use crate::decoder::{UnfilterBuf, UnfilterRegion};
 #[cfg(feature = "encoder")]
 pub use crate::encoder::{Encoder, EncodingError, StreamWriter, Writer};

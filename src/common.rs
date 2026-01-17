@@ -6,9 +6,11 @@ use crate::Filter;
 use crate::{chunk, encoder};
 #[cfg(feature = "encoder")]
 use io::Write;
+#[cfg(feature = "decoder")]
+use std::convert::TryFrom;
 #[cfg(feature = "encoder")]
 use std::io;
-use std::{borrow::Cow, convert::TryFrom, fmt};
+use std::{borrow::Cow, fmt};
 
 /// Describes how a pixel is encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +56,7 @@ impl ColorType {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn checked_raw_row_length(self, depth: BitDepth, width: u32) -> Option<usize> {
         // No overflow can occur in 64 bits, we multiply 32-bit with 5 more bits.
         let bits = u64::from(width) * u64::from(self.samples_u8()) * u64::from(depth.into_u8());
@@ -135,6 +138,7 @@ impl BitDepth {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn into_u8(self) -> u8 {
         self as u8
     }
@@ -555,6 +559,7 @@ impl SrgbRenderingIntent {
         self as u8
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn from_raw(raw: u8) -> Option<Self> {
         match raw {
             0 => Some(SrgbRenderingIntent::Perceptual),
@@ -797,6 +802,7 @@ impl Info<'_> {
     /// a gray pixel of bit depth 2, the pixel used in prediction is actually 4 pixels prior. This
     /// has the consequence that the number of possible values is rather small. To make this fact
     /// more obvious in the type system and the optimizer we use an explicit enum here.
+    #[cfg(feature = "decoder")]
     pub(crate) fn bpp_in_prediction(&self) -> BytesPerPixel {
         BytesPerPixel::from_usize(self.bytes_per_pixel())
     }
@@ -811,6 +817,7 @@ impl Info<'_> {
         self.raw_row_length_from_width(self.width)
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn checked_raw_row_length(&self) -> Option<usize> {
         self.color_type
             .checked_raw_row_length(self.bit_depth, self.width)
@@ -959,10 +966,12 @@ pub(crate) enum ParameterErrorKind {
     /// the number of images by inspecting the header data returned when opening the image. This
     /// library will perform the checks necessary to ensure that data was accurate or error with a
     /// format error otherwise.
+    #[cfg(feature = "decoder")]
     PolledAfterEndOfImage,
     /// Attempt to continue decoding after a fatal, non-resumable error was reported (e.g. after
     /// [`DecodingError::Format`]).  The only case when it is possible to resume after an error
     /// is an `UnexpectedEof` scenario - see [`DecodingError::IoError`].
+    #[cfg(feature = "decoder")]
     PolledAfterFatalError,
 }
 
@@ -979,7 +988,9 @@ impl fmt::Display for ParameterError {
             ImageBufferSize { expected, actual } => {
                 write!(fmt, "wrong data size, expected {} got {}", expected, actual)
             }
+            #[cfg(feature = "decoder")]
             PolledAfterEndOfImage => write!(fmt, "End of image has been reached"),
+            #[cfg(feature = "decoder")]
             PolledAfterFatalError => {
                 write!(fmt, "A fatal decoding error has been encounted earlier")
             }

@@ -1,3 +1,4 @@
+#[cfg(feature = "decoder")]
 use core::convert::TryInto;
 
 use crate::common::BytesPerPixel;
@@ -79,6 +80,7 @@ impl Default for RowFilter {
 }
 
 impl RowFilter {
+    #[cfg(feature = "decoder")]
     pub fn from_u8(n: u8) -> Option<Self> {
         match n {
             0 => Some(Self::NoFilter),
@@ -103,6 +105,7 @@ impl RowFilter {
     }
 }
 
+#[cfg(feature = "decoder")]
 pub(crate) fn unfilter(
     mut filter: RowFilter,
     tbpp: BytesPerPixel,

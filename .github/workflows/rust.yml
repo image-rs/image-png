@@ -11,7 +11,7 @@ jobs:
       matrix:
         rust: ["1.73.0", stable, beta, nightly]
         os: [ubuntu-latest, windows-latest, macos-latest]
-        features: [""]
+        features: ["", "decoder", "encoder", "decoder,encoder"]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
@@ -32,7 +32,7 @@ jobs:
   feature_check:
     strategy:
       matrix:
-        features: ["", "unstable", "benchmarks"]
+        features: ["", "decoder", "encoder", "decoder,encoder", "decoder,encoder,unstable", "decoder,encoder,benchmarks"]
         os: [ubuntu-latest, macos-latest] # macos-latest is ARM
     runs-on: ${{ matrix.os }}
     steps:

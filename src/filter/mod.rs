@@ -1,6 +1,8 @@
 use core::convert::TryInto;
 
-use crate::{common::BytesPerPixel, Compression};
+use crate::common::BytesPerPixel;
+#[cfg(feature = "encoder")]
+use crate::Compression;
 
 mod paeth;
 
@@ -46,6 +48,7 @@ impl From<RowFilter> for Filter {
     }
 }
 
+#[cfg(feature = "encoder")]
 impl Filter {
     pub(crate) fn from_simple(compression: Compression) -> Self {
         match compression {
@@ -87,6 +90,7 @@ impl RowFilter {
         }
     }
 
+    #[cfg(feature = "encoder")]
     pub fn from_method(strat: Filter) -> Option<Self> {
         match strat {
             Filter::NoFilter => Some(Self::NoFilter),
@@ -358,6 +362,7 @@ pub(crate) fn unfilter(
     }
 }
 
+#[cfg(feature = "encoder")]
 fn filter_internal(
     method: RowFilter,
     bpp: usize,
@@ -497,6 +502,7 @@ fn filter_internal(
     }
 }
 
+#[cfg(feature = "encoder")]
 fn adaptive_filter(
     f: impl Fn(&[u8]) -> u64,
     bpp: usize,
@@ -527,6 +533,7 @@ fn adaptive_filter(
     filter_choice
 }
 
+#[cfg(feature = "encoder")]
 pub(crate) fn filter(
     method: Filter,
     bpp: BytesPerPixel,
@@ -549,11 +556,13 @@ pub(crate) fn filter(
 
 /// Estimate the value of i * log2(i) without using floating point operations,
 /// implementation originally from oxipng.
+#[cfg(feature = "encoder")]
 fn ilog2i(i: u32) -> u32 {
     let log = 32 - i.leading_zeros() - 1;
     i * log + ((i - (1 << log)) << 1)
 }
 
+#[cfg(feature = "encoder")]
 fn entropy(buf: &[u8]) -> u64 {
     let mut counts = [[0_u32; 256]; 4];
     let mut total = 0;
@@ -602,6 +611,7 @@ fn entropy(buf: &[u8]) -> u64 {
 }
 
 // Helper function for Adaptive filter buffer summation
+#[cfg(feature = "encoder")]
 fn sum_buffer(buf: &[u8]) -> u64 {
     const CHUNK_SIZE: usize = 32;
 

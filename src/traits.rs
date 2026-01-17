@@ -13,6 +13,7 @@ macro_rules! read_bytes_ext {
     };
 }
 
+#[cfg(feature = "encoder")]
 macro_rules! write_bytes_ext {
     ($input_type:ty) => {
         impl<W: io::Write + ?Sized> WriteBytesExt<$input_type> for W {
@@ -31,6 +32,7 @@ pub trait ReadBytesExt<T>: io::Read {
 }
 
 /// Write extension to write big endian data
+#[cfg(feature = "encoder")]
 pub trait WriteBytesExt<T>: io::Write {
     /// Writes `T` to a bytes stream. Most significant byte first.
     fn write_be(&mut self, _: T) -> io::Result<()>;
@@ -40,4 +42,5 @@ read_bytes_ext!(u8);
 read_bytes_ext!(u16);
 read_bytes_ext!(u32);
 
+#[cfg(feature = "encoder")]
 write_bytes_ext!(u32);

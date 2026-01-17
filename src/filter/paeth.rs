@@ -42,6 +42,7 @@ pub(super) fn filter_paeth_stbi(a: i16, b: i16, c: i16) -> u8 {
     t1 as u8
 }
 
+#[cfg(feature = "encoder")]
 pub(super) fn filter_paeth_fpnge(a: u8, b: u8, c: u8) -> u8 {
     // This is an optimized version of the paeth filter from the PNG specification, proposed by
     // Luca Versari for [FPNGE](https://www.lucaversari.it/FJXL_and_FPNGE.pdf). It operates

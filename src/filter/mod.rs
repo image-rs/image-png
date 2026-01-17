@@ -640,6 +640,7 @@ mod test {
     use super::*;
     use core::iter;
 
+    #[cfg(all(feature = "decoder", feature = "encoder"))]
     #[test]
     fn roundtrip() {
         // A multiple of 8, 6, 4, 3, 2, 1
@@ -683,6 +684,7 @@ mod test {
         }
     }
 
+    #[cfg(all(feature = "decoder", feature = "encoder"))]
     #[test]
     fn roundtrip_ascending_previous_line() {
         // A multiple of 8, 6, 4, 3, 2, 1
@@ -726,6 +728,7 @@ mod test {
         }
     }
 
+    #[cfg(feature = "encoder")]
     #[test]
     // This tests that converting u8 to i8 doesn't overflow when taking the
     // absolute value for adaptive filtering: -128_i8.abs() will panic in debug

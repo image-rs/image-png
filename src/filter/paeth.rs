@@ -385,6 +385,8 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "decoder", feature = "encoder"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     #[ignore] // takes ~20s without optimizations
     fn paeth_impls_are_equivalent() {

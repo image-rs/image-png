@@ -2288,6 +2288,7 @@ mod tests {
         assert_eq!(4070462061, crc32fast::hash(&icc_profile));
     }
 
+    #[cfg(feature = "encoder")]
     #[test]
     fn test_iccp_roundtrip() {
         let dummy_icc = b"I'm a profile";
@@ -2305,6 +2306,7 @@ mod tests {
         assert_eq!(dummy_icc, &**dec.info().icc_profile.as_ref().unwrap());
     }
 
+    #[cfg(feature = "encoder")]
     #[test]
     fn test_phys_roundtrip() {
         let mut info = crate::Info::with_size(1, 1);
@@ -2327,6 +2329,7 @@ mod tests {
         assert_eq!(phys.unit, Unit::Meter);
     }
 
+    #[cfg(feature = "encoder")]
     #[test]
     fn test_srgb_roundtrip() {
         let mut info = crate::Info::with_size(1, 1);

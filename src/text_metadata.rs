@@ -22,7 +22,8 @@
 //!  `compressed_latin1_text`, and the `utf8_text` fields depending on whether the encountered
 //!  chunk is `tEXt`, `zTXt`, or `iTXt`.
 //!
-//!  ```
+#![cfg_attr(feature = "decoder", doc = " ```")]
+#![cfg_attr(not(feature = "decoder"), doc = " ```ignore")]
 //!  use std::fs::File;
 //!  use std::io::BufReader;
 //!  use std::path::PathBuf;
@@ -46,7 +47,8 @@
 //!  There are two ways to write text chunks: the first is to add the appropriate text structs directly to the encoder header before the header is written to file.
 //!  To add a text chunk at any point in the stream, use the `write_text_chunk` method.
 //!
-//!  ```
+#![cfg_attr(feature = "encoder", doc = " ```")]
+#![cfg_attr(not(feature = "encoder"), doc = " ```ignore")]
 //!  # use png::text_metadata::{ITXtChunk, ZTXtChunk};
 //!  # use std::env;
 //!  # use std::fs::File;

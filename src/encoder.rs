@@ -1775,6 +1775,7 @@ impl<W: Write> Drop for StreamWriter<'_, W> {
     }
 }
 
+#[cfg(feature = "decoder")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -75,3 +75,27 @@ path = "benches/expand_paletted.rs"
 name = "expand_paletted"
 harness = false
 required-features = ["benchmarks"]
+
+[[test]]
+name = "bugfixes"
+required-features = ["decoder", "encoder"]
+
+[[test]]
+name = "check_testimages"
+required-features = ["decoder", "encoder"]
+
+[[example]]
+name = "change-png-info"
+required-features = ["decoder", "encoder"]
+
+[[example]]
+name = "corpus-bench"
+required-features = ["decoder", "encoder"]
+
+[[example]]
+name = "pngcheck"
+required-features = ["decoder"]
+
+[[example]]
+name = "png-generate"
+required-features = ["encoder"]

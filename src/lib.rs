@@ -10,7 +10,8 @@
 //! image data is reached.
 //!
 //! ### Using the decoder
-//! ```
+#![cfg_attr(feature = "decoder", doc = "```")]
+#![cfg_attr(not(feature = "decoder"), doc = "```ignore")]
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! // The decoder is a build for reader and can be used to set various decoding options
@@ -30,7 +31,8 @@
 //! ## Encoder
 //! ### Using the encoder
 //!
-//! ```no_run
+#![cfg_attr(feature = "encoder", doc = "```no_run")]
+#![cfg_attr(not(feature = "encoder"), doc = " ```no_run,ignore")]
 //! // For reading and opening files
 //! use std::path::Path;
 //! use std::fs::File;

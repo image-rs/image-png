@@ -25,7 +25,6 @@
 //!  ```
 //!  use std::fs::File;
 //!  use std::io::BufReader;
-//!  use std::iter::FromIterator;
 //!  use std::path::PathBuf;
 //!
 //!  // Opening a png file that has a zTXt chunk
@@ -52,7 +51,6 @@
 //!  # use std::env;
 //!  # use std::fs::File;
 //!  # use std::io::BufWriter;
-//!  # use std::iter::FromIterator;
 //!  # use std::path::PathBuf;
 //!  # let file = File::create(PathBuf::from_iter(["target", "text_chunk.png"])).unwrap();
 //!  # let ref mut w = BufWriter::new(file);
@@ -109,7 +107,7 @@ use flate2::write::ZlibEncoder;
 #[cfg(feature = "encoder")]
 use flate2::Compression;
 #[cfg(feature = "encoder")]
-use std::{convert::TryFrom, io::Write};
+use std::io::Write;
 
 /// Default decompression limit for compressed text chunks.
 pub const DECOMPRESSION_LIMIT: usize = 2097152; // 2 MiB

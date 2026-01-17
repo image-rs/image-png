@@ -1,6 +1,3 @@
-#[cfg(feature = "decoder")]
-use core::convert::TryInto;
-
 use crate::common::BytesPerPixel;
 #[cfg(feature = "encoder")]
 use crate::Compression;

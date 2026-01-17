@@ -6,8 +6,6 @@ use crate::Filter;
 use crate::{chunk, encoder};
 #[cfg(feature = "encoder")]
 use io::Write;
-#[cfg(feature = "decoder")]
-use std::convert::TryFrom;
 #[cfg(feature = "encoder")]
 use std::io;
 use std::{borrow::Cow, fmt};

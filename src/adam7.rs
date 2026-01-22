@@ -49,7 +49,7 @@ impl Adam7Info {
     /// nevertheless exposed as a public API, because it helps to provide self-contained example
     /// usage of [`expand_interlaced_row`](crate::expand_interlaced_row).
     pub fn new(pass: u8, line: u32, width: u32) -> Self {
-        assert!(1 <= pass && pass <= 7);
+        assert!((1..=7).contains(&pass));
         assert!(width > 0);
 
         let info = PassConstants::PASSES[pass as usize - 1];

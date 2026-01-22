@@ -1,6 +1,6 @@
-use core::convert::TryInto;
-
-use crate::{common::BytesPerPixel, Compression};
+use crate::common::BytesPerPixel;
+#[cfg(feature = "encoder")]
+use crate::Compression;
 
 mod paeth;
 
@@ -46,6 +46,7 @@ impl From<RowFilter> for Filter {
     }
 }
 
+#[cfg(feature = "encoder")]
 impl Filter {
     pub(crate) fn from_simple(compression: Compression) -> Self {
         match compression {
@@ -76,6 +77,7 @@ impl Default for RowFilter {
 }
 
 impl RowFilter {
+    #[cfg(feature = "decoder")]
     pub fn from_u8(n: u8) -> Option<Self> {
         match n {
             0 => Some(Self::NoFilter),
@@ -87,6 +89,7 @@ impl RowFilter {
         }
     }
 
+    #[cfg(feature = "encoder")]
     pub fn from_method(strat: Filter) -> Option<Self> {
         match strat {
             Filter::NoFilter => Some(Self::NoFilter),
@@ -99,6 +102,7 @@ impl RowFilter {
     }
 }
 
+#[cfg(feature = "decoder")]
 pub(crate) fn unfilter(
     mut filter: RowFilter,
     tbpp: BytesPerPixel,
@@ -358,6 +362,7 @@ pub(crate) fn unfilter(
     }
 }
 
+#[cfg(feature = "encoder")]
 fn filter_internal(
     method: RowFilter,
     bpp: usize,
@@ -497,6 +502,7 @@ fn filter_internal(
     }
 }
 
+#[cfg(feature = "encoder")]
 fn adaptive_filter(
     f: impl Fn(&[u8]) -> u64,
     bpp: usize,
@@ -527,6 +533,7 @@ fn adaptive_filter(
     filter_choice
 }
 
+#[cfg(feature = "encoder")]
 pub(crate) fn filter(
     method: Filter,
     bpp: BytesPerPixel,
@@ -549,11 +556,13 @@ pub(crate) fn filter(
 
 /// Estimate the value of i * log2(i) without using floating point operations,
 /// implementation originally from oxipng.
+#[cfg(feature = "encoder")]
 fn ilog2i(i: u32) -> u32 {
     let log = 32 - i.leading_zeros() - 1;
     i * log + ((i - (1 << log)) << 1)
 }
 
+#[cfg(feature = "encoder")]
 fn entropy(buf: &[u8]) -> u64 {
     let mut counts = [[0_u32; 256]; 4];
     let mut total = 0;
@@ -605,6 +614,7 @@ fn entropy(buf: &[u8]) -> u64 {
 }
 
 // Helper function for Adaptive filter buffer summation
+#[cfg(feature = "encoder")]
 fn sum_buffer(buf: &[u8]) -> u64 {
     const CHUNK_SIZE: usize = 32;
 
@@ -633,6 +643,7 @@ mod test {
     use super::*;
     use core::iter;
 
+    #[cfg(all(feature = "decoder", feature = "encoder"))]
     #[test]
     fn roundtrip() {
         // A multiple of 8, 6, 4, 3, 2, 1
@@ -676,6 +687,7 @@ mod test {
         }
     }
 
+    #[cfg(all(feature = "decoder", feature = "encoder"))]
     #[test]
     fn roundtrip_ascending_previous_line() {
         // A multiple of 8, 6, 4, 3, 2, 1
@@ -719,6 +731,7 @@ mod test {
         }
     }
 
+    #[cfg(feature = "encoder")]
     #[test]
     // This tests that converting u8 to i8 doesn't overflow when taking the
     // absolute value for adaptive filtering: -128_i8.abs() will panic in debug

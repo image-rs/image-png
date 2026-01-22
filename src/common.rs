@@ -2,9 +2,13 @@
 use crate::text_metadata::{ITXtChunk, TEXtChunk, ZTXtChunk};
 #[allow(unused_imports)] // used by doc comments only
 use crate::Filter;
+#[cfg(feature = "encoder")]
 use crate::{chunk, encoder};
+#[cfg(feature = "encoder")]
 use io::Write;
-use std::{borrow::Cow, convert::TryFrom, fmt, io};
+#[cfg(feature = "encoder")]
+use std::io;
+use std::{borrow::Cow, fmt};
 
 /// Describes how a pixel is encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +54,7 @@ impl ColorType {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn checked_raw_row_length(self, depth: BitDepth, width: u32) -> Option<usize> {
         // No overflow can occur in 64 bits, we multiply 32-bit with 5 more bits.
         let bits = u64::from(width) * u64::from(self.samples_u8()) * u64::from(depth.into_u8());
@@ -131,6 +136,7 @@ impl BitDepth {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn into_u8(self) -> u8 {
         self as u8
     }
@@ -280,6 +286,7 @@ impl FrameControl {
         self.sequence_number += i;
     }
 
+    #[cfg(feature = "encoder")]
     pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
         let mut data = [0u8; 26];
         data[..4].copy_from_slice(&self.sequence_number.to_be_bytes());
@@ -306,6 +313,7 @@ pub struct AnimationControl {
 }
 
 impl AnimationControl {
+    #[cfg(feature = "encoder")]
     pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
         let mut data = [0; 8];
         data[..4].copy_from_slice(&self.num_frames.to_be_bytes());
@@ -321,6 +329,7 @@ impl AnimationControl {
 ///
 /// If you need more control over the encoding parameters,
 /// you can set the [`DeflateCompression`] and [`Filter`] manually.
+#[cfg(feature = "encoder")]
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Compression {
@@ -347,6 +356,7 @@ pub enum Compression {
     High,
 }
 
+#[cfg(feature = "encoder")]
 impl Default for Compression {
     fn default() -> Self {
         Self::Balanced
@@ -367,6 +377,7 @@ impl Default for Compression {
 /// If a certain compression setting is superseded by other options,
 /// it may be marked deprecated and remapped to a different option.
 /// You will see a deprecation notice when compiling code relying on such options.
+#[cfg(feature = "encoder")]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum DeflateCompression {
@@ -401,12 +412,14 @@ pub enum DeflateCompression {
     // Other variants can be added in the future
 }
 
+#[cfg(feature = "encoder")]
 impl Default for DeflateCompression {
     fn default() -> Self {
         Self::from_simple(Compression::Balanced)
     }
 }
 
+#[cfg(feature = "encoder")]
 impl DeflateCompression {
     pub(crate) fn from_simple(value: Compression) -> Self {
         match value {
@@ -469,6 +482,7 @@ impl ScaledFloat {
         Self::reverse(self.0)
     }
 
+    #[cfg(feature = "encoder")]
     pub(crate) fn encode_gama<W: Write>(self, w: &mut W) -> encoder::Result<()> {
         encoder::write_chunk(w, chunk::gAMA, &self.into_scaled().to_be_bytes())
     }
@@ -515,6 +529,7 @@ impl SourceChromaticities {
         ]
     }
 
+    #[cfg(feature = "encoder")]
     pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
         encoder::write_chunk(w, chunk::cHRM, &self.to_be_bytes())
     }
@@ -537,10 +552,12 @@ pub enum SrgbRenderingIntent {
 }
 
 impl SrgbRenderingIntent {
+    #[cfg(feature = "encoder")]
     pub(crate) fn into_raw(self) -> u8 {
         self as u8
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn from_raw(raw: u8) -> Option<Self> {
         match raw {
             0 => Some(SrgbRenderingIntent::Perceptual),
@@ -551,6 +568,7 @@ impl SrgbRenderingIntent {
         }
     }
 
+    #[cfg(feature = "encoder")]
     pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
         encoder::write_chunk(w, chunk::sRGB, &[self.into_raw()])
     }
@@ -782,6 +800,7 @@ impl Info<'_> {
     /// a gray pixel of bit depth 2, the pixel used in prediction is actually 4 pixels prior. This
     /// has the consequence that the number of possible values is rather small. To make this fact
     /// more obvious in the type system and the optimizer we use an explicit enum here.
+    #[cfg(feature = "decoder")]
     pub(crate) fn bpp_in_prediction(&self) -> BytesPerPixel {
         BytesPerPixel::from_usize(self.bytes_per_pixel())
     }
@@ -796,6 +815,7 @@ impl Info<'_> {
         self.raw_row_length_from_width(self.width)
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn checked_raw_row_length(&self) -> Option<usize> {
         self.color_type
             .checked_raw_row_length(self.bit_depth, self.width)
@@ -831,6 +851,7 @@ impl Info<'_> {
     ///
     /// Source gamma and chromaticities will be written only if they're set to fallback
     /// values specified in [11.3.2.5](https://www.w3.org/TR/png-3/#sRGB-gAMA-cHRM).
+    #[cfg(feature = "encoder")]
     pub(crate) fn set_source_srgb(&mut self, rendering_intent: SrgbRenderingIntent) {
         self.srgb = Some(rendering_intent);
         self.icc_profile = None;
@@ -850,6 +871,7 @@ impl BytesPerPixel {
         }
     }
 
+    #[cfg(feature = "encoder")]
     pub(crate) fn into_usize(self) -> usize {
         self as usize
     }
@@ -942,10 +964,12 @@ pub(crate) enum ParameterErrorKind {
     /// the number of images by inspecting the header data returned when opening the image. This
     /// library will perform the checks necessary to ensure that data was accurate or error with a
     /// format error otherwise.
+    #[cfg(feature = "decoder")]
     PolledAfterEndOfImage,
     /// Attempt to continue decoding after a fatal, non-resumable error was reported (e.g. after
     /// [`DecodingError::Format`]).  The only case when it is possible to resume after an error
     /// is an `UnexpectedEof` scenario - see [`DecodingError::IoError`].
+    #[cfg(feature = "decoder")]
     PolledAfterFatalError,
 }
 
@@ -962,7 +986,9 @@ impl fmt::Display for ParameterError {
             ImageBufferSize { expected, actual } => {
                 write!(fmt, "wrong data size, expected {} got {}", expected, actual)
             }
+            #[cfg(feature = "decoder")]
             PolledAfterEndOfImage => write!(fmt, "End of image has been reached"),
+            #[cfg(feature = "decoder")]
             PolledAfterFatalError => {
                 write!(fmt, "A fatal decoding error has been encounted earlier")
             }

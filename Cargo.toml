@@ -21,11 +21,10 @@ include = [
 ]
 
 [dependencies]
-bitflags = "2.0"
-crc32fast = "1.2.0"
-fdeflate = "0.3.3"
-flate2 = "1.0.35"
-miniz_oxide = { version = "0.8", features = ["simd"] }
+bitflags = { version = "2.0", optional = true }
+crc32fast = { version = "1.2.0", optional = true }
+fdeflate = { version = "0.3.3", optional = true }
+flate2 = { version = "1.0.35", optional = true }
 
 [dev-dependencies]
 approx = "0.5.1"
@@ -38,6 +37,9 @@ rand = "0.9.2"
 criterion = "0.7.0"
 
 [features]
+default = ["decoder", "encoder"]
+decoder = ["bitflags", "crc32fast", "fdeflate"]
+encoder = ["bitflags", "crc32fast", "fdeflate", "flate2"]
 # Use nightly-only features for a minor performance boost in PNG decoding
 unstable = ["crc32fast/nightly"]
 # Use zlib-rs for faster PNG encoding at the cost of some `unsafe` code.
@@ -73,3 +75,27 @@ path = "benches/expand_paletted.rs"
 name = "expand_paletted"
 harness = false
 required-features = ["benchmarks"]
+
+[[test]]
+name = "bugfixes"
+required-features = ["decoder", "encoder"]
+
+[[test]]
+name = "check_testimages"
+required-features = ["decoder", "encoder"]
+
+[[example]]
+name = "change-png-info"
+required-features = ["decoder", "encoder"]
+
+[[example]]
+name = "corpus-bench"
+required-features = ["decoder", "encoder"]
+
+[[example]]
+name = "pngcheck"
+required-features = ["decoder"]
+
+[[example]]
+name = "png-generate"
+required-features = ["encoder"]

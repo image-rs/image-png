@@ -22,10 +22,10 @@
 //!  `compressed_latin1_text`, and the `utf8_text` fields depending on whether the encountered
 //!  chunk is `tEXt`, `zTXt`, or `iTXt`.
 //!
-//!  ```
+#![cfg_attr(feature = "decoder", doc = " ```")]
+#![cfg_attr(not(feature = "decoder"), doc = " ```ignore")]
 //!  use std::fs::File;
 //!  use std::io::BufReader;
-//!  use std::iter::FromIterator;
 //!  use std::path::PathBuf;
 //!
 //!  // Opening a png file that has a zTXt chunk
@@ -47,12 +47,12 @@
 //!  There are two ways to write text chunks: the first is to add the appropriate text structs directly to the encoder header before the header is written to file.
 //!  To add a text chunk at any point in the stream, use the `write_text_chunk` method.
 //!
-//!  ```
+#![cfg_attr(feature = "encoder", doc = " ```")]
+#![cfg_attr(not(feature = "encoder"), doc = " ```ignore")]
 //!  # use png::text_metadata::{ITXtChunk, ZTXtChunk};
 //!  # use std::env;
 //!  # use std::fs::File;
 //!  # use std::io::BufWriter;
-//!  # use std::iter::FromIterator;
 //!  # use std::path::PathBuf;
 //!  # let file = File::create(PathBuf::from_iter(["target", "text_chunk.png"])).unwrap();
 //!  # let ref mut w = BufWriter::new(file);
@@ -98,16 +98,24 @@
 
 #![warn(missing_docs)]
 
-use crate::{chunk, encoder, DecodingError, EncodingError};
+#[cfg(feature = "decoder")]
+use crate::DecodingError;
+#[cfg(feature = "encoder")]
+use crate::{chunk, encoder, EncodingError};
+#[cfg(feature = "decoder")]
 use fdeflate::BoundedDecompressionError;
+#[cfg(feature = "encoder")]
 use flate2::write::ZlibEncoder;
+#[cfg(feature = "encoder")]
 use flate2::Compression;
-use std::{convert::TryFrom, io::Write};
+#[cfg(feature = "encoder")]
+use std::io::Write;
 
 /// Default decompression limit for compressed text chunks.
 pub const DECOMPRESSION_LIMIT: usize = 2097152; // 2 MiB
 
 /// Text encoding errors that is wrapped by the standard EncodingError type
+#[cfg(feature = "encoder")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TextEncodingError {
     /// Unrepresentable characters in string
@@ -119,6 +127,7 @@ pub(crate) enum TextEncodingError {
 }
 
 /// Text decoding error that is wrapped by the standard DecodingError type
+#[cfg(feature = "decoder")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TextDecodingError {
     /// Unrepresentable characters in string
@@ -140,6 +149,7 @@ pub(crate) enum TextDecodingError {
 }
 
 /// A generalized text chunk trait
+#[cfg(feature = "encoder")]
 pub trait EncodableTextChunk {
     /// Encode text chunk as `Vec<u8>` to a `Write`
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError>;
@@ -154,14 +164,17 @@ pub struct TEXtChunk {
     pub text: String,
 }
 
+#[cfg(feature = "decoder")]
 fn decode_iso_8859_1(text: &[u8]) -> String {
     text.iter().map(|&b| b as char).collect()
 }
 
+#[cfg(feature = "encoder")]
 pub(crate) fn encode_iso_8859_1(text: &str) -> Result<Vec<u8>, TextEncodingError> {
     encode_iso_8859_1_iter(text).collect()
 }
 
+#[cfg(feature = "encoder")]
 fn encode_iso_8859_1_into(buf: &mut Vec<u8>, text: &str) -> Result<(), TextEncodingError> {
     for b in encode_iso_8859_1_iter(text) {
         buf.push(b?);
@@ -169,11 +182,13 @@ fn encode_iso_8859_1_into(buf: &mut Vec<u8>, text: &str) -> Result<(), TextEncod
     Ok(())
 }
 
+#[cfg(feature = "encoder")]
 fn encode_iso_8859_1_iter(text: &str) -> impl Iterator<Item = Result<u8, TextEncodingError>> + '_ {
     text.chars()
         .map(|c| u8::try_from(c as u32).map_err(|_| TextEncodingError::Unrepresentable))
 }
 
+#[cfg(feature = "decoder")]
 fn decode_ascii(text: &[u8]) -> Result<&str, TextDecodingError> {
     if text.is_ascii() {
         // `from_utf8` cannot panic because we're already checked that `text` is ASCII-7.
@@ -196,6 +211,7 @@ impl TEXtChunk {
 
     /// Decodes a slice of bytes to a String using Latin-1 decoding.
     /// The decoder runs in strict mode, and any decoding errors are passed along to the caller.
+    #[cfg(feature = "decoder")]
     pub(crate) fn decode(
         keyword_slice: &[u8],
         text_slice: &[u8],
@@ -211,6 +227,7 @@ impl TEXtChunk {
     }
 }
 
+#[cfg(feature = "encoder")]
 impl EncodableTextChunk for TEXtChunk {
     /// Encodes TEXtChunk to a Writer. The keyword and text are separated by a byte of zeroes.
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
@@ -255,6 +272,7 @@ impl ZTXtChunk {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn decode(
         keyword_slice: &[u8],
         compression_method: u8,
@@ -275,11 +293,13 @@ impl ZTXtChunk {
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `DECOMPRESSION_LIMIT` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text(&mut self) -> Result<(), DecodingError> {
         self.decompress_text_with_limit(DECOMPRESSION_LIMIT)
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `limit` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text_with_limit(&mut self, limit: usize) -> Result<(), DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
@@ -303,6 +323,7 @@ impl ZTXtChunk {
 
     /// Decompresses the inner text, and returns it as a `String`.
     /// If decompression uses more the 2MiB, first call decompress with limit, and then this method.
+    #[cfg(feature = "decoder")]
     pub fn get_text(&self) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
@@ -315,6 +336,7 @@ impl ZTXtChunk {
     }
 
     /// Compresses the inner text, mutating its own state.
+    #[cfg(feature = "encoder")]
     pub fn compress_text(&mut self) -> Result<(), EncodingError> {
         match &self.text {
             OptCompressed::Uncompressed(s) => {
@@ -336,6 +358,7 @@ impl ZTXtChunk {
     }
 }
 
+#[cfg(feature = "encoder")]
 impl EncodableTextChunk for ZTXtChunk {
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
         let mut data = encode_iso_8859_1(&self.keyword)?;
@@ -398,6 +421,7 @@ impl ITXtChunk {
         }
     }
 
+    #[cfg(feature = "decoder")]
     pub(crate) fn decode(
         keyword_slice: &[u8],
         compression_flag: u8,
@@ -445,11 +469,13 @@ impl ITXtChunk {
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `DECOMPRESSION_LIMIT` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text(&mut self) -> Result<(), DecodingError> {
         self.decompress_text_with_limit(DECOMPRESSION_LIMIT)
     }
 
     /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `limit` bytes.
+    #[cfg(feature = "decoder")]
     pub fn decompress_text_with_limit(&mut self, limit: usize) -> Result<(), DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
@@ -476,6 +502,7 @@ impl ITXtChunk {
 
     /// Decompresses the inner text, and returns it as a `String`.
     /// If decompression takes more than 2 MiB, try `decompress_text_with_limit` followed by this method.
+    #[cfg(feature = "decoder")]
     pub fn get_text(&self) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
@@ -489,6 +516,7 @@ impl ITXtChunk {
     }
 
     /// Compresses the inner text, mutating its own state.
+    #[cfg(feature = "encoder")]
     pub fn compress_text(&mut self) -> Result<(), EncodingError> {
         match &self.text {
             OptCompressed::Uncompressed(s) => {
@@ -510,6 +538,7 @@ impl ITXtChunk {
     }
 }
 
+#[cfg(feature = "encoder")]
 impl EncodableTextChunk for ITXtChunk {
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
         // Keyword

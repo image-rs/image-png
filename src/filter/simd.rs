@@ -1,6 +1,5 @@
 ///! Optional module containing `portable_simd` versions of the most
 ///! important unfiltering algorithms. Enable using the `unstable` feature.
-use core::convert::TryInto;
 use core::simd::cmp::{SimdOrd, SimdPartialOrd};
 use core::simd::num::{SimdInt, SimdUint};
 use core::simd::{LaneCount, Simd, SupportedLaneCount};

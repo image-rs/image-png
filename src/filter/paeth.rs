@@ -1,3 +1,4 @@
+#[cfg(feature = "decoder")]
 use crate::BytesPerPixel;
 
 // This code path is used on non-x86_64 architectures but we allow dead code
@@ -25,6 +26,8 @@ pub(super) fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     out
 }
 
+#[cfg(feature = "decoder")]
+#[cfg(target_arch = "x86_64")]
 pub(super) fn filter_paeth_stbi(a: i16, b: i16, c: i16) -> u8 {
     // Decoding optimizes better with this algorithm than with `filter_paeth`
     //
@@ -42,6 +45,7 @@ pub(super) fn filter_paeth_stbi(a: i16, b: i16, c: i16) -> u8 {
     t1 as u8
 }
 
+#[cfg(feature = "encoder")]
 pub(super) fn filter_paeth_fpnge(a: u8, b: u8, c: u8) -> u8 {
     // This is an optimized version of the paeth filter from the PNG specification, proposed by
     // Luca Versari for [FPNGE](https://www.lucaversari.it/FJXL_and_FPNGE.pdf). It operates
@@ -83,6 +87,7 @@ pub(super) fn filter_paeth_fpnge(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
+#[cfg(feature = "decoder")]
 #[allow(unreachable_code)]
 #[cfg(not(target_arch = "x86_64"))]
 pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8]) {
@@ -216,6 +221,7 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
 /// The x86_64 functions avoid casting between u8xN and i16xN SIMD
 /// representations when possible by maintaining [i16; BPP] arrays
 /// between iterations instead of [u8; BPP].
+#[cfg(feature = "decoder")]
 #[allow(unreachable_code)]
 #[cfg(target_arch = "x86_64")]
 pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8]) {
@@ -379,6 +385,8 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "decoder", feature = "encoder"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     #[ignore] // takes ~20s without optimizations
     fn paeth_impls_are_equivalent() {

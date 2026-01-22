@@ -10,7 +10,8 @@
 //! image data is reached.
 //!
 //! ### Using the decoder
-//! ```
+#![cfg_attr(feature = "decoder", doc = "```")]
+#![cfg_attr(not(feature = "decoder"), doc = "```ignore")]
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! // The decoder is a build for reader and can be used to set various decoding options
@@ -30,7 +31,8 @@
 //! ## Encoder
 //! ### Using the encoder
 //!
-//! ```no_run
+#![cfg_attr(feature = "encoder", doc = "```no_run")]
+#![cfg_attr(not(feature = "encoder"), doc = " ```no_run,ignore")]
 //! // For reading and opening files
 //! use std::path::Path;
 //! use std::fs::File;
@@ -68,30 +70,49 @@
 #![allow(clippy::uninlined_format_args)]
 #![cfg_attr(feature = "unstable", feature(portable_simd))]
 
+#[cfg(feature = "decoder")]
 mod adam7;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub mod chunk;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod common;
+#[cfg(feature = "decoder")]
 mod decoder;
+#[cfg(feature = "encoder")]
 mod encoder;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod filter;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod srgb;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub mod text_metadata;
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 mod traits;
 
+#[cfg(feature = "decoder")]
 pub use crate::adam7::{
     expand_pass as expand_interlaced_row, expand_pass_splat as splat_interlaced_row,
 };
 
+#[cfg(feature = "decoder")]
 pub use crate::adam7::{Adam7Info, Adam7Variant};
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub use crate::common::*;
+#[cfg(feature = "decoder")]
 pub use crate::decoder::stream::{DecodeOptions, Decoded, DecodingError, StreamingDecoder};
+#[cfg(feature = "decoder")]
 pub use crate::decoder::{Decoder, InterlaceInfo, InterlacedRow, Limits, OutputInfo, Reader};
+#[cfg(feature = "decoder")]
 pub use crate::decoder::{UnfilterBuf, UnfilterRegion};
+#[cfg(feature = "encoder")]
 pub use crate::encoder::{Encoder, EncodingError, StreamWriter, Writer};
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 pub use crate::filter::Filter;
 
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 #[cfg(test)]
 pub(crate) mod test_utils;
 
+#[cfg(any(feature = "decoder", feature = "encoder"))]
 #[cfg(feature = "benchmarks")]
 pub mod benchable_apis;

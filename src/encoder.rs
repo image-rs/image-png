@@ -657,8 +657,6 @@ impl<W: Write> Writer<W> {
     /// the length of `data` can't be parsed as a `u32` though the length of the chunk data should
     /// not exceed `i32::MAX` or 2,147,483,647.
     pub fn write_chunk(&mut self, name: ChunkType, data: &[u8]) -> Result<()> {
-        use std::convert::TryFrom;
-
         if u32::try_from(data.len()).map_or(true, |length| length > i32::MAX as u32) {
             let kind = FormatErrorKind::WrittenTooMuch(data.len() - i32::MAX as usize);
             return Err(EncodingError::Format(kind.into()));
@@ -1777,6 +1775,7 @@ impl<W: Write> Drop for StreamWriter<'_, W> {
     }
 }
 
+#[cfg(feature = "decoder")]
 #[cfg(test)]
 mod tests {
     use super::*;

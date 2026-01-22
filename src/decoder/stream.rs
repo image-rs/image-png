@@ -1254,6 +1254,15 @@ impl StreamingDecoder {
             if actl.num_frames == 0 {
                 return Ok(());
             }
+
+            // The spec also says that the number of frames and number of plays should be limited
+            // to (2^31)-1. Same as the other condition we enforce it by ignoring the chunk.
+            // Another option may be saturation which would lose us some frames but encourage
+            // rather dubious handling.
+            if actl.num_frames > 0x7FFFFFFF || actl.num_plays > 0x7FFFFFFF {
+                return Ok(());
+            }
+
             info.animation_control = Some(actl);
             Ok(())
         }

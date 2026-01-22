@@ -229,7 +229,9 @@ impl<R: BufRead + Seek> Decoder<R> {
         reader.remaining_frames = match reader.info().animation_control.as_ref() {
             None => 1, // No `acTL` => only expecting `IDAT` frame.
             Some(animation) => {
-                let mut num_frames = animation.num_frames as usize;
+                // Note: limited to (2^32 - 1) frames by the APNG spec so addition does not
+                // overflow on 32-bit targets nor 64-bit targets.
+                let mut num_frames = animation.num_frames;
                 if reader.info().frame_control.is_none() {
                     // No `fcTL` before `IDAT` => `IDAT` is not part of the animation, but
                     // represents an *extra*, default frame for non-APNG-aware decoders.
@@ -294,7 +296,7 @@ pub struct Reader<R: BufRead + Seek> {
     bpp: BytesPerPixel,
     subframe: SubframeInfo,
     /// How many frames remain to be decoded.  Decremented after each `IDAT` or `fdAT` sequence.
-    remaining_frames: usize,
+    remaining_frames: u32,
     /// Buffer with not-yet-`unfilter`-ed image rows
     unfiltering_buffer: UnfilteringBuffer,
     /// Output transformations

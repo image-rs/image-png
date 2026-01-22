@@ -586,6 +586,9 @@ fn entropy(buf: &[u8]) -> u64 {
     }
 
     // Consolidate the counts.
+    //
+    // Upstream bug: <https://github.com/rust-lang/rust-clippy/issues/11529>
+    #[allow(clippy::needless_range_loop)]
     for i in 0..256 {
         counts[0][i] += counts[1][i] + counts[2][i] + counts[3][i];
     }

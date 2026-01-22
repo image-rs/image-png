@@ -53,7 +53,7 @@ impl ColorType {
     pub(crate) fn checked_raw_row_length(self, depth: BitDepth, width: u32) -> Option<usize> {
         // No overflow can occur in 64 bits, we multiply 32-bit with 5 more bits.
         let bits = u64::from(width) * u64::from(self.samples_u8()) * u64::from(depth.into_u8());
-        TryFrom::try_from(1 + (bits + 7) / 8).ok()
+        TryFrom::try_from(1 + bits.div_ceil(8)).ok()
     }
 
     pub(crate) fn raw_row_length_from_width(self, depth: BitDepth, width: u32) -> usize {

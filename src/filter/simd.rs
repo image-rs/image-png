@@ -1,10 +1,8 @@
 ///! Optional module containing `portable_simd` versions of the most
 ///! important unfiltering algorithms. Enable using the `unstable` feature.
 use core::convert::TryInto;
-use core::simd::cmp::{SimdOrd, SimdPartialOrd};
-use core::simd::num::{SimdInt, SimdUint};
-use core::simd::{LaneCount, Simd, SupportedLaneCount};
-
+use core::simd::prelude::*;
+use core::simd::Select;
 // Import the fastest arch-specific scalar implementations from the outer crate.
 #[cfg(not(target_arch = "x86_64"))]
 use super::paeth::filter_paeth as filter_paeth_chosen;
@@ -20,10 +18,7 @@ fn paeth_predictor_simd<const SIZE: usize>(
     a_i16: Simd<i16, SIZE>,
     b_i16: Simd<i16, SIZE>,
     c_i16: Simd<i16, SIZE>,
-) -> Simd<u8, SIZE>
-where
-    LaneCount<SIZE>: SupportedLaneCount,
-{
+) -> Simd<u8, SIZE> {
     let pa = (b_i16 - c_i16).abs();
     let pb = (a_i16 - c_i16).abs();
     let pc = (a_i16 + b_i16 - c_i16 - c_i16).abs();
@@ -50,10 +45,7 @@ fn paeth_predictor_simd<const SIZE: usize>(
     a_i16: Simd<i16, SIZE>,
     b_i16: Simd<i16, SIZE>,
     c_i16: Simd<i16, SIZE>,
-) -> Simd<u8, SIZE>
-where
-    LaneCount<SIZE>: SupportedLaneCount,
-{
+) -> Simd<u8, SIZE> {
     let thresh = c_i16 * Simd::splat(3) - (a_i16 + b_i16);
     let lo = a_i16.simd_min(b_i16);
     let hi = a_i16.simd_max(b_i16);

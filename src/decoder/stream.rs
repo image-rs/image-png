@@ -15,7 +15,7 @@ use crate::common::{
     Info, MasteringDisplayColorVolume, ParameterError, ParameterErrorKind, PixelDimensions,
     ScaledFloat, SourceChromaticities, Unit,
 };
-use crate::text_metadata::{ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
+use crate::text_metadata::{decode_iso_8859_1, ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
 use crate::traits::ReadBytesExt;
 use crate::{CodingIndependentCodePoints, Limits};
 
@@ -1700,32 +1700,28 @@ impl StreamingDecoder {
 
     fn parse_iccp_raw(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
-        let mut buf = &self.current_chunk.raw_bytes[..];
+        let buf = &self.current_chunk.raw_bytes[..];
 
-        // read profile name
-        for len in 0..=80 {
-            let raw: u8 = buf.read_be()?;
-            if (raw == 0 && len == 0) || (raw != 0 && len == 80) {
-                return Err(DecodingError::from(TextDecodingError::InvalidKeywordSize));
-            }
-            if raw == 0 {
-                break;
-            }
-        }
+        let (keyword_slice, value_slice) = Self::split_keyword(buf)?;
 
-        match buf.read_be()? {
-            // compression method
-            0u8 => (),
-            n => {
+        let compressed_data = match value_slice.split_first() {
+            None => {
+                return Err(DecodingError::from(
+                    TextDecodingError::InvalidCompressionMethod,
+                ));
+            }
+            Some((&0, compressed_data)) => compressed_data,
+            Some((&method, _)) => {
                 return Err(DecodingError::Format(
-                    FormatErrorInner::UnknownCompressionMethod(n).into(),
+                    FormatErrorInner::UnknownCompressionMethod(method).into(),
                 ))
             }
-        }
+        };
 
-        match fdeflate::decompress_to_vec_bounded(buf, self.limits.bytes) {
+        match fdeflate::decompress_to_vec_bounded(&compressed_data, self.limits.bytes) {
             Ok(profile) => {
                 self.limits.reserve_bytes(profile.len())?;
+                info.icc_profile_name = Some(decode_iso_8859_1(keyword_slice));
                 info.icc_profile = Some(Cow::Owned(profile));
             }
             Err(fdeflate::BoundedDecompressionError::DecompressionError { inner: err }) => {

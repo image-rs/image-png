@@ -154,7 +154,7 @@ pub struct TEXtChunk {
     pub text: String,
 }
 
-fn decode_iso_8859_1(text: &[u8]) -> String {
+pub(crate) fn decode_iso_8859_1(text: &[u8]) -> String {
     text.iter().map(|&b| b as char).collect()
 }
 

@@ -683,6 +683,8 @@ pub struct Info<'a> {
     ///
     /// Presence of this value also indicates that the image conforms to the SRGB color space.
     pub srgb: Option<SrgbRenderingIntent>,
+    /// The ICC profile's name.
+    pub icc_profile_name: Option<String>,
     /// The ICC profile for the image.
     pub icc_profile: Option<Cow<'a, [u8]>>,
     /// The coding-independent code points for video signal type identification of the image.
@@ -721,6 +723,7 @@ impl Default for Info<'_> {
             source_gamma: None,
             source_chromaticities: None,
             srgb: None,
+            icc_profile_name: None,
             icc_profile: None,
             coding_independent_code_points: None,
             mastering_display_color_volume: None,

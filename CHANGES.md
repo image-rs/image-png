@@ -1,3 +1,14 @@
+## Unreleased
+
+### Fixes
+
+* Reject `Encoder::with_info` calls whose `info.interlaced` is `true` with
+  a clear `InterlacedEncodingUnsupported` format error. Previously the IHDR
+  was written with `interlace_method = 1` but `write_image_data` wrote
+  non-interlaced IDAT bytes, producing a PNG that every decoder (including
+  this crate's own) rejected with `UnknownFilterMethod(n)`. Interlaced
+  (Adam7) encoding is a distinct feature that is not yet implemented.
+
 ## 0.18.1
 
 ### Additions

@@ -49,6 +49,7 @@ enum FormatErrorKind {
     MissingData(usize),
     Unrecoverable,
     BadTextEncoding(TextEncodingError),
+    InterlacedEncodingUnsupported,
 }
 
 impl error::Error for EncodingError {
@@ -108,6 +109,10 @@ impl fmt::Display for FormatError {
                     write!(fmt, "Unable to compress text metadata")
                 }
             },
+            InterlacedEncodingUnsupported => write!(
+                fmt,
+                "Interlaced (Adam7) encoding is not yet supported; set `info.interlaced = false`"
+            ),
         }
     }
 }
@@ -559,6 +564,18 @@ impl<W: Write> Writer<W> {
             return Err(EncodingError::Format(
                 FormatErrorKind::InvalidColorCombination(self.info.bit_depth, self.info.color_type)
                     .into(),
+            ));
+        }
+
+        // `write_image_data` does not apply Adam7 passes to the supplied raw
+        // pixel buffer, so advertising `interlace_method = 1` in IHDR while
+        // writing non-interlaced IDAT silently produces a corrupt PNG that
+        // decoders reject (as an `UnknownFilterMethod` when a pixel byte
+        // lines up with a pass's filter-byte position). Reject the request
+        // rather than emit bytes that no decoder can read back.
+        if info.interlaced {
+            return Err(EncodingError::Format(
+                FormatErrorKind::InterlacedEncodingUnsupported.into(),
             ));
         }
 
@@ -2045,6 +2062,34 @@ mod tests {
         assert!(encoder.write_header().is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn expect_error_when_interlacing_is_requested() {
+        // `write_image_data` does not apply Adam7 passes to the caller's raw
+        // pixel buffer, so until interlaced encoding is implemented the
+        // encoder must reject `info.interlaced = true` rather than emit an
+        // IHDR that claims interlacing over non-interlaced IDAT bytes —
+        // which decoders reject with `UnknownFilterMethod` when a pixel
+        // byte aligns with a pass's filter-type byte position.
+        let mut info = Info::with_size(4, 4);
+        info.color_type = ColorType::Rgb;
+        info.bit_depth = BitDepth::Eight;
+        info.interlaced = true;
+
+        let mut out = Vec::new();
+        let encoder = Encoder::with_info(&mut out, info).expect("with_info accepts the Info");
+        let result = encoder.write_header();
+        assert!(
+            matches!(result, Err(EncodingError::Format(_))),
+            "expected Format error, got {:?}",
+            result.as_ref().err(),
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.to_ascii_lowercase().contains("interlac"),
+            "error message should mention interlacing, got: {msg}",
+        );
     }
 
     #[test]

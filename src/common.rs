@@ -645,7 +645,7 @@ pub struct ContentLightLevelInfo {
     pub max_frame_average_light_level: u32,
 }
 
-/// A chunk that was captured (and not parsed) by the decoder.
+/// A chunk that was captured by the decoder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedChunk {
     pub name: ChunkType,
@@ -960,6 +960,8 @@ pub(crate) enum ParameterErrorKind {
     /// [`DecodingError::Format`]).  The only case when it is possible to resume after an error
     /// is an `UnexpectedEof` scenario - see [`DecodingError::IoError`].
     PolledAfterFatalError,
+    /// Critical chunks cannot be captured when decoding.
+    CannotCaptureCriticalChunk,
 }
 
 impl From<ParameterErrorKind> for ParameterError {
@@ -978,6 +980,9 @@ impl fmt::Display for ParameterError {
             PolledAfterEndOfImage => write!(fmt, "End of image has been reached"),
             PolledAfterFatalError => {
                 write!(fmt, "A fatal decoding error has been encounted earlier")
+            }
+            CannotCaptureCriticalChunk => {
+                write!(fmt, "Critical chunks cannot be captured")
             }
         }
     }

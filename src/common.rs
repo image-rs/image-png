@@ -645,9 +645,9 @@ pub struct ContentLightLevelInfo {
     pub max_frame_average_light_level: u32,
 }
 
-/// A chunk that was not parsed by the decoder.
+/// A chunk that was captured (and not parsed) by the decoder.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnknownChunk {
+pub struct CapturedChunk {
     pub name: ChunkType,
     pub data: Vec<u8>,
 }
@@ -708,8 +708,8 @@ pub struct Info<'a> {
     pub compressed_latin1_text: Vec<ZTXtChunk>,
     /// iTXt field
     pub utf8_text: Vec<ITXtChunk>,
-    /// Unknown chunks
-    pub unknown_chunks: Vec<UnknownChunk>,
+    /// Captured chunks
+    pub captured_chunks: Vec<CapturedChunk>,
 }
 
 impl Default for Info<'_> {
@@ -741,7 +741,7 @@ impl Default for Info<'_> {
             uncompressed_latin1_text: Vec::new(),
             compressed_latin1_text: Vec::new(),
             utf8_text: Vec::new(),
-            unknown_chunks: Vec::new(),
+            captured_chunks: Vec::new(),
         }
     }
 }

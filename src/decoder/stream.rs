@@ -11,9 +11,9 @@ use super::zlib::ZlibStream;
 use crate::chunk::is_critical;
 use crate::chunk::{self, ChunkType, IDAT, IEND, IHDR};
 use crate::common::{
-    AnimationControl, BitDepth, BlendOp, ColorType, ContentLightLevelInfo, DisposeOp, FrameControl,
-    Info, MasteringDisplayColorVolume, ParameterError, ParameterErrorKind, PixelDimensions,
-    ScaledFloat, SourceChromaticities, Unit, UnknownChunk,
+    AnimationControl, BitDepth, BlendOp, CapturedChunk, ColorType, ContentLightLevelInfo,
+    DisposeOp, FrameControl, Info, MasteringDisplayColorVolume, ParameterError, ParameterErrorKind,
+    PixelDimensions, ScaledFloat, SourceChromaticities, Unit,
 };
 use crate::text_metadata::{decode_iso_8859_1, ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
 use crate::traits::ReadBytesExt;
@@ -469,7 +469,7 @@ pub struct DecodeOptions {
     ignore_text_chunk: bool,
     ignore_iccp_chunk: bool,
     skip_ancillary_crc_failures: bool,
-    keep_unknown_chunks: bool,
+    captured_chunks: Vec<ChunkType>,
 }
 
 impl Default for DecodeOptions {
@@ -480,7 +480,7 @@ impl Default for DecodeOptions {
             ignore_text_chunk: false,
             ignore_iccp_chunk: false,
             skip_ancillary_crc_failures: true,
-            keep_unknown_chunks: false,
+            captured_chunks: Vec::new(),
         }
     }
 }
@@ -528,11 +528,18 @@ impl DecodeOptions {
         self.skip_ancillary_crc_failures = skip_ancillary_crc_failures;
     }
 
-    /// When set, the decoder will keep unknown chunks in the `Info` struct.
+    /// Sets the list of chunks to be captured.
     ///
-    /// Defaults to `false`.
-    pub fn set_keep_unknown_chunks(&mut self, keep_unknown_chunks: bool) {
-        self.keep_unknown_chunks = keep_unknown_chunks;
+    /// Captured chunks will be skipped by the decoder and their raw data will be stored in the
+    /// `captured_chunks` field of the `Info` struct.
+    ///
+    /// This applies even to chunks that are recognized by the decoder and critical chunks.
+    /// Doing so may cause the decoding to fail if the chunk is strictly required by the PNG
+    /// specification.
+    ///
+    /// Defaults to `&[]`.
+    pub fn set_captured_chunks(&mut self, names: &[ChunkType]) {
+        self.captured_chunks = names.to_vec();
     }
 }
 
@@ -1045,6 +1052,11 @@ impl StreamingDecoder {
     }
 
     fn start_chunk(&mut self, type_str: ChunkType, length: u32) -> Result<State, DecodingError> {
+        if self.decode_options.captured_chunks.contains(&type_str) {
+            self.current_chunk.action = ChunkAction::Process;
+            return Ok(State::ReadChunkData(type_str));
+        }
+
         let target_length = match type_str {
             IHDR => 13..=13,
             chunk::PLTE => 3..=768,
@@ -1077,11 +1089,7 @@ impl StreamingDecoder {
                 ));
             }
             _ => {
-                if self.decode_options.keep_unknown_chunks {
-                    self.current_chunk.action = ChunkAction::Process;
-                } else {
-                    self.current_chunk.action = ChunkAction::Skip;
-                }
+                self.current_chunk.action = ChunkAction::Skip;
                 return Ok(State::ReadChunkData(type_str));
             }
         };
@@ -1108,6 +1116,9 @@ impl StreamingDecoder {
 
     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
         let mut parse_result = match type_str {
+            type_str if self.decode_options.captured_chunks.contains(&type_str) => {
+                self.parse_captured(type_str)
+            }
             // Critical non-data chunks.
             IHDR => self.parse_ihdr(),
             chunk::PLTE => self.parse_plte(),
@@ -1139,7 +1150,6 @@ impl StreamingDecoder {
             chunk::iTXt => self.parse_itxt(),
 
             // Unrecognized chunks.
-            _ if self.decode_options.keep_unknown_chunks => self.parse_unknown(type_str),
             _ => unreachable!(
                 "Unrecognized chunk {type_str:?} should have been caught in start_chunk"
             ),
@@ -1755,6 +1765,20 @@ impl StreamingDecoder {
         Ok(())
     }
 
+    fn parse_captured(&mut self, type_str: ChunkType) -> Result<(), DecodingError> {
+        self.limits
+            .reserve_bytes(self.current_chunk.raw_bytes.len())?;
+        self.info
+            .as_mut()
+            .unwrap()
+            .captured_chunks
+            .push(CapturedChunk {
+                name: type_str,
+                data: self.current_chunk.raw_bytes.clone(),
+            });
+        Ok(())
+    }
+
     fn parse_ihdr(&mut self) -> Result<(), DecodingError> {
         if self.info.is_some() {
             return Err(DecodingError::Format(
@@ -1935,20 +1959,6 @@ impl StreamingDecoder {
         Ok(())
     }
 
-    fn parse_unknown(&mut self, type_str: ChunkType) -> Result<(), DecodingError> {
-        self.limits
-            .reserve_bytes(self.current_chunk.raw_bytes.len())?;
-        self.info
-            .as_mut()
-            .unwrap()
-            .unknown_chunks
-            .push(UnknownChunk {
-                name: type_str,
-                data: self.current_chunk.raw_bytes.clone(),
-            });
-        Ok(())
-    }
-
     fn parse_bkgd(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
         if info.bkgd.is_some() {
@@ -2044,8 +2054,8 @@ mod tests {
     use crate::chunk::ChunkType;
     use crate::test_utils::*;
     use crate::{
-        DecodeOptions, Decoder, DecodingError, Limits, Reader, SrgbRenderingIntent, Unit,
-        UnknownChunk,
+        CapturedChunk, DecodeOptions, Decoder, DecodingError, Limits, Reader, SrgbRenderingIntent,
+        Unit,
     };
     use approx::assert_relative_eq;
     use byteorder::WriteBytesExt;
@@ -3429,7 +3439,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_chunks_disabled() {
+    fn test_no_captured_chunks() {
         let width = 16;
         let mut png = Vec::new();
         write_png_sig(&mut png);
@@ -3443,11 +3453,11 @@ mod tests {
         write_iend(&mut png);
 
         let reader = Decoder::new(Cursor::new(png)).read_info().unwrap();
-        assert_eq!(reader.info().unknown_chunks.len(), 0);
+        assert_eq!(reader.info().captured_chunks.len(), 0);
     }
 
     #[test]
-    fn test_unknown_chunks_preserved() {
+    fn test_captured_chunks_unknown() {
         let width = 16;
         let mut png = Vec::new();
         write_png_sig(&mut png);
@@ -3462,18 +3472,18 @@ mod tests {
         write_iend(&mut png);
 
         let mut options = DecodeOptions::default();
-        options.set_keep_unknown_chunks(true);
+        options.set_captured_chunks(&[ChunkType(*b"uNK1"), ChunkType(*b"uNK2")]);
         let reader = Decoder::new_with_options(Cursor::new(png), options)
             .read_info()
             .unwrap();
         assert_eq!(
-            reader.info().unknown_chunks,
+            reader.info().captured_chunks,
             vec![
-                UnknownChunk {
+                CapturedChunk {
                     name: ChunkType(*b"uNK1"),
                     data: b"data1".to_vec()
                 },
-                UnknownChunk {
+                CapturedChunk {
                     name: ChunkType(*b"uNK2"),
                     data: b"data2".to_vec()
                 }
@@ -3482,12 +3492,13 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_chunks_limits_exceeded() {
+    fn test_captured_chunks_known() {
         let width = 16;
         let mut png = Vec::new();
         write_png_sig(&mut png);
         write_rgba8_ihdr_with_width(&mut png, width);
-        write_chunk(&mut png, b"uNKn", b"long data that exceeds limits");
+        // Write a bKGD chunk (a known ancillary chunk)
+        write_chunk(&mut png, b"bKGD", &[0, 255]);
         write_chunk(
             &mut png,
             b"IDAT",
@@ -3496,16 +3507,25 @@ mod tests {
         write_iend(&mut png);
 
         let mut options = DecodeOptions::default();
-        options.set_keep_unknown_chunks(true);
-        let mut decoder = Decoder::new_with_options(Cursor::new(png), options);
-        // Set a limit lower than the unknown chunk data size (29 bytes)
-        decoder.set_limits(Limits { bytes: 10 });
-        let result = decoder.read_info();
-        assert!(matches!(result, Err(DecodingError::LimitsExceeded)));
+        options.set_captured_chunks(&[ChunkType(*b"bKGD")]);
+        let reader = Decoder::new_with_options(Cursor::new(png), options)
+            .read_info()
+            .unwrap();
+
+        // Assert that the chunk is captured
+        assert_eq!(
+            reader.info().captured_chunks,
+            vec![CapturedChunk {
+                name: ChunkType(*b"bKGD"),
+                data: vec![0, 255],
+            }]
+        );
+        // Assert that it was not parsed natively
+        assert_eq!(reader.info().bkgd, None);
     }
 
     #[test]
-    fn test_critical_unknown_chunk() {
+    fn test_captured_chunks_critical() {
         let width = 16;
         let mut png = Vec::new();
         write_png_sig(&mut png);
@@ -3520,11 +3540,39 @@ mod tests {
         write_iend(&mut png);
 
         let mut options = DecodeOptions::default();
-        options.set_keep_unknown_chunks(true);
-        let result = Decoder::new_with_options(Cursor::new(png), options).read_info();
-        assert!(matches!(result, Err(DecodingError::Format(_))));
-        let err = result.err().unwrap().to_string();
-        assert!(err.contains("Unrecognized critical chunk"));
-        assert!(err.contains("UNKn"));
+        options.set_captured_chunks(&[ChunkType(*b"UNKn")]);
+        let reader = Decoder::new_with_options(Cursor::new(png), options)
+            .read_info()
+            .unwrap();
+        assert_eq!(
+            reader.info().captured_chunks,
+            vec![CapturedChunk {
+                name: ChunkType(*b"UNKn"),
+                data: b"critical data".to_vec()
+            }]
+        );
+    }
+
+    #[test]
+    fn test_captured_chunks_limits_exceeded() {
+        let width = 16;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+        write_chunk(&mut png, b"uNKn", b"long data that exceeds limits");
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(width, width),
+        );
+        write_iend(&mut png);
+
+        let mut options = DecodeOptions::default();
+        options.set_captured_chunks(&[ChunkType(*b"uNKn")]);
+        let mut decoder = Decoder::new_with_options(Cursor::new(png), options);
+        // Set a limit lower than the unknown chunk data size (29 bytes)
+        decoder.set_limits(Limits { bytes: 10 });
+        let result = decoder.read_info();
+        assert!(matches!(result, Err(DecodingError::LimitsExceeded)));
     }
 }

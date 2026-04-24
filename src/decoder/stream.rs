@@ -1275,6 +1275,10 @@ impl StreamingDecoder {
             Err(DecodingError::Format(
                 FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
             ))
+        } else if self.current_chunk.raw_bytes.len() % 3 != 0 {
+            Err(DecodingError::Format(
+                FormatErrorInner::ChunkLengthWrong { kind: chunk::PLTE }.into(),
+            ))
         } else {
             info.palette = Some(Cow::Owned(self.current_chunk.raw_bytes.clone()));
             Ok(())

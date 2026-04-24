@@ -71,6 +71,7 @@ fn create_rgba_palette(info: &Info) -> [[u8; 4]; 256] {
             rgba_iter = &mut rgba_iter[1..];
         }
         if !palette_iter.is_empty() {
+            assert_eq!(palette_iter.len(), 3, "chunk is checked in parse_plte");
             rgba_iter[0][0..3].copy_from_slice(&palette_iter[0..3]);
         }
     }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::error;
 use std::fmt;
@@ -469,7 +470,7 @@ pub struct DecodeOptions {
     ignore_text_chunk: bool,
     ignore_iccp_chunk: bool,
     skip_ancillary_crc_failures: bool,
-    captured_chunks: Vec<ChunkType>,
+    captured_chunks: HashSet<ChunkType>,
 }
 
 impl Default for DecodeOptions {
@@ -480,7 +481,7 @@ impl Default for DecodeOptions {
             ignore_text_chunk: false,
             ignore_iccp_chunk: false,
             skip_ancillary_crc_failures: true,
-            captured_chunks: Vec::new(),
+            captured_chunks: HashSet::new(),
         }
     }
 }
@@ -546,7 +547,7 @@ impl DecodeOptions {
                 return Err(ParameterErrorKind::CannotCaptureCriticalChunk.into());
             }
         }
-        self.captured_chunks = names.to_vec();
+        self.captured_chunks = names.iter().cloned().collect();
         Ok(())
     }
 
@@ -1064,8 +1065,6 @@ impl StreamingDecoder {
     }
 
     fn start_chunk(&mut self, type_str: ChunkType, length: u32) -> Result<State, DecodingError> {
-        let is_captured = self.decode_options.is_captured(type_str);
-
         let target_length = match type_str {
             IHDR => 13..=13,
             chunk::PLTE => 3..=768,
@@ -1098,7 +1097,7 @@ impl StreamingDecoder {
                 ));
             }
             _ => {
-                if is_captured {
+                if self.decode_options.is_captured(type_str) {
                     self.current_chunk.action = ChunkAction::Process;
                 } else {
                     self.current_chunk.action = ChunkAction::Skip;
@@ -3518,7 +3517,6 @@ mod tests {
 
         let text_data = b"Title\0Test string";
         write_chunk(&mut png, b"tEXt", text_data);
-
         write_chunk(
             &mut png,
             b"IDAT",

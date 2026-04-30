@@ -2,7 +2,7 @@
 use crate::text_metadata::{ITXtChunk, TEXtChunk, ZTXtChunk};
 #[allow(unused_imports)] // used by doc comments only
 use crate::Filter;
-use crate::{chunk, encoder};
+use crate::{chunk, chunk::ChunkType, encoder};
 use io::Write;
 use std::{borrow::Cow, convert::TryFrom, fmt, io};
 
@@ -645,6 +645,13 @@ pub struct ContentLightLevelInfo {
     pub max_frame_average_light_level: u32,
 }
 
+/// A chunk that was captured by the decoder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturedChunk {
+    pub name: ChunkType,
+    pub data: Vec<u8>,
+}
+
 /// PNG info struct
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -701,6 +708,8 @@ pub struct Info<'a> {
     pub compressed_latin1_text: Vec<ZTXtChunk>,
     /// iTXt field
     pub utf8_text: Vec<ITXtChunk>,
+    /// Captured chunks
+    pub captured_chunks: Vec<CapturedChunk>,
 }
 
 impl Default for Info<'_> {
@@ -732,6 +741,7 @@ impl Default for Info<'_> {
             uncompressed_latin1_text: Vec::new(),
             compressed_latin1_text: Vec::new(),
             utf8_text: Vec::new(),
+            captured_chunks: Vec::new(),
         }
     }
 }
@@ -950,6 +960,8 @@ pub(crate) enum ParameterErrorKind {
     /// [`DecodingError::Format`]).  The only case when it is possible to resume after an error
     /// is an `UnexpectedEof` scenario - see [`DecodingError::IoError`].
     PolledAfterFatalError,
+    /// Critical chunks cannot be captured when decoding.
+    CannotCaptureCriticalChunk,
 }
 
 impl From<ParameterErrorKind> for ParameterError {
@@ -968,6 +980,9 @@ impl fmt::Display for ParameterError {
             PolledAfterEndOfImage => write!(fmt, "End of image has been reached"),
             PolledAfterFatalError => {
                 write!(fmt, "A fatal decoding error has been encounted earlier")
+            }
+            CannotCaptureCriticalChunk => {
+                write!(fmt, "Critical chunks cannot be captured")
             }
         }
     }

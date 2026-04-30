@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::error;
 use std::fmt;
@@ -11,9 +12,9 @@ use super::zlib::ZlibStream;
 use crate::chunk::is_critical;
 use crate::chunk::{self, ChunkType, IDAT, IEND, IHDR};
 use crate::common::{
-    AnimationControl, BitDepth, BlendOp, ColorType, ContentLightLevelInfo, DisposeOp, FrameControl,
-    Info, MasteringDisplayColorVolume, ParameterError, ParameterErrorKind, PixelDimensions,
-    ScaledFloat, SourceChromaticities, Unit,
+    AnimationControl, BitDepth, BlendOp, CapturedChunk, ColorType, ContentLightLevelInfo,
+    DisposeOp, FrameControl, Info, MasteringDisplayColorVolume, ParameterError, ParameterErrorKind,
+    PixelDimensions, ScaledFloat, SourceChromaticities, Unit,
 };
 use crate::text_metadata::{decode_iso_8859_1, ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
 use crate::traits::ReadBytesExt;
@@ -469,6 +470,7 @@ pub struct DecodeOptions {
     ignore_text_chunk: bool,
     ignore_iccp_chunk: bool,
     skip_ancillary_crc_failures: bool,
+    captured_chunks: HashSet<ChunkType>,
 }
 
 impl Default for DecodeOptions {
@@ -479,6 +481,7 @@ impl Default for DecodeOptions {
             ignore_text_chunk: false,
             ignore_iccp_chunk: false,
             skip_ancillary_crc_failures: true,
+            captured_chunks: HashSet::new(),
         }
     }
 }
@@ -524,6 +527,32 @@ impl DecodeOptions {
     /// Defaults to `true`
     pub fn set_skip_ancillary_crc_failures(&mut self, skip_ancillary_crc_failures: bool) {
         self.skip_ancillary_crc_failures = skip_ancillary_crc_failures;
+    }
+
+    /// Sets the list of chunks to be captured.
+    ///
+    /// The raw data of captured chunks will be stored in the `captured_chunks`
+    /// field of the `Info` struct and will contribute towards the set `Limits`.
+    ///
+    /// If a chunk is recognized by the decoder, it will still be parsed normally
+    /// alongside the capture.
+    ///
+    /// Note that critical chunks cannot be captured. Attempting to capture a critical chunk will
+    /// return a `ParameterError`.
+    ///
+    /// Defaults to `&[]`.
+    pub fn set_captured_chunks(&mut self, names: &[ChunkType]) -> Result<(), ParameterError> {
+        for &name in names {
+            if chunk::is_critical(name) {
+                return Err(ParameterErrorKind::CannotCaptureCriticalChunk.into());
+            }
+        }
+        self.captured_chunks = names.iter().cloned().collect();
+        Ok(())
+    }
+
+    pub(crate) fn is_captured(&self, type_str: ChunkType) -> bool {
+        self.captured_chunks.contains(&type_str)
     }
 }
 
@@ -1068,7 +1097,11 @@ impl StreamingDecoder {
                 ));
             }
             _ => {
-                self.current_chunk.action = ChunkAction::Skip;
+                if self.decode_options.is_captured(type_str) {
+                    self.current_chunk.action = ChunkAction::Process;
+                } else {
+                    self.current_chunk.action = ChunkAction::Skip;
+                }
                 return Ok(State::ReadChunkData(type_str));
             }
         };
@@ -1094,6 +1127,11 @@ impl StreamingDecoder {
     }
 
     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
+        let is_captured = self.decode_options.is_captured(type_str);
+        if is_captured {
+            self.parse_captured(type_str)?;
+        }
+
         let mut parse_result = match type_str {
             // Critical non-data chunks.
             IHDR => self.parse_ihdr(),
@@ -1126,6 +1164,7 @@ impl StreamingDecoder {
             chunk::iTXt => self.parse_itxt(),
 
             // Unrecognized chunks.
+            _ if is_captured => Ok(()),
             _ => unreachable!(
                 "Unrecognized chunk {type_str:?} should have been caught in start_chunk"
             ),
@@ -1741,6 +1780,20 @@ impl StreamingDecoder {
         Ok(())
     }
 
+    fn parse_captured(&mut self, type_str: ChunkType) -> Result<(), DecodingError> {
+        self.limits
+            .reserve_bytes(self.current_chunk.raw_bytes.len())?;
+        self.info
+            .as_mut()
+            .unwrap()
+            .captured_chunks
+            .push(CapturedChunk {
+                name: type_str,
+                data: self.current_chunk.raw_bytes.clone(),
+            });
+        Ok(())
+    }
+
     fn parse_ihdr(&mut self) -> Result<(), DecodingError> {
         if self.info.is_some() {
             return Err(DecodingError::Format(
@@ -2013,8 +2066,12 @@ impl Default for StreamingDecoder {
 mod tests {
     use super::ScaledFloat;
     use super::SourceChromaticities;
+    use crate::chunk::ChunkType;
     use crate::test_utils::*;
-    use crate::{Decoder, DecodingError, Reader, SrgbRenderingIntent, Unit};
+    use crate::{
+        CapturedChunk, DecodeOptions, Decoder, DecodingError, Limits, Reader, SrgbRenderingIntent,
+        Unit,
+    };
     use approx::assert_relative_eq;
     use byteorder::WriteBytesExt;
     use std::borrow::Cow;
@@ -3394,5 +3451,143 @@ mod tests {
         };
         assert_eq!(actl.num_frames, 2);
         assert_eq!(actl.num_plays, 123);
+    }
+
+    #[test]
+    fn test_no_captured_chunks() {
+        let width = 16;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+        write_chunk(&mut png, b"uNKn", b"hello world");
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(width, width),
+        );
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(png)).read_info().unwrap();
+        assert_eq!(reader.info().captured_chunks.len(), 0);
+    }
+
+    #[test]
+    fn test_captured_chunks_unknown() {
+        let width = 16;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+        write_chunk(&mut png, b"uNK1", b"data1");
+        write_chunk(&mut png, b"uNK2", b"data2");
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(width, width),
+        );
+        write_iend(&mut png);
+
+        let mut options = DecodeOptions::default();
+        options
+            .set_captured_chunks(&[ChunkType(*b"uNK1"), ChunkType(*b"uNK2")])
+            .unwrap();
+        let reader = Decoder::new_with_options(Cursor::new(png), options)
+            .read_info()
+            .unwrap();
+        assert_eq!(
+            reader.info().captured_chunks,
+            vec![
+                CapturedChunk {
+                    name: ChunkType(*b"uNK1"),
+                    data: b"data1".to_vec()
+                },
+                CapturedChunk {
+                    name: ChunkType(*b"uNK2"),
+                    data: b"data2".to_vec()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_captured_chunks_known() {
+        let width = 16;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+
+        let text_data = b"Title\0Test string";
+        write_chunk(&mut png, b"tEXt", text_data);
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(width, width),
+        );
+        write_iend(&mut png);
+
+        let mut options = DecodeOptions::default();
+        options.set_captured_chunks(&[ChunkType(*b"tEXt")]).unwrap();
+        let reader = Decoder::new_with_options(Cursor::new(png), options)
+            .read_info()
+            .unwrap();
+        // Assert that the chunk is captured
+        assert_eq!(
+            reader.info().captured_chunks,
+            vec![CapturedChunk {
+                name: ChunkType(*b"tEXt"),
+                data: text_data.to_vec(),
+            }]
+        );
+        // Assert that it was also parsed
+        assert_eq!(reader.info().uncompressed_latin1_text.len(), 1);
+        assert_eq!(reader.info().uncompressed_latin1_text[0].keyword, "Title");
+        assert_eq!(
+            reader.info().uncompressed_latin1_text[0].text,
+            "Test string"
+        );
+    }
+
+    #[test]
+    fn test_captured_chunks_critical() {
+        let width = 16;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+        // The first letter is uppercase, making it a critical chunk.
+        write_chunk(&mut png, b"UNKn", b"critical data");
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(width, width),
+        );
+        write_iend(&mut png);
+
+        let mut options = DecodeOptions::default();
+        let result = options.set_captured_chunks(&[ChunkType(*b"UNKn")]);
+        assert!(matches!(result, Err(_)));
+        let err = result.unwrap_err();
+        assert_eq!("Critical chunks cannot be captured", format!("{err}"));
+    }
+
+    #[test]
+    fn test_captured_chunks_limits_exceeded() {
+        let width = 16;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgba8_ihdr_with_width(&mut png, width);
+        write_chunk(&mut png, b"uNKn", b"long data that exceeds limits");
+        write_chunk(
+            &mut png,
+            b"IDAT",
+            &generate_rgba8_with_width_and_height(width, width),
+        );
+        write_iend(&mut png);
+
+        let mut options = DecodeOptions::default();
+        options.set_captured_chunks(&[ChunkType(*b"uNKn")]).unwrap();
+        let mut decoder = Decoder::new_with_options(Cursor::new(png), options);
+        // Set a limit lower than the unknown chunk data size (29 bytes)
+        decoder.set_limits(Limits { bytes: 10 });
+        let result = decoder.read_info();
+        assert!(matches!(result, Err(DecodingError::LimitsExceeded)));
     }
 }

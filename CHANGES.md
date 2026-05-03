@@ -1,4 +1,12 @@
-## Unreleased
+## 0.18.2
+
+### Additions
+
+* Expose the iCCP profile name via `Info::icc_profile_name` when an iCCP
+  chunk is present. ([#679])
+* Added `DecodeOptions::set_captured_chunks` and `Info::captured_chunks` for
+  preserving selected ancillary chunks during decoding. Recognized chunks are
+  still parsed normally when captured. ([#680])
 
 ### Fixes
 
@@ -7,7 +15,14 @@
   was written with `interlace_method = 1` but `write_image_data` wrote
   non-interlaced IDAT bytes, producing a PNG that every decoder (including
   this crate's own) rejected with `UnknownFilterMethod(n)`. Interlaced
-  (Adam7) encoding is a distinct feature that is not yet implemented.
+  (Adam7) encoding is a distinct feature that is not yet implemented. ([#681])
+* Reject malformed `PLTE` chunks whose byte length is not a multiple of 3,
+  avoiding a later panic while expanding palettes. ([#682])
+
+[#679]: https://github.com/image-rs/image-png/pull/679
+[#680]: https://github.com/image-rs/image-png/pull/680
+[#681]: https://github.com/image-rs/image-png/pull/681
+[#682]: https://github.com/image-rs/image-png/pull/682
 
 ## 0.18.1
 

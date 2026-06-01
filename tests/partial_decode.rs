@@ -3,10 +3,10 @@ use std::io::Write;
 
 mod pipe {
     use std::cell::RefCell;
-    use std::io::{BufRead, Cursor, Read, Result, Seek, SeekFrom, Write};
+    use std::io::{BufRead, Cursor, Read, Result, Write};
     use std::rc::Rc;
 
-    pub fn create() -> (impl BufRead + Seek, impl Write) {
+    pub fn create() -> (impl BufRead, impl Write) {
         let write_end = Pipe {
             buf: Rc::new(RefCell::new(Cursor::new(Vec::new()))),
             long_lived_fill_buf: Vec::new(),
@@ -43,12 +43,6 @@ mod pipe {
 
         fn consume(&mut self, amount: usize) {
             self.buf.borrow_mut().consume(amount)
-        }
-    }
-
-    impl Seek for Pipe {
-        fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-            self.buf.borrow_mut().seek(pos)
         }
     }
 

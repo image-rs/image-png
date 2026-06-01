@@ -1,8 +1,9 @@
 use super::stream::{DecodeOptions, Decoded, DecodingError, FormatErrorInner, StreamingDecoder};
 use super::zlib::UnfilterBuf;
+use super::LimitBufRead;
 use super::Limits;
 
-use std::io::{BufRead, ErrorKind, Read};
+use std::io::ErrorKind;
 
 use crate::chunk;
 use crate::common::Info;
@@ -16,12 +17,12 @@ use crate::common::Info;
 /// * `decode_image_data` - reading from `IDAT` / `fdAT` sequence into `Vec<u8>`
 /// * `finish_decoding_image_data()` - discarding remaining data from `IDAT` / `fdAT` sequence
 /// * `read_until_end_of_input()` - reading until `IEND` chunk
-pub(crate) struct ReadDecoder<R: Read> {
+pub(crate) struct ReadDecoder<R: LimitBufRead> {
     reader: R,
     decoder: StreamingDecoder,
 }
 
-impl<R: BufRead> ReadDecoder<R> {
+impl<R: LimitBufRead> ReadDecoder<R> {
     pub fn new(r: R) -> Self {
         Self {
             reader: r,
@@ -64,8 +65,9 @@ impl<R: BufRead> ReadDecoder<R> {
         image_data: Option<&mut UnfilterBuf<'_>>,
     ) -> Result<Decoded, DecodingError> {
         let (consumed, result) = {
-            let buf = self.reader.fill_buf()?;
-            if buf.is_empty() {
+            let limit = self.decoder.expected_read_limit()?;
+            let buf = self.reader.fill_buf_limited(limit)?;
+            if limit > 0 && buf.is_empty() {
                 return Err(DecodingError::IoError(ErrorKind::UnexpectedEof.into()));
             }
             self.decoder.update(buf, image_data)?

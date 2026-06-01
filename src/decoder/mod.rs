@@ -1,3 +1,4 @@
+pub(crate) mod input;
 mod interlace_info;
 mod read_decoder;
 pub(crate) mod stream;
@@ -10,9 +11,9 @@ use self::stream::{DecodeOptions, DecodingError, FormatErrorInner};
 use self::transform::{create_transform_fn, TransformFn};
 use self::unfiltering_buffer::UnfilteringBuffer;
 
-use std::io::BufRead;
 use std::mem;
 
+pub use self::input::{LimitBufRead, LimitBufReader};
 use crate::adam7::Adam7Info;
 use crate::common::{
     BitDepth, BytesPerPixel, ColorType, Info, ParameterErrorKind, Transformations,
@@ -87,7 +88,7 @@ impl Default for Limits {
 }
 
 /// PNG Decoder
-pub struct Decoder<R: BufRead> {
+pub struct Decoder<R: LimitBufRead> {
     read_decoder: ReadDecoder<R>,
     /// Output transformations
     transform: Transformations,
@@ -122,7 +123,7 @@ impl<'data> Row<'data> {
     }
 }
 
-impl<R: BufRead> Decoder<R> {
+impl<R: LimitBufRead> Decoder<R> {
     /// Create a new decoder configuration with default limits.
     pub fn new(r: R) -> Decoder<R> {
         Decoder::new_with_limits(r, Limits::default())
@@ -291,7 +292,7 @@ impl<R: BufRead> Decoder<R> {
 /// PNG reader (mostly high-level interface)
 ///
 /// Provides a high level that iterates over lines or whole images.
-pub struct Reader<R: BufRead> {
+pub struct Reader<R: LimitBufRead> {
     decoder: ReadDecoder<R>,
     bpp: BytesPerPixel,
     subframe: SubframeInfo,
@@ -327,7 +328,7 @@ struct SubframeInfo {
     consumed_and_flushed: bool,
 }
 
-impl<R: BufRead> Reader<R> {
+impl<R: LimitBufRead> Reader<R> {
     /// Advances to the start of the next animation frame and
     /// returns a reference to the [`FrameControl`] info that describes it.
     /// Skips and discards the image data of the previous frame if necessary.

@@ -2080,7 +2080,6 @@ mod tests {
     use std::fs::File;
     use std::io::BufRead;
     use std::io::Cursor;
-    use std::io::Seek;
     use std::io::{BufReader, ErrorKind, Read, Write};
     use std::rc::Rc;
 
@@ -2849,20 +2848,6 @@ mod tests {
             assert!(state.current_pos <= state.available_len);
         }
     }
-    impl Seek for StreamingInput {
-        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-            let mut state = self.state.borrow_mut();
-            state.current_pos = match pos {
-                std::io::SeekFrom::Start(n) => n as usize,
-                std::io::SeekFrom::End(n) => (self.full_input.len() as i64 + n) as usize,
-                std::io::SeekFrom::Current(n) => (state.current_pos as i64 + n) as usize,
-            } as usize;
-            Ok(state.current_pos as u64)
-        }
-        fn stream_position(&mut self) -> std::io::Result<u64> {
-            Ok(self.state.borrow().current_pos as u64)
-        }
-    }
 
     /// Test resuming/retrying `Reader.next_frame` after `UnexpectedEof`.
     #[test]
@@ -3049,7 +3034,7 @@ mod tests {
         Decoder::new(Cursor::new(png)).read_info().unwrap()
     }
 
-    fn get_fctl_sequence_number(reader: &Reader<impl BufRead + Seek>) -> u32 {
+    fn get_fctl_sequence_number(reader: &Reader<impl BufRead>) -> u32 {
         reader
             .info()
             .frame_control

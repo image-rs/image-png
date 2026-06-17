@@ -2,7 +2,7 @@ use super::stream::{DecodeOptions, Decoded, DecodingError, FormatErrorInner, Str
 use super::zlib::UnfilterBuf;
 use super::Limits;
 
-use std::io::{BufRead, ErrorKind, Read, Seek};
+use std::io::{BufRead, ErrorKind, Read};
 
 use crate::chunk;
 use crate::common::Info;
@@ -21,7 +21,7 @@ pub(crate) struct ReadDecoder<R: Read> {
     decoder: StreamingDecoder,
 }
 
-impl<R: BufRead + Seek> ReadDecoder<R> {
+impl<R: BufRead> ReadDecoder<R> {
     pub fn new(r: R) -> Self {
         Self {
             reader: r,

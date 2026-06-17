@@ -7,6 +7,8 @@
 * Added `DecodeOptions::set_captured_chunks` and `Info::captured_chunks` for
   preserving selected ancillary chunks during decoding. Recognized chunks are
   still parsed normally when captured. ([#680])
+* Relaxed `Decoder` and `Reader` input requirements from `BufRead + Seek` to
+  only `BufRead`. ([#687])
 
 ### Fixes
 
@@ -23,6 +25,7 @@
 [#680]: https://github.com/image-rs/image-png/pull/680
 [#681]: https://github.com/image-rs/image-png/pull/681
 [#682]: https://github.com/image-rs/image-png/pull/682
+[#687]: https://github.com/image-rs/image-png/pull/687
 
 ## 0.18.1
 

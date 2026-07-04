@@ -258,14 +258,6 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
             }
         }
         BytesPerPixel::Three => {
-            #[cfg(feature = "unstable")]
-            {
-                // Results in PR: https://github.com/image-rs/image-png/pull/632
-                // 23% better on an Epyc 7B13, 10% on a Zen 3 part.
-                // ~30% when targeting x86-64-v2.
-                super::simd::paeth_unfilter_3bpp(current, previous);
-                return;
-            }
             const BPP: usize = 3;
             let mut a_bpp = [0; BPP];
             let mut c_bpp = [0; BPP];
@@ -283,13 +275,6 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
             }
         }
         BytesPerPixel::Four => {
-            #[cfg(feature = "unstable")]
-            {
-                // Results in PR: https://github.com/image-rs/image-png/pull/633
-                // May be slightly faster on AMD EPYC 7B13.
-                super::simd::paeth_unfilter_4bpp(current, previous);
-                return;
-            }
             const BPP: usize = 4;
             let mut a_bpp = [0; BPP];
             let mut c_bpp = [0; BPP];

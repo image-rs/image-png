@@ -184,6 +184,15 @@ fn decode_ascii(text: &[u8]) -> Result<&str, TextDecodingError> {
     }
 }
 
+fn decompress(raw: &[u8], limit: usize) -> Result<Vec<u8>, DecodingError> {
+    fdeflate::decompress_to_vec_bounded(raw, limit).map_err(|e| match e {
+        BoundedDecompressionError::OutputTooLarge { .. } => {
+            DecodingError::from(TextDecodingError::OutOfDecompressionSpace)
+        }
+        _ => DecodingError::from(TextDecodingError::InflationError),
+    })
+}
+
 impl TEXtChunk {
     /// Constructs a new TEXtChunk.
     /// Not sure whether it should take &str or String.
@@ -274,7 +283,7 @@ impl ZTXtChunk {
         })
     }
 
-    /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `DECOMPRESSION_LIMIT` bytes.
+    /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to [`DECOMPRESSION_LIMIT`] bytes.
     pub fn decompress_text(&mut self) -> Result<(), DecodingError> {
         self.decompress_text_with_limit(DECOMPRESSION_LIMIT)
     }
@@ -283,17 +292,7 @@ impl ZTXtChunk {
     pub fn decompress_text_with_limit(&mut self, limit: usize) -> Result<(), DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
-                let uncompressed_raw = match fdeflate::decompress_to_vec_bounded(&v[..], limit) {
-                    Ok(s) => s,
-                    Err(BoundedDecompressionError::OutputTooLarge { .. }) => {
-                        return Err(DecodingError::from(
-                            TextDecodingError::OutOfDecompressionSpace,
-                        ));
-                    }
-                    Err(_) => {
-                        return Err(DecodingError::from(TextDecodingError::InflationError));
-                    }
-                };
+                let uncompressed_raw = decompress(v.as_slice(), limit)?;
                 self.text = OptCompressed::Uncompressed(decode_iso_8859_1(&uncompressed_raw));
             }
             OptCompressed::Uncompressed(_) => {}
@@ -302,12 +301,24 @@ impl ZTXtChunk {
     }
 
     /// Decompresses the inner text, and returns it as a `String`.
-    /// If decompression uses more the 2MiB, first call decompress with limit, and then this method.
+    ///
+    /// If decompression uses more the 2MiB, use [`get_text_with_limit`](Self::get_text_with_limit).
     pub fn get_text(&self) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
                 let uncompressed_raw = fdeflate::decompress_to_vec(v)
                     .map_err(|_| DecodingError::from(TextDecodingError::InflationError))?;
+                Ok(decode_iso_8859_1(&uncompressed_raw))
+            }
+            OptCompressed::Uncompressed(s) => Ok(s.clone()),
+        }
+    }
+
+    /// Decompresses the inner text, and returns it as a `String`. Can only handle decompressed text up to `limit` bytes.
+    pub fn get_text_with_limit(&self, limit: usize) -> Result<String, DecodingError> {
+        match &self.text {
+            OptCompressed::Compressed(v) => {
+                let uncompressed_raw = decompress(v.as_slice(), limit)?;
                 Ok(decode_iso_8859_1(&uncompressed_raw))
             }
             OptCompressed::Uncompressed(s) => Ok(s.clone()),
@@ -444,7 +455,7 @@ impl ITXtChunk {
         })
     }
 
-    /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to `DECOMPRESSION_LIMIT` bytes.
+    /// Decompresses the inner text, mutating its own state. Can only handle decompressed text up to [`DECOMPRESSION_LIMIT`] bytes.
     pub fn decompress_text(&mut self) -> Result<(), DecodingError> {
         self.decompress_text_with_limit(DECOMPRESSION_LIMIT)
     }
@@ -453,17 +464,7 @@ impl ITXtChunk {
     pub fn decompress_text_with_limit(&mut self, limit: usize) -> Result<(), DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
-                let uncompressed_raw = match fdeflate::decompress_to_vec_bounded(v, limit) {
-                    Ok(s) => s,
-                    Err(BoundedDecompressionError::OutputTooLarge { .. }) => {
-                        return Err(DecodingError::from(
-                            TextDecodingError::OutOfDecompressionSpace,
-                        ));
-                    }
-                    Err(_) => {
-                        return Err(DecodingError::from(TextDecodingError::InflationError));
-                    }
-                };
+                let uncompressed_raw = decompress(v.as_slice(), limit)?;
                 self.text = OptCompressed::Uncompressed(
                     String::from_utf8(uncompressed_raw)
                         .map_err(|_| TextDecodingError::Unrepresentable)?,
@@ -475,12 +476,25 @@ impl ITXtChunk {
     }
 
     /// Decompresses the inner text, and returns it as a `String`.
-    /// If decompression takes more than 2 MiB, try `decompress_text_with_limit` followed by this method.
+    ///
+    /// If decompression takes more than 2 MiB, use [`get_text_with_limit`](Self::get_text_with_limit).
     pub fn get_text(&self) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
                 let uncompressed_raw = fdeflate::decompress_to_vec(v)
                     .map_err(|_| DecodingError::from(TextDecodingError::InflationError))?;
+                String::from_utf8(uncompressed_raw)
+                    .map_err(|_| TextDecodingError::Unrepresentable.into())
+            }
+            OptCompressed::Uncompressed(s) => Ok(s.clone()),
+        }
+    }
+
+    /// Decompresses the inner text, and returns it as a `String`. Can only handle decompressed text up to `limit` bytes.
+    pub fn get_text_with_limit(&self, limit: usize) -> Result<String, DecodingError> {
+        match &self.text {
+            OptCompressed::Compressed(v) => {
+                let uncompressed_raw = decompress(v.as_slice(), limit)?;
                 String::from_utf8(uncompressed_raw)
                     .map_err(|_| TextDecodingError::Unrepresentable.into())
             }

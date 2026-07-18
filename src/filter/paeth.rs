@@ -135,21 +135,20 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
             }
             let mut a_bpp = [0; 3];
             let mut c_bpp = [0; 3];
-
-            let mut previous = &previous[..previous.len() / 3 * 3];
-            let current_len = current.len();
-            let mut current = &mut current[..current_len / 3 * 3];
-
-            while let ([c0, c1, c2, c_rest @ ..], [p0, p1, p2, p_rest @ ..]) = (current, previous) {
-                current = c_rest;
-                previous = p_rest;
-
-                *c0 = c0.wrapping_add(filter_paeth(a_bpp[0], *p0, c_bpp[0]));
-                *c1 = c1.wrapping_add(filter_paeth(a_bpp[1], *p1, c_bpp[1]));
-                *c2 = c2.wrapping_add(filter_paeth(a_bpp[2], *p2, c_bpp[2]));
-
-                a_bpp = [*c0, *c1, *c2];
-                c_bpp = [*p0, *p1, *p2];
+            for (chunk, &b_bpp) in current
+                .as_chunks_mut()
+                .0
+                .iter_mut()
+                .zip(previous.as_chunks().0)
+            {
+                let new_chunk = [
+                    chunk[0].wrapping_add(filter_paeth(a_bpp[0], b_bpp[0], c_bpp[0])),
+                    chunk[1].wrapping_add(filter_paeth(a_bpp[1], b_bpp[1], c_bpp[1])),
+                    chunk[2].wrapping_add(filter_paeth(a_bpp[2], b_bpp[2], c_bpp[2])),
+                ];
+                *chunk = new_chunk;
+                a_bpp = new_chunk;
+                c_bpp = b_bpp.try_into().unwrap();
             }
         }
         BytesPerPixel::Four => {
@@ -164,24 +163,21 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
 
             let mut a_bpp = [0; 4];
             let mut c_bpp = [0; 4];
-
-            let mut previous = &previous[..previous.len() & !3];
-            let current_len = current.len();
-            let mut current = &mut current[..current_len & !3];
-
-            while let ([c0, c1, c2, c3, c_rest @ ..], [p0, p1, p2, p3, p_rest @ ..]) =
-                (current, previous)
+            for (chunk, &b_bpp) in current
+                .as_chunks_mut()
+                .0
+                .iter_mut()
+                .zip(previous.as_chunks().0)
             {
-                current = c_rest;
-                previous = p_rest;
-
-                *c0 = c0.wrapping_add(filter_paeth(a_bpp[0], *p0, c_bpp[0]));
-                *c1 = c1.wrapping_add(filter_paeth(a_bpp[1], *p1, c_bpp[1]));
-                *c2 = c2.wrapping_add(filter_paeth(a_bpp[2], *p2, c_bpp[2]));
-                *c3 = c3.wrapping_add(filter_paeth(a_bpp[3], *p3, c_bpp[3]));
-
-                a_bpp = [*c0, *c1, *c2, *c3];
-                c_bpp = [*p0, *p1, *p2, *p3];
+                let new_chunk = [
+                    chunk[0].wrapping_add(filter_paeth(a_bpp[0], b_bpp[0], c_bpp[0])),
+                    chunk[1].wrapping_add(filter_paeth(a_bpp[1], b_bpp[1], c_bpp[1])),
+                    chunk[2].wrapping_add(filter_paeth(a_bpp[2], b_bpp[2], c_bpp[2])),
+                    chunk[3].wrapping_add(filter_paeth(a_bpp[3], b_bpp[3], c_bpp[3])),
+                ];
+                *chunk = new_chunk;
+                a_bpp = new_chunk;
+                c_bpp = b_bpp.try_into().unwrap();
             }
         }
         BytesPerPixel::Six => {

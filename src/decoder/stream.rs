@@ -296,7 +296,7 @@ impl fmt::Display for DecodingError {
         use self::DecodingError::*;
         match self {
             IoError(err) => write!(fmt, "{}", err),
-            Parameter(desc) => write!(fmt, "{}", &desc),
+            Parameter(desc) => write!(fmt, "{}", desc),
             Format(desc) => write!(fmt, "{}", desc),
             LimitsExceeded => write!(fmt, "limits are exceeded"),
         }
@@ -449,7 +449,7 @@ impl From<DecodingError> for io::Error {
     fn from(err: DecodingError) -> io::Error {
         match err {
             DecodingError::IoError(err) => err,
-            err => io::Error::new(io::ErrorKind::Other, err.to_string()),
+            err => io::Error::other(err.to_string()),
         }
     }
 }
@@ -1314,7 +1314,7 @@ impl StreamingDecoder {
             Err(DecodingError::Format(
                 FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
             ))
-        } else if self.current_chunk.raw_bytes.len() % 3 != 0 {
+        } else if !self.current_chunk.raw_bytes.len().is_multiple_of(3) {
             Err(DecodingError::Format(
                 FormatErrorInner::ChunkLengthWrong { kind: chunk::PLTE }.into(),
             ))
@@ -1761,7 +1761,7 @@ impl StreamingDecoder {
             }
         };
 
-        match fdeflate::decompress_to_vec_bounded(&compressed_data, self.limits.bytes) {
+        match fdeflate::decompress_to_vec_bounded(compressed_data, self.limits.bytes) {
             Ok(profile) => {
                 self.limits.reserve_bytes(profile.len())?;
                 info.icc_profile_name = Some(decode_iso_8859_1(keyword_slice));

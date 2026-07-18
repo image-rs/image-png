@@ -125,7 +125,7 @@ impl From<io::Error> for EncodingError {
 
 impl From<EncodingError> for io::Error {
     fn from(err: EncodingError) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, err.to_string())
+        io::Error::other(err.to_string())
     }
 }
 
@@ -180,10 +180,10 @@ impl<'a, W: Write> Encoder<'a, W> {
             return Err(EncodingError::Format(FormatErrorKind::NotAnimated.into()));
         }
 
-        if let Some(actl) = info.animation_control {
-            if actl.num_frames == 0 {
-                return Err(EncodingError::Format(FormatErrorKind::ZeroFrames.into()));
-            }
+        if let Some(actl) = info.animation_control
+            && actl.num_frames == 0
+        {
+            return Err(EncodingError::Format(FormatErrorKind::ZeroFrames.into()));
         }
 
         Ok(Encoder {
@@ -882,11 +882,11 @@ impl<W: Write> Writer<W> {
     fn increment_images_written(&mut self) {
         self.images_written = self.images_written.saturating_add(1);
 
-        if let Some(actl) = self.info.animation_control {
-            if actl.num_frames <= self.animation_written {
-                // If we've written all animation frames, all following will be normal image chunks.
-                self.info.frame_control = None;
-            }
+        if let Some(actl) = self.info.animation_control
+            && actl.num_frames <= self.animation_written
+        {
+            // If we've written all animation frames, all following will be normal image chunks.
+            self.info.frame_control = None;
         }
     }
 
@@ -1298,8 +1298,9 @@ impl<'a, W: Write> Write for ChunkWriter<'a, W> {
 
             // Prepare the next animated frame, if any.
             let no_fctl = wrt.should_skip_frame_control_on_default_image();
-            if wrt.info.frame_control.is_some() && !no_fctl {
-                let fctl = wrt.info.frame_control.as_mut().unwrap();
+            if let Some(fctl) = wrt.info.frame_control.as_mut()
+                && !no_fctl
+            {
                 self.buffer[0..4].copy_from_slice(&fctl.sequence_number.to_be_bytes());
                 fctl.sequence_number += 1;
                 self.index = 4;

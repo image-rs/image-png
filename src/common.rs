@@ -64,7 +64,7 @@ impl ColorType {
             subbyte => {
                 let samples_per_byte = 8 / subbyte as usize;
                 let whole = samples / samples_per_byte;
-                let fract = usize::from(samples % samples_per_byte > 0);
+                let fract = usize::from(!samples.is_multiple_of(samples_per_byte));
                 whole + fract
             }
         }

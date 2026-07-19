@@ -302,12 +302,33 @@ impl ZTXtChunk {
     }
 
     /// Decompresses the inner text, and returns it as a `String`.
-    /// If decompression uses more the 2MiB, first call decompress with limit, and then this method.
+    ///
+    /// To guard against decompression-bomb payloads (a small compressed chunk that expands
+    /// to an enormous amount of memory), the decompressed size is capped at
+    /// [`DECOMPRESSION_LIMIT`] (2 MiB), independent of any `Limits` configured on a `Decoder`
+    /// for the image's own pixel data. If the text needs a different cap, use
+    /// [`ZTXtChunk::get_text_with_limit`] instead.
     pub fn get_text(&self) -> Result<String, DecodingError> {
+        self.get_text_with_limit(DECOMPRESSION_LIMIT)
+    }
+
+    /// Decompresses the inner text, and returns it as a `String`.
+    /// Can only handle decompressed text up to `limit` bytes; returns
+    /// [`TextDecodingError::OutOfDecompressionSpace`] if decompressing further would exceed it.
+    pub fn get_text_with_limit(&self, limit: usize) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
-                let uncompressed_raw = fdeflate::decompress_to_vec(v)
-                    .map_err(|_| DecodingError::from(TextDecodingError::InflationError))?;
+                let uncompressed_raw = match fdeflate::decompress_to_vec_bounded(&v[..], limit) {
+                    Ok(s) => s,
+                    Err(BoundedDecompressionError::OutputTooLarge { .. }) => {
+                        return Err(DecodingError::from(
+                            TextDecodingError::OutOfDecompressionSpace,
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(DecodingError::from(TextDecodingError::InflationError));
+                    }
+                };
                 Ok(decode_iso_8859_1(&uncompressed_raw))
             }
             OptCompressed::Uncompressed(s) => Ok(s.clone()),
@@ -475,12 +496,33 @@ impl ITXtChunk {
     }
 
     /// Decompresses the inner text, and returns it as a `String`.
-    /// If decompression takes more than 2 MiB, try `decompress_text_with_limit` followed by this method.
+    ///
+    /// To guard against decompression-bomb payloads (a small compressed chunk that expands
+    /// to an enormous amount of memory), the decompressed size is capped at
+    /// [`DECOMPRESSION_LIMIT`] (2 MiB), independent of any `Limits` configured on a `Decoder`
+    /// for the image's own pixel data. If the text needs a different cap, use
+    /// [`ITXtChunk::get_text_with_limit`] instead.
     pub fn get_text(&self) -> Result<String, DecodingError> {
+        self.get_text_with_limit(DECOMPRESSION_LIMIT)
+    }
+
+    /// Decompresses the inner text, and returns it as a `String`.
+    /// Can only handle decompressed text up to `limit` bytes; returns
+    /// [`TextDecodingError::OutOfDecompressionSpace`] if decompressing further would exceed it.
+    pub fn get_text_with_limit(&self, limit: usize) -> Result<String, DecodingError> {
         match &self.text {
             OptCompressed::Compressed(v) => {
-                let uncompressed_raw = fdeflate::decompress_to_vec(v)
-                    .map_err(|_| DecodingError::from(TextDecodingError::InflationError))?;
+                let uncompressed_raw = match fdeflate::decompress_to_vec_bounded(v, limit) {
+                    Ok(s) => s,
+                    Err(BoundedDecompressionError::OutputTooLarge { .. }) => {
+                        return Err(DecodingError::from(
+                            TextDecodingError::OutOfDecompressionSpace,
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(DecodingError::from(TextDecodingError::InflationError));
+                    }
+                };
                 String::from_utf8(uncompressed_raw)
                     .map_err(|_| TextDecodingError::Unrepresentable.into())
             }
@@ -567,8 +609,20 @@ impl EncodableTextChunk for ITXtChunk {
         } else {
             match &self.text {
                 OptCompressed::Compressed(v) => {
-                    let uncompressed_raw = fdeflate::decompress_to_vec(v)
-                        .map_err(|_| EncodingError::from(TextEncodingError::CompressionError))?;
+                    // `compressed` was flipped to `false` while `text` was still in its
+                    // `Compressed` state (these two fields aren't tied together by the type
+                    // system since `compressed` is a public field). Guard against a
+                    // decompression bomb here too, the same way `get_text` does, rather than
+                    // decompressing an unbounded amount of data.
+                    let uncompressed_raw =
+                        match fdeflate::decompress_to_vec_bounded(v, DECOMPRESSION_LIMIT) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                return Err(EncodingError::from(
+                                    TextEncodingError::CompressionError,
+                                ));
+                            }
+                        };
                     data.extend_from_slice(&uncompressed_raw[..]);
                 }
                 OptCompressed::Uncompressed(s) => {
@@ -578,5 +632,206 @@ impl EncodableTextChunk for ITXtChunk {
         }
 
         encoder::write_chunk(w, chunk::iTXt, &data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Builds a zlib-compressed stream that decompresses to `uncompressed_size` zero bytes,
+    /// without ever materializing the full uncompressed payload in memory (only the compressed
+    /// output, and one small reusable input buffer, are held at once). This mirrors what a real
+    /// decompression-bomb payload embedded in a zTXt/iTXt chunk looks like: tiny on the wire,
+    /// huge once inflated.
+    fn make_bomb(uncompressed_size: usize) -> Vec<u8> {
+        let chunk = vec![0u8; 64 * 1024];
+        // `fast()` is plenty: all-zero input compresses extremely well at every level, and
+        // using a low compression level keeps the *test's own* payload-generation time small
+        // (this crate always decompresses with the memory-safe fdeflate backend regardless of
+        // which zlib compression level produced the bytes).
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        let mut remaining = uncompressed_size;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            encoder.write_all(&chunk[..n]).unwrap();
+            remaining -= n;
+        }
+        encoder.finish().unwrap()
+    }
+
+    // 256 MiB of zeroes: compresses down to a few hundred KiB, but is well beyond the crate's
+    // `DECOMPRESSION_LIMIT` (2 MiB) once inflated -- a >100x expansion, representative of a
+    // realistic decompression-bomb attack payload embedded in a tiny PNG text chunk.
+    const BOMB_UNCOMPRESSED_SIZE: usize = 256 * 1024 * 1024;
+
+    fn assert_out_of_decompression_space(err: &DecodingError) {
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("decompression space"),
+            "expected an out-of-decompression-space error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ztxt_get_text_rejects_decompression_bomb() {
+        let compressed = make_bomb(BOMB_UNCOMPRESSED_SIZE);
+        // Sanity check that this really is a "bomb": tiny on the wire.
+        assert!(
+            compressed.len() < BOMB_UNCOMPRESSED_SIZE / 100,
+            "compressed bomb unexpectedly large: {} bytes (expected >100x compression ratio)",
+            compressed.len()
+        );
+
+        let chunk = ZTXtChunk::decode(b"Comment", 0, &compressed).unwrap();
+
+        let start = Instant::now();
+        let result = chunk.get_text();
+        let elapsed = start.elapsed();
+
+        let err = result.expect_err("decompression bomb must be rejected by get_text()");
+        assert_out_of_decompression_space(&err);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "get_text() took too long, limit does not appear to be enforced early: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn ztxt_get_text_with_limit_respects_custom_limit() {
+        // A payload that decompresses to 100 bytes...
+        let compressed = make_bomb(100);
+        let chunk = ZTXtChunk::decode(b"Comment", 0, &compressed).unwrap();
+
+        // ...is rejected under a smaller-than-needed limit...
+        let err = chunk
+            .get_text_with_limit(10)
+            .expect_err("limit of 10 bytes should reject a 100 byte payload");
+        assert_out_of_decompression_space(&err);
+
+        // ...but succeeds once the limit is large enough.
+        let text = chunk
+            .get_text_with_limit(1024)
+            .expect("limit of 1024 bytes should accept a 100 byte payload");
+        assert_eq!(text.len(), 100);
+    }
+
+    #[test]
+    fn itxt_get_text_rejects_decompression_bomb() {
+        let compressed = make_bomb(BOMB_UNCOMPRESSED_SIZE);
+        assert!(
+            compressed.len() < BOMB_UNCOMPRESSED_SIZE / 100,
+            "compressed bomb unexpectedly large: {} bytes (expected >100x compression ratio)",
+            compressed.len()
+        );
+
+        let chunk =
+            ITXtChunk::decode(b"Comment", 1, 0, b"", b"", &compressed).unwrap();
+
+        let start = Instant::now();
+        let result = chunk.get_text();
+        let elapsed = start.elapsed();
+
+        let err = result.expect_err("decompression bomb must be rejected by get_text()");
+        assert_out_of_decompression_space(&err);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "get_text() took too long, limit does not appear to be enforced early: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn itxt_get_text_with_limit_respects_custom_limit() {
+        let compressed = make_bomb(100);
+        let chunk =
+            ITXtChunk::decode(b"Comment", 1, 0, b"", b"", &compressed).unwrap();
+
+        let err = chunk
+            .get_text_with_limit(10)
+            .expect_err("limit of 10 bytes should reject a 100 byte payload");
+        assert_out_of_decompression_space(&err);
+
+        let text = chunk
+            .get_text_with_limit(1024)
+            .expect("limit of 1024 bytes should accept a 100 byte payload");
+        assert_eq!(text.len(), 100);
+    }
+
+    #[test]
+    fn itxt_encode_rejects_decompression_bomb_on_inconsistent_state() {
+        // `compressed` is a public field that can be set independently of the private `text`
+        // state. If an application flips it to `false` without also decompressing `text`,
+        // `encode` used to try to decompress it (unbounded) in order to write it out as plain
+        // text. Make sure that path is bounded too.
+        let compressed = make_bomb(BOMB_UNCOMPRESSED_SIZE);
+        let chunk = ITXtChunk {
+            keyword: "Comment".to_string(),
+            compressed: false,
+            language_tag: "".to_string(),
+            translated_keyword: "".to_string(),
+            text: OptCompressed::Compressed(compressed),
+        };
+
+        let start = Instant::now();
+        let result = chunk.encode(&mut Vec::new());
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "encoding a decompression bomb must fail");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "encode() took too long, limit does not appear to be enforced early: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn ztxt_get_text_still_decodes_normal_text_correctly() {
+        let mut chunk = ZTXtChunk::new("Comment", "Hello, world! This is a normal comment.");
+        chunk.compress_text().unwrap();
+        assert_eq!(
+            chunk.get_text().unwrap(),
+            "Hello, world! This is a normal comment."
+        );
+    }
+
+    #[test]
+    fn itxt_get_text_still_decodes_normal_text_correctly() {
+        let mut chunk = ITXtChunk::new("Comment", "Hello, world! This is a normal comment.");
+        chunk.compressed = true;
+        chunk.compress_text().unwrap();
+        assert_eq!(
+            chunk.get_text().unwrap(),
+            "Hello, world! This is a normal comment."
+        );
+
+        // Round-trip through encode/decode too, to exercise the real chunk-parsing path.
+        let mut buf = Vec::new();
+        chunk.encode(&mut buf).unwrap();
+        // Skip the 8-byte length+type PNG chunk header and the trailing 4-byte CRC to get the
+        // raw chunk payload back out, mirroring how the decoder invokes `ITXtChunk::decode`.
+        // Field splitting mirrors `Decoder::parse_itxt` in src/decoder/stream.rs exactly: nulls
+        // can't be found by a single global scan, because the compression-method byte (always
+        // 0) and the compressed text payload itself may legitimately contain zero bytes.
+        let payload = &buf[8..buf.len() - 4];
+        let keyword_end = payload.iter().position(|&b| b == 0).unwrap();
+        let compression_flag = payload[keyword_end + 1];
+        let compression_method = payload[keyword_end + 2];
+        let value = &payload[keyword_end + 3..];
+        let lang_end = value.iter().position(|&b| b == 0).unwrap();
+        let translated_keyword_end =
+            lang_end + 1 + value[lang_end + 1..].iter().position(|&b| b == 0).unwrap();
+        let decoded = ITXtChunk::decode(
+            &payload[..keyword_end],
+            compression_flag,
+            compression_method,
+            &value[..lang_end],
+            &value[lang_end + 1..translated_keyword_end],
+            &value[translated_keyword_end + 1..],
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.get_text().unwrap(),
+            "Hello, world! This is a normal comment."
+        );
     }
 }

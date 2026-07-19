@@ -451,7 +451,7 @@ impl<R: BufRead> Reader<R> {
         };
 
         if self.info().interlaced {
-            let stride = self.unguarded_output_line_size(self.info().width);
+            let stride = self.unguarded_output_line_size(self.subframe.width);
             let samples = color_type.samples() as u8;
             let bits_pp = samples * (bit_depth as u8);
             let expand = crate::adam7::expand_pass;

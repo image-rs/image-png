@@ -1309,7 +1309,12 @@ impl StreamingDecoder {
 
     fn parse_plte(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
-        if info.palette.is_some() {
+        if self.have_idat {
+            // 4.3., PLTE must appear before IDAT.
+            Err(DecodingError::Format(
+                FormatErrorInner::AfterIdat { kind: chunk::PLTE }.into(),
+            ))
+        } else if info.palette.is_some() {
             // Only one palette is allowed
             Err(DecodingError::Format(
                 FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
@@ -1401,6 +1406,13 @@ impl StreamingDecoder {
         let len = vec.len();
         match color_type {
             ColorType::Grayscale => {
+                // 4.3., tRNS must appear before IDAT (this is unconditional for all color
+                // types; the Indexed arm below additionally requires it to be after PLTE).
+                if self.have_idat {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::AfterIdat { kind: chunk::tRNS }.into(),
+                    ));
+                }
                 if len < 2 {
                     return Err(DecodingError::Format(
                         FormatErrorInner::ShortPalette { expected: 2, len }.into(),
@@ -1414,6 +1426,12 @@ impl StreamingDecoder {
                 Ok(())
             }
             ColorType::Rgb => {
+                // 4.3., tRNS must appear before IDAT.
+                if self.have_idat {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::AfterIdat { kind: chunk::tRNS }.into(),
+                    ));
+                }
                 if len < 6 {
                     return Err(DecodingError::Format(
                         FormatErrorInner::ShortPalette { expected: 6, len }.into(),
@@ -1481,7 +1499,12 @@ impl StreamingDecoder {
 
     fn parse_chrm(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
-        if self.have_idat {
+        // 4.3., cHRM must appear before PLTE and IDAT (same category as cICP/mDCV).
+        if info.palette.is_some() {
+            Err(DecodingError::Format(
+                FormatErrorInner::AfterPlte { kind: chunk::cHRM }.into(),
+            ))
+        } else if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::cHRM }.into(),
             ))
@@ -1526,7 +1549,12 @@ impl StreamingDecoder {
 
     fn parse_gama(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
-        if self.have_idat {
+        // 4.3., gAMA must appear before PLTE and IDAT (same category as cICP/mDCV).
+        if info.palette.is_some() {
+            Err(DecodingError::Format(
+                FormatErrorInner::AfterPlte { kind: chunk::gAMA }.into(),
+            ))
+        } else if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::gAMA }.into(),
             ))
@@ -1551,7 +1579,12 @@ impl StreamingDecoder {
 
     fn parse_srgb(&mut self) -> Result<(), DecodingError> {
         let info = self.info.as_mut().unwrap();
-        if self.have_idat {
+        // 4.3., sRGB must appear before PLTE and IDAT (same category as cICP/mDCV).
+        if info.palette.is_some() {
+            Err(DecodingError::Format(
+                FormatErrorInner::AfterPlte { kind: chunk::sRGB }.into(),
+            ))
+        } else if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::sRGB }.into(),
             ))
@@ -1726,7 +1759,12 @@ impl StreamingDecoder {
     }
 
     fn parse_iccp(&mut self) -> Result<(), DecodingError> {
-        if self.have_idat {
+        // 4.3., iCCP must appear before PLTE and IDAT (same category as cICP/mDCV).
+        if self.info.as_ref().unwrap().palette.is_some() {
+            Err(DecodingError::Format(
+                FormatErrorInner::AfterPlte { kind: chunk::iCCP }.into(),
+            ))
+        } else if self.have_idat {
             Err(DecodingError::Format(
                 FormatErrorInner::AfterIdat { kind: chunk::iCCP }.into(),
             ))
@@ -3297,6 +3335,133 @@ mod tests {
         reader.next_frame(&mut buf).unwrap();
         assert_eq!(3093270825, crc32fast::hash(&buf));
         assert!(reader.info().trns.is_none());
+    }
+
+    // --- Regression tests for chunk-ordering gaps reported in
+    // https://github.com/image-rs/image-png/issues/700 ---
+
+    /// Writes an IHDR chunk that indicates a non-interlaced RGB8 (color type 2) image of
+    /// `width` x `width`.
+    fn write_rgb8_ihdr_with_width(w: &mut impl Write, width: u32) {
+        let mut data = Vec::new();
+        data.write_u32::<byteorder::BigEndian>(width).unwrap();
+        data.write_u32::<byteorder::BigEndian>(width).unwrap(); // height
+        data.write_u8(8).unwrap(); // bit depth
+        data.write_u8(2).unwrap(); // color type = RGB (truecolor)
+        data.write_u8(0).unwrap(); // compression method
+        data.write_u8(0).unwrap(); // filter method
+        data.write_u8(0).unwrap(); // interlace method
+        write_chunk(w, b"IHDR", &data);
+    }
+
+    /// Writes a single store-only IDAT chunk for a `width` x `width` RGB8 image.
+    fn write_rgb8_idat(w: &mut impl Write, width: u32) {
+        let mut image_pixels = Vec::new();
+        for _ in 0..width {
+            image_pixels.push(0u8); // filter = none
+            for i in 0..width {
+                let v = (i * 255 / width.max(1)) as u8;
+                image_pixels.extend_from_slice(&[v, 0, 255 - v]);
+            }
+        }
+        let mut zlib_data = Vec::new();
+        let mut compressor =
+            fdeflate::StoredOnlyCompressor::new(Cursor::new(&mut zlib_data)).unwrap();
+        compressor.write_data(&image_pixels).unwrap();
+        compressor.finish().unwrap();
+        write_chunk(w, b"IDAT", &zlib_data);
+    }
+
+    /// Sub-claim 1 of issue #700: a PLTE chunk appearing after IDAT must be rejected, matching
+    /// the ordering rule the PNG spec places on PLTE (must appear before the first IDAT chunk).
+    /// PLTE is a critical chunk, so violating this is a hard decoding error.
+    #[test]
+    fn test_plte_after_idat_is_rejected() {
+        let width = 1;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgb8_ihdr_with_width(&mut png, width);
+        write_rgb8_idat(&mut png, width);
+        // PLTE is optional for RGB (a "suggested palette") but must still precede IDAT.
+        write_chunk(&mut png, b"PLTE", &[1, 2, 3]);
+        write_iend(&mut png);
+
+        let decoder = Decoder::new(Cursor::new(&png));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        // The late PLTE chunk is only encountered while draining trailing chunks.
+        let err = reader.finish().unwrap_err();
+        assert!(
+            matches!(&err, DecodingError::Format(_)),
+            "expected a Format error, got {:?}",
+            err
+        );
+        assert!(
+            format!("{err}").starts_with("Chunk ChunkType { type: PLTE")
+                && format!("{err}").ends_with("is invalid after IDAT chunk."),
+            "unexpected error message: {err}"
+        );
+    }
+
+    /// Sub-claim 2 of issue #700: for non-Indexed color types, a tRNS chunk appearing after IDAT
+    /// must be rejected, mirroring the ordering check already applied to the Indexed arm.  tRNS
+    /// is an ancillary chunk, so the malformed chunk is discarded but decoding still succeeds.
+    #[test]
+    fn test_trns_after_idat_is_ignored_for_rgb() {
+        let width = 1;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgb8_ihdr_with_width(&mut png, width);
+        write_rgb8_idat(&mut png, width);
+        write_chunk(&mut png, b"tRNS", &[0, 1, 0, 2, 0, 3]);
+        write_iend(&mut png);
+
+        let decoder = Decoder::new(Cursor::new(&png));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        reader.finish().unwrap();
+        assert!(reader.info().trns.is_none());
+    }
+
+    /// Sub-claim 3 of issue #700: gAMA/cHRM/sRGB/iCCP must precede PLTE (same ordering category
+    /// as cICP/mDCV, which already enforce this).  These are ancillary chunks, so a chunk that
+    /// violates the rule is discarded but decoding still succeeds.
+    #[test]
+    fn test_gama_chrm_srgb_iccp_after_plte_are_ignored() {
+        let width = 1;
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_rgb8_ihdr_with_width(&mut png, width);
+        // PLTE is optional for RGB (a "suggested palette") but gAMA/cHRM/sRGB/iCCP must precede
+        // it, just like cICP/mDCV already require.
+        write_chunk(&mut png, b"PLTE", &[10, 20, 30]);
+        let mut gama_data = Vec::new();
+        gama_data.write_u32::<byteorder::BigEndian>(45455).unwrap();
+        write_chunk(&mut png, b"gAMA", &gama_data);
+        let chrm_data = [0u8; 32];
+        write_chunk(&mut png, b"cHRM", &chrm_data);
+        write_chunk(&mut png, b"sRGB", &[0]);
+        // The palette check in `parse_iccp` happens before the chunk body is parsed, so the
+        // (invalid, empty) payload below is never inspected.
+        write_chunk(&mut png, b"iCCP", &[]);
+        write_rgb8_idat(&mut png, width);
+        write_iend(&mut png);
+
+        let decoder = Decoder::new(Cursor::new(&png));
+        let mut reader = decoder.read_info().unwrap();
+        assert!(reader.info().gama_chunk.is_none());
+        assert!(reader.info().chrm_chunk.is_none());
+        assert!(reader.info().srgb.is_none());
+        assert!(reader.info().icc_profile.is_none());
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        reader.finish().unwrap();
+        assert!(reader.info().gama_chunk.is_none());
+        assert!(reader.info().chrm_chunk.is_none());
+        assert!(reader.info().srgb.is_none());
+        assert!(reader.info().icc_profile.is_none());
     }
 
     /// This is a regression test for https://crbug.com/422421347

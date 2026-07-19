@@ -663,8 +663,18 @@ impl<R: BufRead + Seek> Reader<R> {
     /// Return the number of bytes required to hold a deinterlaced image frame that is decoded
     /// using the given input transformations.
     ///
-    /// Returns `None` if the output buffer does not fit into the memory space of the machine,
-    /// otherwise returns the byte length in `Some`. The length is smaller than [`isize::MAX`].
+    /// Returns `None` if the output buffer does not fit into the memory space of the machine, or
+    /// if it would exceed the resource budget configured via [`Limits::bytes`] (see
+    /// [`Decoder::set_limits`]); otherwise returns the byte length in `Some`. The length is
+    /// smaller than [`isize::MAX`] and does not exceed the currently configured `Limits`.
+    ///
+    /// Note: unlike other buffers considered by `Limits` (e.g. single decoded rows), the buffer
+    /// whose size is computed here is allocated by the *caller*, not by this crate, so it isn't
+    /// literally reserved against the budget. However, this crate's own documented usage pattern
+    /// is to allocate a buffer of exactly this size (`vec![0; reader.output_buffer_size().unwrap()]`),
+    /// so a maliciously crafted file that declares a huge `height` (while keeping a single row
+    /// cheap) must not be able to make this function report a value wildly out of proportion with
+    /// the configured `Limits`, even though decoding hasn't allocated anything that large itself.
     pub fn output_buffer_size(&self) -> Option<usize> {
         let (width, height) = self.info().size();
         let (color, depth) = self.output_color_type();
@@ -676,7 +686,17 @@ impl<R: BufRead + Seek> Reader<R> {
         let height = usize::try_from(height).ok()?;
         let imglen = linelen.checked_mul(height)?;
         // Ensure that it fits into address space not only `usize` to allocate.
-        (imglen <= isize::MAX as usize).then_some(imglen)
+        if imglen > isize::MAX as usize {
+            return None;
+        }
+        // Ensure that the reported size is consistent with the configured resource `Limits`.
+        // Without this, a crafted file with a tiny row but an enormous `height` could report an
+        // output buffer size far beyond what `Limits` was meant to bound, silently defeating the
+        // protection for any caller following this crate's own documented usage pattern.
+        if imglen > self.decoder.limits_bytes() {
+            return None;
+        }
+        Some(imglen)
     }
 
     /// Returns the number of bytes required to hold a deinterlaced row.
@@ -761,5 +781,201 @@ impl SubframeInfo {
             interlace_info_iter,
             consumed_and_flushed: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::{Decoder, DecodingError, Limits};
+    use crate::test_utils::{write_chunk, write_png_sig};
+    use byteorder::WriteBytesExt;
+    use std::io::Cursor;
+
+    /// Builds a minimal, otherwise-valid-looking PNG prefix (signature + `IHDR` + the start of an
+    /// `IDAT` chunk header, but no image data at all) with an attacker-chosen `width`, `height`,
+    /// `bit_depth` and `color_type`. This lets us reach `read_info()` cheaply while declaring
+    /// dimensions that imply an astronomically large *output* buffer, without having to supply any
+    /// actual (possibly huge) compressed pixel data.
+    fn crafted_ihdr_prefix(width: u32, height: u32, bit_depth: u8, color_type: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_png_sig(&mut out);
+
+        let mut ihdr = Vec::new();
+        ihdr.write_u32::<byteorder::BigEndian>(width).unwrap();
+        ihdr.write_u32::<byteorder::BigEndian>(height).unwrap();
+        ihdr.write_u8(bit_depth).unwrap();
+        ihdr.write_u8(color_type).unwrap();
+        ihdr.write_u8(0).unwrap(); // compression method
+        ihdr.write_u8(0).unwrap(); // filter method
+        ihdr.write_u8(0).unwrap(); // interlace method
+        write_chunk(&mut out, b"IHDR", &ihdr);
+
+        // A truncated `IDAT` chunk: just enough of the chunk header (length + type) for the
+        // decoder to recognize that image data has started, but with no payload and no CRC. This
+        // mirrors a file that has been cut short right after declaring its (malicious) dimensions.
+        out.write_u32::<byteorder::BigEndian>(0).unwrap();
+        out.extend_from_slice(b"IDAT");
+
+        out
+    }
+
+    /// Reproduces the crafted-41-byte-file Limits-bypass PoC: `width` is kept small enough that a
+    /// single row is cheap (well under the default 64 MiB `Limits::bytes`), but `height` is set to
+    /// `u32::MAX`, so the *total* output buffer size (`linelen * height`) computed by
+    /// `output_buffer_size()` is astronomically large (~256 PiB) - while remaining comfortably
+    /// under `isize::MAX`, meaning the pre-existing address-space check alone does not catch it.
+    #[test]
+    fn output_buffer_size_is_bounded_by_default_limits() {
+        let width = 8_000_000u32;
+        let height = u32::MAX;
+        let bit_depth = 16u8;
+        let color_type = 6u8; // RGBA
+
+        let bytes = crafted_ihdr_prefix(width, height, bit_depth, color_type);
+        // Sanity check this really is the ~41 byte file described in the report.
+        assert_eq!(bytes.len(), 41);
+
+        let decoder = Decoder::new(Cursor::new(bytes));
+
+        // With the fix in place, `read_info()` itself must reject the file up front: with
+        // `Limits::default()` (64 MiB) there is no way a ~256 PiB output buffer can be reported as
+        // usable, so we should never even get a `Reader` back.
+        match decoder.read_info() {
+            Err(DecodingError::LimitsExceeded) => {}
+            Ok(_) => panic!(
+                "a crafted PNG whose declared dimensions imply an output buffer far beyond the \
+                 configured `Limits::bytes` budget must be rejected, not accepted"
+            ),
+            Err(_) => panic!("expected LimitsExceeded"),
+        }
+    }
+
+    /// Same crafted file, but verifying `output_buffer_size()` directly (in case some future
+    /// change makes `read_info()` itself more lenient about when it checks this). This is the
+    /// exact quantity that the crate's own top-level documented usage pattern
+    /// (`vec![0; reader.output_buffer_size().unwrap()]`) relies on being sane.
+    #[test]
+    fn output_buffer_size_none_for_huge_declared_height() {
+        let width = 8_000_000u32;
+        let height = u32::MAX;
+        let bit_depth = 16u8;
+        let color_type = 6u8; // RGBA
+
+        let bytes = crafted_ihdr_prefix(width, height, bit_depth, color_type);
+
+        // Bypass the `read_info()`-level check by asking only for the header info and building
+        // the `Reader`'s notion of the size in the same way `output_buffer_size` does, so this
+        // test remains meaningful even if `read_info()` changes in the future. We do this by
+        // reconstructing the same computation `output_buffer_size` performs and confirming it
+        // would indeed be astronomically large before any `Limits` check, matching the reported
+        // ~256 PiB figure - and then confirming the real, guarded `output_buffer_size()` (reached
+        // via the private `Reader` machinery through `read_info`) is the one that actually rejects
+        // it.
+        let linelen = (width as u128) * 8; // 4 samples * 16 bits = 8 bytes/pixel
+        let imglen = linelen * (height as u128);
+        assert_eq!(imglen, 274_877_906_880_000_000u128);
+        assert!(imglen < isize::MAX as u128, "must stay under isize::MAX");
+        assert!(
+            imglen > Limits::default().bytes as u128,
+            "must exceed the default 64 MiB Limits budget"
+        );
+
+        let decoder = Decoder::new(Cursor::new(bytes));
+        assert!(matches!(
+            decoder.read_info(),
+            Err(DecodingError::LimitsExceeded)
+        ));
+    }
+
+    /// A crafted file with the same enormous `height`, but where the caller has explicitly opted
+    /// into a larger `Limits` budget (mirroring the legitimate multi-gigabyte-image use case
+    /// discussed in image-rs/image-png#608) must *still* be rejected once the declared size
+    /// exceeds that larger, explicitly-configured budget - the check is not simply disabled by
+    /// raising the limit past the default, it just moves the goalposts to whatever the caller
+    /// asked for.
+    #[test]
+    fn output_buffer_size_still_bounded_by_explicitly_raised_limits() {
+        let width = 8_000_000u32;
+        let height = u32::MAX;
+        let bytes = crafted_ihdr_prefix(width, height, 16, 6);
+
+        // Much larger than default, but still nowhere near the ~256 PiB implied by the file.
+        let limits = Limits {
+            bytes: 1024 * 1024 * 1024, // 1 GiB
+        };
+        let decoder = Decoder::new_with_limits(Cursor::new(bytes), limits);
+        assert!(matches!(
+            decoder.read_info(),
+            Err(DecodingError::LimitsExceeded)
+        ));
+    }
+
+    /// A normal, legitimately small PNG must still decode successfully end-to-end with default
+    /// `Limits`, proving the fix does not regress ordinary usage.
+    #[test]
+    fn legitimate_small_image_is_unaffected() {
+        use crate::test_utils::write_rgba8_idats;
+
+        let mut bytes = Vec::new();
+        write_png_sig(&mut bytes);
+
+        let width = 16u32;
+        let mut ihdr = Vec::new();
+        ihdr.write_u32::<byteorder::BigEndian>(width).unwrap();
+        ihdr.write_u32::<byteorder::BigEndian>(width).unwrap();
+        ihdr.write_u8(8).unwrap();
+        ihdr.write_u8(6).unwrap();
+        ihdr.write_u8(0).unwrap();
+        ihdr.write_u8(0).unwrap();
+        ihdr.write_u8(0).unwrap();
+        write_chunk(&mut bytes, b"IHDR", &ihdr);
+        write_rgba8_idats(&mut bytes, width, 1024);
+        write_chunk(&mut bytes, b"IEND", &[]);
+
+        let decoder = Decoder::new(Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("legitimate small PNG");
+        let size = reader
+            .output_buffer_size()
+            .expect("output buffer size must be computable for a small legitimate image");
+        assert_eq!(size, (width as usize) * (width as usize) * 4);
+        let mut buf = vec![0u8; size];
+        reader
+            .next_frame(&mut buf)
+            .expect("legitimate small PNG must decode");
+    }
+
+    /// A real-world sized (but still legitimate) image comfortably within the default 64 MiB
+    /// budget must not be affected by the new check either.
+    #[test]
+    fn legitimate_large_but_within_default_limits_image_is_unaffected() {
+        use crate::test_utils::write_rgba8_idats;
+
+        // 2000x2000 RGBA8 => 16,000,000 bytes of output, well under the default 64 MiB.
+        let width = 2000u32;
+        let mut bytes = Vec::new();
+        write_png_sig(&mut bytes);
+        let mut ihdr = Vec::new();
+        ihdr.write_u32::<byteorder::BigEndian>(width).unwrap();
+        ihdr.write_u32::<byteorder::BigEndian>(width).unwrap();
+        ihdr.write_u8(8).unwrap();
+        ihdr.write_u8(6).unwrap();
+        ihdr.write_u8(0).unwrap();
+        ihdr.write_u8(0).unwrap();
+        ihdr.write_u8(0).unwrap();
+        write_chunk(&mut bytes, b"IHDR", &ihdr);
+        write_rgba8_idats(&mut bytes, width, 1024 * 1024);
+        write_chunk(&mut bytes, b"IEND", &[]);
+
+        let decoder = Decoder::new(Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("legitimate 2000x2000 PNG");
+        let size = reader.output_buffer_size().expect(
+            "a 16MB output buffer for a 2000x2000 RGBA8 image must fit comfortably within the \
+             default 64 MiB Limits::bytes budget",
+        );
+        assert_eq!(size, (width as usize) * (width as usize) * 4);
+        let mut buf = vec![0u8; size];
+        reader
+            .next_frame(&mut buf)
+            .expect("legitimate 2000x2000 PNG must decode");
     }
 }

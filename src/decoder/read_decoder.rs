@@ -44,6 +44,17 @@ impl<R: BufRead + Seek> ReadDecoder<R> {
         self.decoder.limits.reserve_bytes(bytes)
     }
 
+    /// Returns the number of bytes still available under the configured [`Limits::bytes`]
+    /// budget (i.e. the budget minus whatever has already been reserved for internal buffers
+    /// such as single rows, decompression scratch space, or ancillary chunk data).
+    ///
+    /// This does not itself reserve anything; it is used as a read-only sanity ceiling, e.g. by
+    /// [`super::Reader::output_buffer_size`], so that a caller relying on the default `Limits`
+    /// cannot be tricked by a crafted file into computing an astronomically large buffer size.
+    pub fn limits_bytes(&self) -> usize {
+        self.decoder.limits.bytes
+    }
+
     pub fn set_ignore_text_chunk(&mut self, ignore_text_chunk: bool) {
         self.decoder.set_ignore_text_chunk(ignore_text_chunk);
     }

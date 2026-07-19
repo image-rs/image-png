@@ -3043,6 +3043,147 @@ mod tests {
             .sequence_number
     }
 
+    /// Standard Adam7 pass parameters: (x_sampling, x_offset, y_sampling, y_offset).
+    /// See e.g. https://en.wikipedia.org/wiki/Adam7_algorithm and
+    /// `crate::adam7::PassConstants::PASSES`.
+    const ADAM7_PASSES: [(u32, u32, u32, u32); 7] = [
+        (8, 0, 8, 0),
+        (8, 4, 8, 0),
+        (4, 0, 8, 4),
+        (4, 2, 4, 0),
+        (2, 0, 4, 2),
+        (2, 1, 2, 0),
+        (1, 0, 2, 1),
+    ];
+
+    /// Builds a store-only zlib-compressed, Adam7-interlaced, 8-bit-grayscale image of the
+    /// given `width` x `height`, with `pixel(x, y)` supplying each sample. Mirrors
+    /// `test_utils::generate_rgba8_with_width_and_height`, but for the interlaced layout.
+    fn generate_interlaced_gray8(
+        width: u32,
+        height: u32,
+        pixel: impl Fn(u32, u32) -> u8,
+    ) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for &(xs, xo, ys, yo) in ADAM7_PASSES.iter() {
+            let lines = height.saturating_sub(yo).div_ceil(ys);
+            let samples = width.saturating_sub(xo).div_ceil(xs);
+            if lines == 0 || samples == 0 {
+                continue;
+            }
+            for line in 0..lines {
+                let y = yo + line * ys;
+                raw.push(0u8); // filter type: None
+                for i in 0..samples {
+                    let x = xo + i * xs;
+                    raw.push(pixel(x, y));
+                }
+            }
+        }
+
+        let mut zlib_data = Vec::new();
+        let mut compressor =
+            fdeflate::StoredOnlyCompressor::new(Cursor::new(&mut zlib_data)).unwrap();
+        compressor.write_data(&raw).unwrap();
+        compressor.finish().unwrap();
+        zlib_data
+    }
+
+    /// Regression test for https://github.com/image-rs/image-png/issues/699: the interlaced
+    /// branch of `Reader::next_frame` computed the Adam7 deinterlacing `stride` from the
+    /// *global* IHDR width instead of the current sub-frame's own width, silently scattering
+    /// the sub-frame's pixel data to the wrong offsets in the output buffer whenever an APNG
+    /// sub-frame is narrower than the canvas.
+    ///
+    /// This builds a hand-crafted interlaced (Adam7) APNG whose real animation frame
+    /// (introduced via `fcTL` + `fdAT`, following a full-canvas `IDAT` default image that is
+    /// *not* part of the animation, per the `fcTL`-for-default-image spec restriction) is
+    /// narrower than the `IHDR` canvas, and checks that the decoded pixels (tightly packed per
+    /// `output_info.line_size`, exactly like the non-interlaced branch and like
+    /// `OutputInfo::width` promise) match the pixels that were encoded.
+    #[test]
+    fn test_interlaced_apng_subframe_narrower_than_canvas() {
+        // Canvas is wider than the (interlaced) sub-frame that we decode.
+        const CANVAS_WIDTH: u32 = 10;
+        const CANVAS_HEIGHT: u32 = 8;
+        const SUB_WIDTH: u32 = 6;
+        const SUB_HEIGHT: u32 = 8;
+
+        // A distinct, non-zero grayscale value for every pixel of the sub-frame so that any
+        // misplacement is trivially observable (0 can only mean "never written").
+        let pixel = |x: u32, y: u32| -> u8 { (1 + y * SUB_WIDTH + x) as u8 };
+
+        let default_image_data =
+            generate_interlaced_gray8(CANVAS_WIDTH, CANVAS_HEIGHT, |_x, _y| 0xAA);
+        let subframe_data = generate_interlaced_gray8(SUB_WIDTH, SUB_HEIGHT, pixel);
+
+        // Assemble: signature, IHDR (8-bit grayscale, interlaced), acTL, IDAT (full-canvas
+        // default image, *not* part of the animation -- no preceding fcTL), fcTL (the actual,
+        // narrower-than-canvas, animation frame), fdAT, IEND.
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        {
+            let mut data = Vec::new();
+            data.write_u32::<byteorder::BigEndian>(CANVAS_WIDTH)
+                .unwrap();
+            data.write_u32::<byteorder::BigEndian>(CANVAS_HEIGHT)
+                .unwrap();
+            data.write_u8(8).unwrap(); // bit depth
+            data.write_u8(0).unwrap(); // color type = grayscale
+            data.write_u8(0).unwrap(); // compression method
+            data.write_u8(0).unwrap(); // filter method
+            data.write_u8(1).unwrap(); // interlace method = Adam7
+            write_chunk(&mut png, b"IHDR", &data);
+        }
+        write_actl(
+            &mut png,
+            &crate::AnimationControl {
+                num_frames: 1,
+                num_plays: 1,
+            },
+        );
+        write_chunk(&mut png, b"IDAT", &default_image_data);
+        write_fctl(
+            &mut png,
+            &crate::FrameControl {
+                sequence_number: 0,
+                width: SUB_WIDTH,
+                height: SUB_HEIGHT,
+                x_offset: 0,
+                y_offset: 0,
+                ..Default::default()
+            },
+        );
+        write_fdat(&mut png, 1, &subframe_data);
+        write_iend(&mut png);
+
+        let mut reader = Decoder::new(Cursor::new(png)).read_info().unwrap();
+        // The default image (IDAT) is not part of the animation; advance to the real frame.
+        assert!(reader.info().frame_control.is_none());
+        reader.next_frame_info().unwrap();
+
+        let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+        let output_info = reader.next_frame(&mut buf).unwrap();
+
+        assert_eq!(output_info.width, SUB_WIDTH);
+        assert_eq!(output_info.height, SUB_HEIGHT);
+        assert_eq!(output_info.line_size, SUB_WIDTH as usize);
+
+        // The decoded sub-frame must be tightly packed using its OWN width -- exactly like the
+        // non-interlaced branch, and exactly as `output_info.line_size` promises -- NOT
+        // scattered using the wider canvas width.
+        for y in 0..SUB_HEIGHT {
+            let row = &buf[(y as usize) * output_info.line_size
+                ..(y as usize + 1) * output_info.line_size];
+            let expected: Vec<u8> = (0..SUB_WIDTH).map(|x| pixel(x, y)).collect();
+            assert_eq!(
+                row,
+                expected.as_slice(),
+                "sub-frame row {y} mismatch (interlaced sub-frame narrower than canvas)"
+            );
+        }
+    }
+
     /// Tests that [`Reader.next_frame`] will report a `PolledAfterEndOfImage` error when called
     /// after already decoding a single frame in a non-animated PNG.
     #[test]

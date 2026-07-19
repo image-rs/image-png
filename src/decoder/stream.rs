@@ -1275,6 +1275,16 @@ impl StreamingDecoder {
             Err(DecodingError::Format(
                 FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
             ))
+        } else if self.current_chunk.raw_bytes.len() % 3 != 0 {
+            // Each PLTE entry is a 3-byte RGB triple ("11.2.3 PLTE Palette" of the PNG
+            // spec), so the chunk length must be a multiple of 3. `start_chunk` only
+            // bounds the total length to 3..=768, which still admits lengths like 4, 5,
+            // 7, 8, etc. that are not a multiple of 3. Reject those here so that
+            // downstream code (e.g. `create_rgba_palette`) can rely on the palette
+            // always containing whole RGB entries.
+            Err(DecodingError::Format(
+                FormatErrorInner::ChunkLengthWrong { kind: chunk::PLTE }.into(),
+            ))
         } else {
             info.palette = Some(Cow::Owned(self.current_chunk.raw_bytes.clone()));
             Ok(())
@@ -2296,6 +2306,108 @@ mod tests {
         // Note that the 2nd chunk in the test file has been manually altered to have a different
         // content (`b"test iccp contents"`) which would have a different CRC (797351983).
         assert_eq!(4070462061, crc32fast::hash(&icc_profile));
+    }
+
+    /// Builds a minimal 1x1 indexed-color (color type 3) PNG whose `PLTE` chunk contains
+    /// exactly `plte_bytes` as its raw, unvalidated payload.
+    ///
+    /// This intentionally goes around `crate::Encoder` (which would refuse to write a
+    /// palette whose length is not a multiple of 3) so that we can exercise the decoder
+    /// with a `PLTE` chunk of an arbitrary length, as could be crafted by an attacker.
+    fn indexed_png_with_raw_plte(plte_bytes: &[u8]) -> Vec<u8> {
+        use crate::test_utils::{write_chunk, write_iend, write_png_sig};
+
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+
+        // IHDR: 1x1, 8-bit, color type 3 (Indexed).
+        let mut ihdr = Vec::new();
+        ihdr.write_u32::<byteorder::BigEndian>(1).unwrap(); // width
+        ihdr.write_u32::<byteorder::BigEndian>(1).unwrap(); // height
+        ihdr.write_u8(8).unwrap(); // bit depth
+        ihdr.write_u8(3).unwrap(); // color type = Indexed
+        ihdr.write_u8(0).unwrap(); // compression method
+        ihdr.write_u8(0).unwrap(); // filter method
+        ihdr.write_u8(0).unwrap(); // interlace method
+        write_chunk(&mut png, b"IHDR", &ihdr);
+
+        write_chunk(&mut png, b"PLTE", plte_bytes);
+
+        // A single scanline: filter-type byte (0 = None) followed by one index byte (0).
+        let raw_row = [0u8, 0u8];
+        let mut zlib_data = Vec::new();
+        let mut store_only_compressor =
+            fdeflate::StoredOnlyCompressor::new(Cursor::new(&mut zlib_data)).unwrap();
+        store_only_compressor.write_data(&raw_row).unwrap();
+        store_only_compressor.finish().unwrap();
+        write_chunk(&mut png, b"IDAT", &zlib_data);
+
+        write_iend(&mut png);
+        png
+    }
+
+    /// Attempts to fully decode (`read_info` + `next_frame`) an indexed-color PNG whose raw
+    /// `PLTE` payload is `plte_bytes`, with `Transformations::EXPAND` enabled (matching the
+    /// codepath that goes through `create_rgba_palette`).
+    fn try_decode_indexed_png_with_raw_plte(
+        plte_bytes: &[u8],
+    ) -> Result<Vec<u8>, crate::DecodingError> {
+        let png = indexed_png_with_raw_plte(plte_bytes);
+        let mut decoder = crate::Decoder::new(Cursor::new(png));
+        decoder.set_transformations(crate::Transformations::EXPAND);
+        let mut reader = decoder.read_info()?;
+        let mut buf = vec![0u8; reader.output_buffer_size().expect("size is known upfront")];
+        reader.next_frame(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// Regression test: a `PLTE` chunk length that passes the `3..=768` bound in
+    /// `start_chunk` but is *not* a multiple of 3 (e.g. 4, 5, 7, 8, 10, 11 bytes) used to
+    /// reach `create_rgba_palette` (in `src/decoder/transform/palette.rs`) with a 1- or
+    /// 2-byte remainder after its 4-bytes-at-a-time copy loop, which then panicked doing
+    /// `palette_iter[0..3]` on a too-short slice
+    /// (`range end index 3 out of range for slice of length 1/2`).
+    ///
+    /// Per the PNG spec ("11.2.3 PLTE Palette Table"), each palette entry is a 3-byte RGB
+    /// triple, so a chunk length that is not a multiple of 3 is malformed and should be
+    /// rejected by `parse_plte` at parse time, rather than silently truncated or allowed to
+    /// panic downstream.
+    #[test]
+    fn test_plte_length_not_multiple_of_3_is_rejected_not_panicking() {
+        for len in [4, 5, 7, 8, 10, 11] {
+            let plte_bytes = (0..len).map(|i| i as u8).collect::<Vec<u8>>();
+            let result = try_decode_indexed_png_with_raw_plte(&plte_bytes);
+            match result {
+                Err(DecodingError::Format(ref format_error)) => {
+                    assert!(
+                        matches!(
+                            format_error.inner,
+                            super::FormatErrorInner::ChunkLengthWrong { kind } if kind == crate::chunk::PLTE
+                        ),
+                        "PLTE len={len}: expected ChunkLengthWrong{{kind: PLTE}}, got {format_error:?}"
+                    );
+                }
+                other => panic!(
+                    "PLTE len={len}: expected a clean Format/ChunkLengthWrong decode error, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// Companion to the regression test above: PLTE lengths that *are* a multiple of 3 (the
+    /// only lengths a conforming encoder ever produces) must keep decoding successfully, for
+    /// every length in the legal `3..=768` range.
+    #[test]
+    fn test_plte_length_multiple_of_3_still_decodes() {
+        for num_entries in 1..=256 {
+            let len = num_entries * 3;
+            let plte_bytes = (0..len).map(|i| i as u8).collect::<Vec<u8>>();
+            let result = try_decode_indexed_png_with_raw_plte(&plte_bytes);
+            assert!(
+                result.is_ok(),
+                "PLTE len={len} (a valid multiple of 3) unexpectedly failed: {result:?}"
+            );
+        }
     }
 
     #[test]

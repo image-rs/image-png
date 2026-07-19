@@ -71,7 +71,14 @@ fn create_rgba_palette(info: &Info) -> [[u8; 4]; 256] {
             rgba_iter = &mut rgba_iter[1..];
         }
         if !palette_iter.is_empty() {
-            rgba_iter[0][0..3].copy_from_slice(&palette_iter[0..3]);
+            // Defense in depth: `parse_plte` should already guarantee that
+            // `palette.len()` is a multiple of 3, so `palette_iter` should be empty
+            // at this point. But if that invariant is ever violated (e.g. by a
+            // future caller that constructs `Info::palette` without going through
+            // `parse_plte`), avoid a slice-index panic by only copying as many
+            // bytes as are actually available, rather than assuming exactly 3.
+            let len = palette_iter.len().min(3);
+            rgba_iter[0][0..len].copy_from_slice(&palette_iter[0..len]);
         }
     }
 
@@ -356,6 +363,22 @@ mod test {
                 let actual = super::create_rgba_palette(&info);
                 assert_eq!(actual, expected);
             }
+        }
+    }
+
+    /// Defense-in-depth regression test: `create_rgba_palette` should not panic even if it is
+    /// ever called (e.g. by some future/alternate caller) with a malformed `palette` whose
+    /// length is not a multiple of 3. In normal operation `parse_plte` (in
+    /// `src/decoder/stream.rs`) rejects such lengths before they ever reach `Info::palette`,
+    /// but this test exercises `create_rgba_palette` directly so that it doesn't depend on
+    /// that upstream validation.
+    #[test]
+    fn test_create_rgba_palette_does_not_panic_on_malformed_palette_length() {
+        for palette_len in [1usize, 2, 4, 5, 7, 8, 10, 11] {
+            let palette: Vec<u8> = (0..palette_len as u8).collect();
+            let info = create_info(8, &palette, None);
+            // Must not panic.
+            let _ = super::create_rgba_palette(&info);
         }
     }
 }

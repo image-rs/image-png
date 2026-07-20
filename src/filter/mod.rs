@@ -4,9 +4,6 @@ use crate::{common::BytesPerPixel, Compression};
 
 mod paeth;
 
-#[cfg(feature = "unstable")]
-mod simd;
-
 /// The byte level filter applied to scanlines to prepare them for compression.
 ///
 /// Compression in general benefits from repetitive data. The filter is a content-aware method of

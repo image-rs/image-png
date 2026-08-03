@@ -490,7 +490,9 @@ fn filter_internal(
             }
 
             for i in 0..bpp {
-                output[i] = current[i].wrapping_sub(paeth::filter_paeth_fpnge(0, previous[i], 0));
+                /* a = 0, b = b, c = 0
+                In this case, paeth will always return b */
+                output[i] = current[i].wrapping_sub(previous[i]);
             }
             Paeth
         }

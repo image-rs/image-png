@@ -783,9 +783,6 @@ impl<W: Write> Writer<W> {
             ));
         }
 
-        let prev = vec![0; in_len];
-        let mut prev = prev.as_slice();
-
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
 
@@ -803,9 +800,10 @@ impl<W: Write> Writer<W> {
                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
 
                 let mut current = vec![0; in_len + 1];
+                let mut prev: &[u8] = &[];
+
                 for line in data.chunks(in_len) {
                     let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
-
                     current[0] = filter_type as u8;
                     compressor.write_data(&current)?;
                     prev = line;
@@ -831,18 +829,19 @@ impl<W: Write> Writer<W> {
                 }
             }
             DeflateCompression::Level(level) => {
-                let mut current = vec![0; in_len];
-
-                let mut zlib =
+                let mut compressor =
                     ZlibEncoder::new(Vec::new(), flate2::Compression::new(u32::from(level)));
-                for line in data.chunks(in_len) {
-                    let filter_type = filter(filter_method, bpp, prev, line, &mut current);
 
-                    zlib.write_all(&[filter_type as u8])?;
-                    zlib.write_all(&current)?;
+                let mut current = vec![0; in_len + 1];
+                let mut prev: &[u8] = &[];
+
+                for line in data.chunks(in_len) {
+                    let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
+                    current[0] = filter_type as u8;
+                    compressor.write_all(&current)?;
                     prev = line;
                 }
-                zlib.finish()?
+                compressor.finish()?
             }
         };
 

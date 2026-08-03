@@ -537,6 +537,13 @@ pub(crate) fn filter(
     let bpp = bpp.into_usize();
     let len = current.len();
 
+    // first row
+    if previous.is_empty() {
+        // Sub is the most efficient filter for the first row
+        return filter_internal(RowFilter::Sub, bpp, len, previous, current, output);
+        // NoFilter and Sub are the only filters that works when previous is empty
+    }
+
     match method {
         Filter::Adaptive => adaptive_filter(sum_buffer, bpp, len, previous, current, output),
         Filter::MinEntropy => adaptive_filter(entropy, bpp, len, previous, current, output),

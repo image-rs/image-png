@@ -1192,10 +1192,10 @@ impl<'a, W: Write> ChunkWriter<'a, W> {
         // TODO (maybe): find a way to hold two chunks at a time if `usize`
         //               is 64 bits.
         const CAP: usize = u32::MAX as usize >> 1;
-        let curr_chunk = if writer.images_written == 0 {
-            chunk::IDAT
-        } else {
+        let curr_chunk = if writer.images_written > 0 && writer.info.frame_control.is_some() {
             chunk::fdAT
+        } else {
+            chunk::IDAT
         };
         ChunkWriter {
             writer,
@@ -1236,17 +1236,18 @@ impl<'a, W: Write> ChunkWriter<'a, W> {
         assert_eq!(self.index, 0, "Called when not flushed");
         let wrt = self.writer.deref_mut();
 
-        self.curr_chunk = if wrt.images_written == 0 {
-            chunk::IDAT
-        } else {
+        self.curr_chunk = if wrt.images_written > 0 && wrt.info.frame_control.is_some() {
             chunk::fdAT
+        } else {
+            chunk::IDAT
         };
 
         match wrt.info.frame_control {
             Some(_) if wrt.should_skip_frame_control_on_default_image() => {}
             Some(ref mut fctl) => {
                 fctl.encode(&mut wrt.w)?;
-                fctl.sequence_number += 1;
+                fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
+                wrt.animation_written += 1;
             }
             _ => {}
         }
@@ -1293,17 +1294,11 @@ impl<'a, W: Write> Write for ChunkWriter<'a, W> {
         }
 
         // index == 0 means a chunk has been flushed out
-        if self.index == 0 {
-            let wrt = self.writer.deref_mut();
-
-            // Prepare the next animated frame, if any.
-            let no_fctl = wrt.should_skip_frame_control_on_default_image();
-            if wrt.info.frame_control.is_some() && !no_fctl {
-                let fctl = wrt.info.frame_control.as_mut().unwrap();
-                self.buffer[0..4].copy_from_slice(&fctl.sequence_number.to_be_bytes());
-                fctl.sequence_number += 1;
-                self.index = 4;
-            }
+        if self.index == 0 && self.curr_chunk == chunk::fdAT {
+            let fctl = self.writer.info.frame_control.as_mut().unwrap();
+            self.buffer[0..4].copy_from_slice(&fctl.sequence_number.to_be_bytes());
+            fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
+            self.index = 4;
         }
 
         // Cap the buffer length to the maximum number of bytes that can't still
@@ -1333,25 +1328,14 @@ impl<W: Write> Drop for ChunkWriter<'_, W> {
     }
 }
 
-// TODO: find a better name
-//
-/// This enum is used to be allow the `StreamWriter` to keep
-/// its inner `ChunkWriter` without wrapping it inside a
-/// `ZlibEncoder`. This is used in the case that between the
-/// change of state that happens when the last write of a frame
-/// is performed an error occurs, which obviously has to be returned.
-/// This creates the problem of where to store the writer before
-/// exiting the function, and this is where `Wrapper` comes in.
+/// State of the current frame in a [`StreamWriter`].
 ///
-/// Unfortunately the `ZlibWriter` can't be used because on the
-/// write following the error, `finish` would be called and that
-/// would write some data even if 0 bytes where compressed.
-///
-/// If the `finish` function fails then there is nothing much to
-/// do as the `ChunkWriter` would get lost so the `Unrecoverable`
-/// variant is used to signal that.
-enum Wrapper<'a, W: Write> {
-    Chunk(ChunkWriter<'a, W>),
+/// `Ready` holds the chunk writer before a frame is started and between
+/// completed frames. The compression variants hold a frame in progress.
+/// `Unrecoverable` records that finishing a compressor failed and lost its
+/// chunk writer.
+enum FrameState<'a, W: Write> {
+    Ready(ChunkWriter<'a, W>),
     Flate2(ZlibEncoder<ChunkWriter<'a, W>>),
     FDeflate(fdeflate::Compressor<ChunkWriter<'a, W>>),
     Unrecoverable,
@@ -1359,26 +1343,26 @@ enum Wrapper<'a, W: Write> {
     None,
 }
 
-impl<'a, W: Write> Wrapper<'a, W> {
+impl<'a, W: Write> FrameState<'a, W> {
     fn from_level(writer: ChunkWriter<'a, W>, compression: DeflateCompression) -> io::Result<Self> {
         Ok(match compression {
             DeflateCompression::NoCompression => {
-                Wrapper::Flate2(ZlibEncoder::new(writer, flate2::Compression::none()))
+                FrameState::Flate2(ZlibEncoder::new(writer, flate2::Compression::none()))
             }
             DeflateCompression::FdeflateUltraFast => {
-                Wrapper::FDeflate(fdeflate::Compressor::new(writer)?)
+                FrameState::FDeflate(fdeflate::Compressor::new(writer)?)
             }
-            DeflateCompression::Level(level) => Wrapper::Flate2(ZlibEncoder::new(
+            DeflateCompression::Level(level) => FrameState::Flate2(ZlibEncoder::new(
                 writer,
                 flate2::Compression::new(u32::from(level)),
             )),
         })
     }
 
-    /// Like `Option::take` this returns the `Wrapper` contained
-    /// in `self` and replaces it with `Wrapper::None`
-    fn take(&mut self) -> Wrapper<'a, W> {
-        let mut swap = Wrapper::None;
+    /// Like `Option::take` this returns the `FrameState` contained
+    /// in `self` and replaces it with `FrameState::None`
+    fn take(&mut self) -> FrameState<'a, W> {
+        let mut swap = FrameState::None;
         mem::swap(self, &mut swap);
         swap
     }
@@ -1387,14 +1371,13 @@ impl<'a, W: Write> Wrapper<'a, W> {
 /// Streaming PNG writer
 ///
 /// This may silently fail in the destructor, so it is a good idea to call
-/// [`finish`] or [`flush`] before dropping.
+/// [`finish`] before dropping.
 ///
 /// [`finish`]: Self::finish
-/// [`flush`]: Write::flush
 pub struct StreamWriter<'a, W: Write> {
-    /// The option here is needed in order to access the inner `ChunkWriter` in-between
-    /// each frame, which is needed for writing the fcTL chunks between each frame
-    writer: Wrapper<'a, W>,
+    /// Tracks whether a frame is ready to start, currently being compressed, or
+    /// cannot be recovered after a compression error.
+    writer: FrameState<'a, W>,
     prev_buf: Vec<u8>,
     curr_buf: Vec<u8>,
     filtered_buf: Vec<u8>,
@@ -1431,12 +1414,11 @@ impl<'a, W: Write> StreamWriter<'a, W> {
         let curr_buf = vec![0; in_len];
         let filtered_buf = vec![0; in_len];
 
-        let mut chunk_writer = ChunkWriter::new(writer, buf_len);
+        let chunk_writer = ChunkWriter::new(writer, buf_len);
         let (line_len, to_write) = chunk_writer.next_frame_info();
-        chunk_writer.write_header()?;
 
         Ok(StreamWriter {
-            writer: Wrapper::from_level(chunk_writer, compression)?,
+            writer: FrameState::Ready(chunk_writer),
             index: 0,
             prev_buf,
             curr_buf,
@@ -1614,10 +1596,11 @@ impl<'a, W: Write> StreamWriter<'a, W> {
 
     /// Consume the stream writer with validation.
     ///
-    /// Unlike a simple drop this ensures that the all data was written correctly. When other
+    /// Unlike a simple drop this ensures that all data was written correctly. When other
     /// validation options (chunk sequencing) had been turned on in the configuration of inner
     /// [`Writer`], then it will also do a check on their correctness. Differently from
-    /// [`Writer::finish`], this just `flush`es, returns error if some data is abandoned.
+    /// [`Writer::finish`], this finishes the current frame and returns an error if some data is
+    /// abandoned.
     pub fn finish(mut self) -> Result<()> {
         self.finish_mut()
     }
@@ -1625,67 +1608,96 @@ impl<'a, W: Write> StreamWriter<'a, W> {
     /// Internal helper that can be called both from `fn finish(mut self)`
     /// and from `fn drop(&mut self)`.
     fn finish_mut(&mut self) -> Result<()> {
+        if matches!(self.writer, FrameState::None) {
+            return Ok(());
+        }
         if self.to_write > 0 {
             let err = FormatErrorKind::MissingData(self.to_write).into();
             return Err(EncodingError::Format(err));
         }
 
-        self.flush()?;
+        if !matches!(self.writer, FrameState::Ready(_)) {
+            self.finish_frame()?;
+        }
         match self.writer.take() {
-            Wrapper::Chunk(wrt) => {
+            FrameState::Ready(wrt) => {
                 wrt.writer.validate_sequence_done()?;
             }
-            Wrapper::FDeflate(wrt) => {
-                wrt.finish()?;
-            }
-            Wrapper::Flate2(wrt) => {
-                wrt.finish()?;
-            }
-            Wrapper::None => unreachable!(),
-            Wrapper::Unrecoverable => {
+            FrameState::None => unreachable!(),
+            FrameState::Unrecoverable => {
                 let err = FormatErrorKind::Unrecoverable.into();
                 return Err(EncodingError::Format(err));
             }
+            FrameState::FDeflate(_) | FrameState::Flate2(_) => unreachable!(),
         }
 
         Ok(())
     }
 
-    /// Flushes the buffered chunk, checks if it was the last frame,
-    /// writes the next frame header and gets the next frame scanline size
-    /// and image size.
-    /// NOTE: This method must only be called when the writer is the variant Chunk(_)
-    fn new_frame(&mut self) -> Result<()> {
-        let wrt = match &mut self.writer {
-            Wrapper::Chunk(wrt) => wrt,
-            Wrapper::Unrecoverable => {
+    fn finish_frame(&mut self) -> Result<()> {
+        match self.writer.take() {
+            FrameState::FDeflate(wrt) => match wrt.finish() {
+                Ok(chunk) => self.writer = FrameState::Ready(chunk),
+                Err(err) => {
+                    self.writer = FrameState::Unrecoverable;
+                    return Err(err.into());
+                }
+            },
+            FrameState::Flate2(wrt) => match wrt.finish() {
+                Ok(chunk) => self.writer = FrameState::Ready(chunk),
+                Err(err) => {
+                    self.writer = FrameState::Unrecoverable;
+                    return Err(err.into());
+                }
+            },
+            FrameState::Unrecoverable => {
+                self.writer = FrameState::Unrecoverable;
                 let err = FormatErrorKind::Unrecoverable.into();
                 return Err(EncodingError::Format(err));
             }
-            Wrapper::Flate2(_) | Wrapper::FDeflate(_) => {
-                unreachable!("never called on a half-finished frame")
-            }
-            Wrapper::None => unreachable!(),
+            FrameState::Ready(_) => unreachable!("no frame is in progress"),
+            FrameState::None => unreachable!(),
+        }
+
+        let FrameState::Ready(wrt) = &mut self.writer else {
+            unreachable!()
         };
         wrt.flush()?;
+        wrt.writer.increment_images_written();
+        Ok(())
+    }
+
+    fn start_frame(&mut self) -> Result<()> {
+        let wrt = match &mut self.writer {
+            FrameState::Ready(wrt) => wrt,
+            FrameState::Unrecoverable => {
+                let err = FormatErrorKind::Unrecoverable.into();
+                return Err(EncodingError::Format(err));
+            }
+            FrameState::Flate2(_) | FrameState::FDeflate(_) => {
+                unreachable!("a frame is already in progress")
+            }
+            FrameState::None => unreachable!(),
+        };
         wrt.writer.validate_new_image()?;
 
-        if let Some(fctl) = self.fctl {
-            wrt.set_fctl(fctl);
+        if wrt.writer.info.frame_control.is_some() {
+            if let Some(fctl) = self.fctl {
+                wrt.set_fctl(fctl);
+            }
         }
-        let (scansize, size) = wrt.next_frame_info();
-        self.line_len = scansize;
-        self.to_write = size;
-
+        let (line_len, to_write) = wrt.next_frame_info();
+        self.prev_buf[..line_len].fill(0);
+        self.line_len = line_len;
+        self.to_write = to_write;
+        self.index = 0;
         wrt.write_header()?;
-        wrt.writer.increment_images_written();
 
-        // now it can be taken because the next statements cannot cause any errors
         match self.writer.take() {
-            Wrapper::Chunk(wrt) => match Wrapper::from_level(wrt, self.compression) {
+            FrameState::Ready(wrt) => match FrameState::from_level(wrt, self.compression) {
                 Ok(writer) => self.writer = writer,
                 Err(err) => {
-                    self.writer = Wrapper::Unrecoverable;
+                    self.writer = FrameState::Unrecoverable;
                     return Err(err.into());
                 }
             },
@@ -1698,7 +1710,7 @@ impl<'a, W: Write> StreamWriter<'a, W> {
 
 impl<'a, W: Write> Write for StreamWriter<'a, W> {
     fn write(&mut self, mut data: &[u8]) -> io::Result<usize> {
-        if let Wrapper::Unrecoverable = self.writer {
+        if let FrameState::Unrecoverable = self.writer {
             let err = FormatErrorKind::Unrecoverable.into();
             return Err(EncodingError::Format(err).into());
         }
@@ -1707,29 +1719,11 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
             return Ok(0);
         }
 
-        if self.to_write == 0 {
-            match self.writer.take() {
-                Wrapper::Flate2(wrt) => match wrt.finish() {
-                    Ok(chunk) => self.writer = Wrapper::Chunk(chunk),
-                    Err(err) => {
-                        self.writer = Wrapper::Unrecoverable;
-                        return Err(err);
-                    }
-                },
-                Wrapper::FDeflate(wrt) => match wrt.finish() {
-                    Ok(chunk) => self.writer = Wrapper::Chunk(chunk),
-                    Err(err) => {
-                        self.writer = Wrapper::Unrecoverable;
-                        return Err(err);
-                    }
-                },
-                chunk @ Wrapper::Chunk(_) => self.writer = chunk,
-                Wrapper::Unrecoverable => unreachable!(),
-                Wrapper::None => unreachable!(),
-            };
-
-            // Transition Wrapper::Chunk to Wrapper::Zlib.
-            self.new_frame()?;
+        if matches!(self.writer, FrameState::Ready(_)) {
+            self.start_frame()?;
+        } else if self.to_write == 0 {
+            self.finish_frame()?;
+            self.start_frame()?;
         }
 
         let written = data.read(&mut self.curr_buf[..self.line_len][self.index..])?;
@@ -1746,11 +1740,11 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
             );
             // This can't fail as the other variant is used only to allow the zlib encoder to finish
             match &mut self.writer {
-                Wrapper::Flate2(wrt) => {
+                FrameState::Flate2(wrt) => {
                     wrt.write_all(&[filter_type as u8])?;
                     wrt.write_all(&self.filtered_buf)?;
                 }
-                Wrapper::FDeflate(wrt) => {
+                FrameState::FDeflate(wrt) => {
                     wrt.write_data(&[filter_type as u8])?;
                     wrt.write_data(&self.filtered_buf)?;
                 }
@@ -1766,20 +1760,15 @@ impl<'a, W: Write> Write for StreamWriter<'a, W> {
 
     fn flush(&mut self) -> io::Result<()> {
         match &mut self.writer {
-            Wrapper::Flate2(wrt) => wrt.flush()?,
-            Wrapper::Chunk(wrt) => wrt.flush()?,
-            Wrapper::FDeflate(_) => (), // TODO: Add `flush()` to `fdeflate::Compressor`?
+            FrameState::Flate2(wrt) => wrt.flush()?,
+            FrameState::Ready(wrt) => wrt.flush()?,
+            FrameState::FDeflate(_) => (), // TODO: Add `flush()` to `fdeflate::Compressor`?
             // This handles both the case where we entered an unrecoverable state after zlib
             // decoding failure and after a panic while we had taken the chunk/zlib reader.
-            Wrapper::Unrecoverable | Wrapper::None => {
+            FrameState::Unrecoverable | FrameState::None => {
                 let err = FormatErrorKind::Unrecoverable.into();
                 return Err(EncodingError::Format(err).into());
             }
-        }
-
-        if self.index > 0 {
-            let err = FormatErrorKind::WrittenTooMuch(self.index).into();
-            return Err(EncodingError::Format(err).into());
         }
 
         Ok(())
@@ -2342,6 +2331,80 @@ mod tests {
     }
 
     #[test]
+    fn stream_animation_roundtrip() -> Result<()> {
+        let first_frame = [0u8; 64];
+        let second_frame = [0xffu8; 64];
+
+        for compression in [
+            DeflateCompression::NoCompression,
+            DeflateCompression::FdeflateUltraFast,
+            DeflateCompression::Level(4),
+        ] {
+            let mut output = Vec::new();
+            let mut encoder = Encoder::new(&mut output, 8, 8);
+            encoder.set_color(ColorType::Grayscale);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_deflate_compression(compression);
+            encoder.set_animated(2, 0)?;
+            encoder.validate_sequence(true);
+            let mut writer = encoder.write_header()?;
+            let mut stream = writer.stream_writer_with_size(8)?;
+
+            stream.set_frame_delay(1, 1)?;
+            stream.write_all(&first_frame)?;
+            stream.set_frame_delay(1, 2)?;
+            stream.write_all(&second_frame)?;
+            stream.finish()?;
+            writer.finish()?;
+
+            let mut reader = Decoder::new(Cursor::new(output)).read_info().unwrap();
+            assert_eq!(reader.info().animation_control.unwrap().num_frames, 2);
+            let mut decoded = [0; 64];
+            reader.next_frame(&mut decoded).unwrap();
+            assert_eq!(decoded, first_frame);
+            assert_eq!(reader.info().frame_control.unwrap().delay_den, 1);
+            reader.next_frame(&mut decoded).unwrap();
+            assert_eq!(decoded, second_frame);
+            assert_eq!(reader.info().frame_control.unwrap().delay_den, 2);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn stream_animation_with_separate_default_image() -> Result<()> {
+        let default_image = [0x40u8; 16];
+        let first_frame = [0x80u8; 16];
+        let second_frame = [0xc0u8; 16];
+        let mut output = Vec::new();
+
+        let mut encoder = Encoder::new(&mut output, 4, 4);
+        encoder.set_color(ColorType::Grayscale);
+        encoder.set_depth(BitDepth::Eight);
+        encoder.set_animated(2, 0)?;
+        encoder.set_sep_def_img(true)?;
+        encoder.validate_sequence(true);
+        let mut writer = encoder.write_header()?;
+        let mut stream = writer.stream_writer_with_size(8)?;
+        stream.write_all(&default_image)?;
+        stream.write_all(&first_frame)?;
+        stream.write_all(&second_frame)?;
+        stream.finish()?;
+        writer.finish()?;
+
+        let mut reader = Decoder::new(Cursor::new(output)).read_info().unwrap();
+        let mut decoded = [0; 16];
+        reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(decoded, default_image);
+        reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(decoded, first_frame);
+        reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(decoded, second_frame);
+
+        Ok(())
+    }
+
+    #[test]
     fn image_validate_animation_sep_def_image() -> Result<()> {
         let width = 10;
         let height = 10;
@@ -2408,6 +2471,18 @@ mod tests {
     }
 
     #[test]
+    fn stream_validation_rejects_missing_image_data() -> Result<()> {
+        let mut output = Vec::new();
+        let encoder = Encoder::new(&mut output, 1, 1);
+        let mut writer = encoder.write_header()?;
+        let stream = writer.stream_writer()?;
+
+        assert!(stream.finish().is_err());
+
+        Ok(())
+    }
+
+    #[test]
     fn issue_307_stream_validation() -> Result<()> {
         let output = vec![0u8; 1024];
         let mut cursor = Cursor::new(output);
@@ -2428,6 +2503,28 @@ mod tests {
             decoder.next_frame(&mut buffer[..]).expect("Valid read");
             assert_eq!(buffer, [1]);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn stream_flushes_partial_scanline() -> Result<()> {
+        let mut output = Vec::new();
+        let mut encoder = Encoder::new(&mut output, 2, 1);
+        encoder.set_color(ColorType::Grayscale);
+        let mut writer = encoder.write_header()?;
+        let mut stream = writer.stream_writer()?;
+
+        assert_eq!(stream.write(&[1])?, 1);
+        stream.flush()?;
+        assert_eq!(stream.write(&[2])?, 1);
+        stream.finish()?;
+        writer.finish()?;
+
+        let mut reader = Decoder::new(Cursor::new(output)).read_info().unwrap();
+        let mut decoded = [0; 2];
+        reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(decoded, [1, 2]);
 
         Ok(())
     }

@@ -1,5 +1,3 @@
-use core::convert::TryInto;
-
 use crate::{common::BytesPerPixel, Compression};
 
 mod paeth;

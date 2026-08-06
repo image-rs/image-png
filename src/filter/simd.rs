@@ -1,6 +1,5 @@
 ///! Optional module containing `portable_simd` versions of the most
 ///! important unfiltering algorithms. Enable using the `unstable` feature.
-use core::convert::TryInto;
 use core::simd::prelude::*;
 use core::simd::Select;
 // Import the fastest arch-specific scalar implementations from the outer crate.

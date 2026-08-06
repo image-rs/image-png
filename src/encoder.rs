@@ -1798,7 +1798,7 @@ mod tests {
     use crate::Decoder;
 
     use io::BufReader;
-    use rand::{rng, Rng};
+    use rand::{rng, Rng, RngExt};
     use std::cmp;
     use std::fs::File;
     use std::io::Cursor;

@@ -9,7 +9,8 @@ use flate2::write::ZlibEncoder;
 use crate::chunk::{self, ChunkType};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
-    FrameControl, Info, ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat, Unit,
+    FrameControl, ImageOffset, Info, OffsetUnit, ParameterError, ParameterErrorKind,
+    PixelDimensions, ScaledFloat, Unit,
 };
 use crate::filter::{filter, Filter};
 use crate::text_metadata::{
@@ -417,6 +418,9 @@ impl<'a, W: Write> Encoder<'a, W> {
     pub fn set_pixel_dims(&mut self, pixel_dims: Option<PixelDimensions>) {
         self.info.pixel_dims = pixel_dims
     }
+    pub fn set_image_offset(&mut self, image_offset: Option<ImageOffset>) {
+        self.info.image_offset = image_offset
+    }
     /// Convenience function to add tEXt chunks to [`Info`] struct
     pub fn add_text_chunk(&mut self, keyword: String, text: String) -> Result<()> {
         let text_chunk = TEXtChunk::new(keyword, text);
@@ -607,6 +611,18 @@ impl<W: Write> Writer<W> {
                 Unit::Unspecified => phys_data[8] = 0,
             }
             self.write_chunk(chunk::pHYs, &phys_data)?;
+        }
+
+        // Encode the oFFs chunk
+        if let Some(off) = info.image_offset {
+            let mut offs_data = [0; 9];
+            offs_data[0..4].copy_from_slice(&off.x.to_be_bytes());
+            offs_data[4..8].copy_from_slice(&off.y.to_be_bytes());
+            match off.unit {
+                OffsetUnit::Pixel => offs_data[8] = 0,
+                OffsetUnit::Micrometer => offs_data[8] = 1,
+            }
+            self.write_chunk(chunk::oFFs, &offs_data)?;
         }
 
         // If specified, the sRGB information overrides the source gamma and chromaticities.
@@ -1860,6 +1876,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn offs_chunk_roundtrip() {
+        let offset = ImageOffset {
+            x: -12,
+            y: 34,
+            unit: OffsetUnit::Micrometer,
+        };
+
+        let mut out = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut out, 1, 1);
+            encoder.set_color(ColorType::Grayscale);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_image_offset(Some(offset));
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0]).unwrap();
+        }
+
+        let decoder = Decoder::new(Cursor::new(&*out));
+        let reader = decoder.read_info().unwrap();
+        assert_eq!(reader.info().image_offset, Some(offset));
     }
 
     #[test]

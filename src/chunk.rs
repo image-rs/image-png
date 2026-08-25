@@ -27,6 +27,8 @@ pub const bKGD: ChunkType = ChunkType(*b"bKGD");
 pub const tIME: ChunkType = ChunkType(*b"tIME");
 /// Physical pixel dimensions
 pub const pHYs: ChunkType = ChunkType(*b"pHYs");
+/// Image offset
+pub const oFFs: ChunkType = ChunkType(*b"oFFs");
 /// Source system's pixel chromaticities
 pub const cHRM: ChunkType = ChunkType(*b"cHRM");
 /// Source system's gamma value

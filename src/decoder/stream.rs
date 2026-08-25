@@ -12,8 +12,8 @@ use crate::chunk::is_critical;
 use crate::chunk::{self, ChunkType, IDAT, IEND, IHDR};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, CapturedChunk, ColorType, ContentLightLevelInfo,
-    DisposeOp, FrameControl, Info, MasteringDisplayColorVolume, ParameterError, ParameterErrorKind,
-    PixelDimensions, ScaledFloat, SourceChromaticities, Unit,
+    DisposeOp, FrameControl, ImageOffset, Info, MasteringDisplayColorVolume, OffsetUnit,
+    ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat, SourceChromaticities, Unit,
 };
 use crate::text_metadata::{decode_iso_8859_1, ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
 use crate::traits::ReadBytesExt;
@@ -240,6 +240,7 @@ pub(crate) enum FormatErrorInner {
     InvalidDisposeOp(u8),
     InvalidBlendOp(u8),
     InvalidUnit(u8),
+    InvalidOffsetUnit(u8),
     /// The rendering intent of the sRGB chunk is invalid.
     InvalidSrgbRenderingIntent(u8),
     UnknownCompressionMethod(u8),
@@ -368,6 +369,7 @@ impl fmt::Display for FormatError {
             InvalidDisposeOp(nr) => write!(fmt, "Invalid dispose op {}.", nr),
             InvalidBlendOp(nr) => write!(fmt, "Invalid blend op {}.", nr),
             InvalidUnit(nr) => write!(fmt, "Invalid physical pixel size unit {}.", nr),
+            InvalidOffsetUnit(nr) => write!(fmt, "Invalid image offset unit {}.", nr),
             InvalidSrgbRenderingIntent(nr) => write!(fmt, "Invalid sRGB rendering intent {}.", nr),
             UnknownCompressionMethod(nr) => write!(fmt, "Unknown compression method {}.", nr),
             UnknownFilterMethod(nr) => write!(fmt, "Unknown filter method {}.", nr),
@@ -1071,6 +1073,7 @@ impl StreamingDecoder {
             chunk::sBIT => 1..=4,
             chunk::tRNS => 1..=256,
             chunk::pHYs => 9..=9,
+            chunk::oFFs => 9..=9,
             chunk::gAMA => 4..=4,
             chunk::acTL => 8..=8,
             chunk::fcTL => 26..=26,
@@ -1145,6 +1148,7 @@ impl StreamingDecoder {
             chunk::sBIT => self.parse_sbit(),
             chunk::tRNS => self.parse_trns(),
             chunk::pHYs => self.parse_phys(),
+            chunk::oFFs => self.parse_offs(),
             chunk::gAMA => self.parse_gama(),
             chunk::acTL => self.parse_actl(),
             chunk::fcTL => self.parse_fctl(),
@@ -1474,6 +1478,34 @@ impl StreamingDecoder {
             };
             let pixel_dims = PixelDimensions { xppu, yppu, unit };
             info.pixel_dims = Some(pixel_dims);
+            Ok(())
+        }
+    }
+
+    fn parse_offs(&mut self) -> Result<(), DecodingError> {
+        let info = self.info.as_mut().unwrap();
+        if self.have_idat {
+            Err(DecodingError::Format(
+                FormatErrorInner::AfterIdat { kind: chunk::oFFs }.into(),
+            ))
+        } else if info.image_offset.is_some() {
+            Err(DecodingError::Format(
+                FormatErrorInner::DuplicateChunk { kind: chunk::oFFs }.into(),
+            ))
+        } else {
+            let mut buf = &self.current_chunk.raw_bytes[..];
+            let x = buf.read_be()?;
+            let y = buf.read_be()?;
+            let unit = buf.read_be()?;
+            let unit = match OffsetUnit::from_u8(unit) {
+                Some(unit) => unit,
+                None => {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::InvalidOffsetUnit(unit).into(),
+                    ))
+                }
+            };
+            info.image_offset = Some(ImageOffset { x, y, unit });
             Ok(())
         }
     }

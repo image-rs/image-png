@@ -166,6 +166,36 @@ impl Unit {
     }
 }
 
+/// Image offset, as stored in the `oFFs` chunk
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageOffset {
+    /// Offset on the X axis, relative to the left edge of the page or screen
+    pub x: i32,
+    /// Offset on the Y axis, relative to the top edge of the page or screen
+    pub y: i32,
+    /// Either *Pixel* or *Micrometer*
+    pub unit: OffsetUnit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+/// Physical unit of the image offset
+pub enum OffsetUnit {
+    Pixel = 0,
+    Micrometer = 1,
+}
+
+impl OffsetUnit {
+    /// u8 -> Self. Temporary solution until Rust provides a canonical one.
+    pub fn from_u8(n: u8) -> Option<OffsetUnit> {
+        match n {
+            0 => Some(OffsetUnit::Pixel),
+            1 => Some(OffsetUnit::Micrometer),
+            _ => None,
+        }
+    }
+}
+
 /// How to reset buffer of an animated png (APNG) at the end of a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -667,6 +697,8 @@ pub struct Info<'a> {
     /// The image's `tRNS` chunk, if present; contains the alpha channel of the image's palette, 1 byte per entry.
     pub trns: Option<Cow<'a, [u8]>>,
     pub pixel_dims: Option<PixelDimensions>,
+    /// The image's `oFFs` chunk, if present; the image's offset relative to a larger page or screen.
+    pub image_offset: Option<ImageOffset>,
     /// The image's `PLTE` chunk, if present; contains the RGB channels (in that order) of the image's palettes, 3 bytes per entry (1 per channel).
     pub palette: Option<Cow<'a, [u8]>>,
     /// The contents of the image's gAMA chunk, if present.
@@ -727,6 +759,7 @@ impl Default for Info<'_> {
             chrm_chunk: None,
             bkgd: None,
             pixel_dims: None,
+            image_offset: None,
             frame_control: None,
             animation_control: None,
             source_gamma: None,

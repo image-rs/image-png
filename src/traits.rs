@@ -39,5 +39,6 @@ pub trait WriteBytesExt<T>: io::Write {
 read_bytes_ext!(u8);
 read_bytes_ext!(u16);
 read_bytes_ext!(u32);
+read_bytes_ext!(i32);
 
 write_bytes_ext!(u32);

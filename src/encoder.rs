@@ -535,6 +535,33 @@ pub(crate) fn write_chunk<W: Write>(mut w: W, name: chunk::ChunkType, data: &[u8
     Ok(())
 }
 
+/// Writes an `fdAT` chunk without copying its sequence number and data into one buffer.
+fn write_fdat_chunk<W: Write>(
+    mut w: W,
+    sequence_number: u32,
+    compressed_data: &[u8],
+) -> Result<()> {
+    let length = u32::try_from(compressed_data.len())
+        .ok()
+        .and_then(|length| length.checked_add(4))
+        .ok_or(EncodingError::LimitsExceeded)?;
+    let sequence_number = sequence_number.to_be_bytes();
+
+    let mut header = [0; 12];
+    header[..4].copy_from_slice(&length.to_be_bytes());
+    header[4..8].copy_from_slice(&chunk::fdAT.0);
+    header[8..].copy_from_slice(&sequence_number);
+
+    w.write_all(&header)?;
+    w.write_all(compressed_data)?;
+
+    let mut crc = Crc32::new();
+    crc.update(&header[4..]);
+    crc.update(compressed_data);
+    w.write_be(crc.finalize())?;
+    Ok(())
+}
+
 impl<W: Write> Writer<W> {
     fn new(w: W, info: PartialInfo, options: Options) -> Writer<W> {
         Writer {
@@ -862,12 +889,8 @@ impl<W: Write> Writer<W> {
                 if self.images_written == 0 {
                     self.write_zlib_encoded_idat(&zlib_encoded)?;
                 } else {
-                    let buff_size = zlib_encoded.len().min(Self::MAX_fdAT_CHUNK_LEN as usize);
-                    let mut alldata = vec![0u8; 4 + buff_size];
                     for chunk in zlib_encoded.chunks(Self::MAX_fdAT_CHUNK_LEN as usize) {
-                        alldata[..4].copy_from_slice(&fctl.sequence_number.to_be_bytes());
-                        alldata[4..][..chunk.len()].copy_from_slice(chunk);
-                        write_chunk(&mut self.w, chunk::fdAT, &alldata[..4 + chunk.len()])?;
+                        write_fdat_chunk(&mut self.w, fctl.sequence_number, chunk)?;
                         fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
                     }
                 }
@@ -1802,6 +1825,27 @@ mod tests {
     use std::cmp;
     use std::fs::File;
     use std::io::Cursor;
+
+    #[test]
+    fn fdat_chunk_matches_contiguous_chunk() {
+        for data_len in [0, 1, 4, 255, 4097] {
+            let data: Vec<_> = (0..data_len).map(|i| i as u8).collect();
+
+            for sequence_number in [0, 1, u32::MAX] {
+                let mut payload = Vec::with_capacity(data.len() + 4);
+                payload.extend_from_slice(&sequence_number.to_be_bytes());
+                payload.extend_from_slice(&data);
+
+                let mut expected = Vec::new();
+                write_chunk(&mut expected, chunk::fdAT, &payload).unwrap();
+
+                let mut actual = Vec::new();
+                write_fdat_chunk(&mut actual, sequence_number, &data).unwrap();
+
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     #[test]
     fn roundtrip1() {

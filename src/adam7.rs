@@ -400,7 +400,7 @@ pub fn expand_pass(
             }
         }
         _ => {
-            debug_assert!(bits_per_pixel % 8 == 0);
+            debug_assert!(bits_per_pixel.is_multiple_of(8));
             let bytes_pp = bits_per_pixel / 8;
             let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, bytes_pp);
 
@@ -553,7 +553,7 @@ pub fn expand_pass_splat(
             }
         }
         _ => {
-            debug_assert!(bits_per_pixel % 8 == 0);
+            debug_assert!(bits_per_pixel.is_multiple_of(8));
             let bytes = bits_per_pixel / 8;
             let chunk = usize::from(bytes);
 

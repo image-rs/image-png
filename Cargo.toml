@@ -22,7 +22,7 @@ include = [
 
 [dependencies]
 bitflags = "2.0"
-crc32fast = "1.2.0"
+crc32fast = "1.5.1"
 fdeflate = "0.3.3"
 flate2 = "1.0.35"
 miniz_oxide = { version = "0.8", features = ["simd"] }
@@ -38,8 +38,8 @@ rand = "0.10"
 criterion = "0.8"
 
 [features]
-# Use nightly-only features for a minor performance boost in PNG decoding
-unstable = ["crc32fast/nightly"]
+# Enable use of nightly features. Sometimes makes performance worse.
+unstable = []
 # Use zlib-rs for faster PNG encoding at the cost of some `unsafe` code.
 # WARNING: this changes the flate2 backend for your entire dependency tree!
 # While the `png` crate always uses fully memory-safe decoding,

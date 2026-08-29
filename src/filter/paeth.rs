@@ -116,10 +116,6 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
         BytesPerPixel::Three => {
             #[cfg(all(feature = "unstable", not(target_vendor = "apple")))]
             {
-                // Results in PR: https://github.com/image-rs/image-png/pull/632
-                // Approximately 30% better on Arm Cortex A520, 7%
-                // regression on Arm Cortex X4. Switched off on Apple
-                // Silicon due to 10-12% regression.
                 super::simd::paeth_unfilter_3bpp(current, previous);
                 return;
             }
@@ -145,9 +141,6 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
         BytesPerPixel::Four => {
             #[cfg(feature = "unstable")]
             {
-                // Results in PR: https://github.com/image-rs/image-png/pull/633
-                // No change on Apple Silicon, 42% better on Arm Cortex A520,
-                // 10% better on Arm Cortex X4.
                 super::simd::paeth_unfilter_4bpp(current, previous);
                 return;
             }

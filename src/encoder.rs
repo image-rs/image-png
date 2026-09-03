@@ -826,13 +826,45 @@ impl<W: Write> Writer<W> {
             ));
         }
 
+        let zlib_encoded = self.zlib_encode_image_data(data, in_len)?;
+
+        match self.info.frame_control {
+            None => {
+                self.write_zlib_encoded_idat(&zlib_encoded)?;
+            }
+            Some(_) if self.should_skip_frame_control_on_default_image() => {
+                self.write_zlib_encoded_idat(&zlib_encoded)?;
+            }
+            Some(ref mut fctl) => {
+                fctl.encode(&mut self.w)?;
+                fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
+                self.animation_written += 1;
+
+                // If the default image is the first frame of an animation, it's still an IDAT.
+                if self.images_written == 0 {
+                    self.write_zlib_encoded_idat(&zlib_encoded)?;
+                } else {
+                    for chunk in zlib_encoded.chunks(Self::MAX_fdAT_CHUNK_LEN as usize) {
+                        write_fdat_chunk(&mut self.w, fctl.sequence_number, chunk)?;
+                        fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
+                    }
+                }
+            }
+        }
+
+        self.increment_images_written();
+
+        Ok(())
+    }
+
+    fn zlib_encode_image_data(&self, data: &[u8], in_len: usize) -> Result<Vec<u8>> {
         let prev = vec![0; in_len];
         let mut prev = prev.as_slice();
 
         let bpp = self.info.bpp_in_prediction();
         let filter_method = self.options.filter;
 
-        let zlib_encoded = match self.options.compression {
+        let residual = match self.options.compression {
             DeflateCompression::NoCompression => {
                 let mut compressor =
                     fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
@@ -855,8 +887,10 @@ impl<W: Write> Writer<W> {
                 }
 
                 let compressed = compressor.finish()?.into_inner();
+                let lines = data.len().checked_div(in_len).unwrap_or(0);
+
                 if compressed.len()
-                    > fdeflate::StoredOnlyCompressor::<()>::compressed_size((in_len + 1) * height)
+                    > fdeflate::StoredOnlyCompressor::<()>::compressed_size((in_len + 1) * lines)
                 {
                     // Write uncompressed data since the result from fast compression would take
                     // more space than that.
@@ -889,33 +923,7 @@ impl<W: Write> Writer<W> {
             }
         };
 
-        match self.info.frame_control {
-            None => {
-                self.write_zlib_encoded_idat(&zlib_encoded)?;
-            }
-            Some(_) if self.should_skip_frame_control_on_default_image() => {
-                self.write_zlib_encoded_idat(&zlib_encoded)?;
-            }
-            Some(ref mut fctl) => {
-                fctl.encode(&mut self.w)?;
-                fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
-                self.animation_written += 1;
-
-                // If the default image is the first frame of an animation, it's still an IDAT.
-                if self.images_written == 0 {
-                    self.write_zlib_encoded_idat(&zlib_encoded)?;
-                } else {
-                    for chunk in zlib_encoded.chunks(Self::MAX_fdAT_CHUNK_LEN as usize) {
-                        write_fdat_chunk(&mut self.w, fctl.sequence_number, chunk)?;
-                        fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
-                    }
-                }
-            }
-        }
-
-        self.increment_images_written();
-
-        Ok(())
+        Ok(residual)
     }
 
     fn increment_images_written(&mut self) {

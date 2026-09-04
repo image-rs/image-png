@@ -3172,9 +3172,7 @@ mod tests {
         // The decoded sub-frame must be tightly packed using its OWN width -- exactly like the
         // non-interlaced branch, and exactly as `output_info.line_size` promises -- NOT
         // scattered using the wider canvas width.
-        for y in 0..SUB_HEIGHT {
-            let row = &buf[(y as usize) * output_info.line_size
-                ..(y as usize + 1) * output_info.line_size];
+        for (row, y) in buf.chunks_exact(output_info.line_size).zip(0..SUB_HEIGHT) {
             let expected: Vec<u8> = (0..SUB_WIDTH).map(|x| pixel(x, y)).collect();
             assert_eq!(
                 row,

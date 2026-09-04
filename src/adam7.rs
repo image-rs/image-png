@@ -577,6 +577,231 @@ pub fn expand_pass_splat(
     }
 }
 
+pub fn sample_pass(
+    img: &[u8],
+    img_row_stride: usize,
+    interlaced_row: &mut [u8],
+    interlace_info: &Adam7Info,
+    bits_per_pixel: u8,
+) {
+    let cst = interlace_info.pass_constants();
+    let line = usize::from(cst.y_offset) + interlace_info.line as usize;
+
+    match bits_per_pixel {
+        1 => sample_pass_1bit(img, img_row_stride, interlaced_row, interlace_info),
+        2 => {}
+        4 => todo!(),
+        8 => {
+            let line = usize::from(cst.y_offset) + interlace_info.line as usize;
+            let offset = line * img_row_stride + usize::from(cst.x_offset);
+
+            let samples = img[offset..]
+                .chunks(usize::from(cst.x_sampling))
+                .map(|ch| ch[0]);
+
+            for (target, sample) in interlaced_row.iter_mut().zip(samples) {
+                *target = sample;
+            }
+        }
+        _ => {
+            let bytes_pp = usize::from(bits_per_pixel / 8);
+            let cst = interlace_info.pass_constants();
+            let offset = line * img_row_stride + usize::from(cst.x_offset);
+
+            let samples = img[offset * bytes_pp..].chunks(usize::from(cst.x_sampling) * bytes_pp);
+
+            for (target, sample) in interlaced_row.chunks_exact_mut(bytes_pp).zip(samples) {
+                target.copy_from_slice(&sample[..bytes_pp]);
+            }
+        }
+    }
+}
+
+// Consistency between access to byte elements, if they exist.
+#[expect(clippy::get_first)]
+fn sample_pass_1bit(
+    img: &[u8],
+    img_row_stride: usize,
+    interlaced_row: &mut [u8],
+    interlace_info: &Adam7Info,
+) {
+    let cst = interlace_info.pass_constants();
+    let line =
+        usize::from(cst.y_offset) + interlace_info.line as usize * usize::from(cst.y_sampling);
+
+    let in_bytes = interlace_info.width.div_ceil(8);
+    let out_bytes = interlace_info.samples.div_ceil(8);
+
+    let row = &img[line * img_row_stride..][..in_bytes as usize];
+    match interlace_info.pass {
+        1 => {
+            let compressed = row.chunks(8).map(|chunk| {
+                let mut byte = 0;
+
+                for i in 0..8 {
+                    let bit = chunk.get(i).copied().unwrap_or(0) >> 7;
+                    byte <<= 1;
+                    byte |= bit;
+                }
+
+                byte
+            });
+
+            for (byte, target) in compressed.zip(&mut interlaced_row[..out_bytes as usize]) {
+                *target = byte;
+            }
+        }
+        2 => {
+            let compressed = row.chunks(8).map(|chunk| {
+                let mut byte = 0;
+
+                for i in 0..8 {
+                    let bit = (chunk.get(i).copied().unwrap_or(0) >> 3) & 0b1;
+                    byte <<= 1;
+                    byte |= bit;
+                }
+
+                byte
+            });
+
+            for (byte, target) in compressed.zip(&mut interlaced_row[..out_bytes as usize]) {
+                *target = byte;
+            }
+        }
+        3 => {
+            let compressed = row.chunks(4).map(|chunk| {
+                let mut byte = 0;
+
+                for i in 0..4 {
+                    let v = chunk.get(i).copied().unwrap_or(0);
+                    let upper = (v >> 6) & 0b10;
+                    let lower = (v >> 3) & 0b1;
+                    byte <<= 2;
+                    byte |= upper | lower;
+                }
+
+                byte
+            });
+
+            for (byte, target) in compressed.zip(&mut interlaced_row[..out_bytes as usize]) {
+                *target = byte;
+            }
+        }
+        4 => {
+            let compressed = row.chunks(4).map(|chunk| {
+                let mut byte = 0;
+
+                for i in 0..4 {
+                    let v = chunk.get(i).copied().unwrap_or(0);
+                    //  Offset by 1 bit for the merge below.
+                    let upper = (v >> 4) & 0b10;
+                    let lower = (v >> 1) & 0b1;
+                    byte <<= 2;
+                    byte |= upper | lower;
+                }
+
+                byte
+            });
+
+            for (byte, target) in compressed.zip(&mut interlaced_row[..out_bytes as usize]) {
+                *target = byte;
+            }
+        }
+        5 => {
+            let compressed = row.chunks(2).map(|chunk| {
+                let upper = chunk.get(0).copied().unwrap_or(0);
+                let lower = chunk.get(1).copied().unwrap_or(0);
+                demux_1bit_step2x8([upper, lower])
+            });
+
+            for (byte, target) in compressed.zip(&mut interlaced_row[..out_bytes as usize]) {
+                *target = byte;
+            }
+        }
+        6 => {
+            let compressed = row.chunks(2).map(|chunk| {
+                let upper = chunk.get(0).copied().unwrap_or(0);
+                let lower = chunk.get(1).copied().unwrap_or(0);
+                demux_1bit_step2x8([upper << 1, lower << 1])
+            });
+
+            for (byte, target) in compressed.zip(&mut interlaced_row[..out_bytes as usize]) {
+                *target = byte;
+            }
+        }
+        7 => {
+            interlaced_row[..out_bytes as usize].copy_from_slice(&row[..out_bytes as usize]);
+        }
+        _ => unreachable!("invalid Adam7 pass"),
+    }
+}
+
+/// Given consecutive values, select every second bit.
+const fn demux_1bit_step2(bits: u8) -> u8 {
+    const _ASSERT: () = {
+        let mut i = 0u8;
+        loop {
+            let upper = (i & 0x08) << 4 | (i & 0x04) << 3 | (i & 0x02) << 2 | (i & 0x01) << 1;
+            let demuxed = demux_1bit_step2(upper);
+
+            assert!(demuxed == i);
+
+            if i == 0xf {
+                break;
+            }
+
+            i += 1;
+        }
+    };
+
+    let muxed = 0x2_0100_0804u64 * (bits as u64);
+    let muxed = muxed & 0x10_0204_0080;
+    (muxed % 31) as u8
+}
+
+/// Extract every second bit from a series of two integers.
+///
+/// Adapted from a technique in <https://graphics.stanford.edu/~seander/bithacks.html#ReverseByteWith64BitsDiv>
+/// on reversing bits in a byte. Note that the bits we want are at the right spot in a 9-bit base
+/// when we assemble a 16-bit number. Hence we can extract them by a modulus after isolating them.
+const fn demux_1bit_step2x8([v0, v1]: [u8; 2]) -> u8 {
+    const _ASSERT: () = {
+        assert!(demux_1bit_step2x8([0x80, 0x00]) == 0x80);
+        assert!(demux_1bit_step2x8([0x40, 0x00]) == 0x00);
+        assert!(demux_1bit_step2x8([0x20, 0x00]) == 0x40);
+        assert!(demux_1bit_step2x8([0x10, 0x00]) == 0x00);
+        assert!(demux_1bit_step2x8([0x08, 0x00]) == 0x20);
+        assert!(demux_1bit_step2x8([0x04, 0x00]) == 0x00);
+        assert!(demux_1bit_step2x8([0x02, 0x00]) == 0x10);
+        assert!(demux_1bit_step2x8([0x01, 0x00]) == 0x00);
+        assert!(demux_1bit_step2x8([0x00, 0x80]) == 0x08);
+        assert!(demux_1bit_step2x8([0x00, 0x40]) == 0x00);
+        assert!(demux_1bit_step2x8([0x00, 0x20]) == 0x04);
+        assert!(demux_1bit_step2x8([0x00, 0x10]) == 0x00);
+        assert!(demux_1bit_step2x8([0x00, 0x08]) == 0x02);
+        assert!(demux_1bit_step2x8([0x00, 0x04]) == 0x00);
+        assert!(demux_1bit_step2x8([0x00, 0x02]) == 0x01);
+        assert!(demux_1bit_step2x8([0x00, 0x01]) == 0x00);
+    };
+
+    // Blend bits into a single number.
+    let bits = (v0 & 0xaa) | (v1 & 0xaa) >> 1;
+
+    // After blending we need to match the bit pairs (by LSB index):
+    //
+    // 0246 1357 -
+    // 0123 4567 8
+    //     v          v           v  v       v  v          v           v
+    //    01234|56701234|56701234|56701234|56701234|56701234|56701234|56
+    // 01234567|80123456|78012345|67801234|56780123|45678012|34567801|23
+    //
+    // Look at the differences between bit indices, with matches thus generated from at least 7
+    // shifted bit patterns. If we did blending the other way we'd have a maximum difference of 4.
+    let muxed = 0x08_0808_0808_0808u64 * (bits as u64);
+    let muxed = muxed & 0x200_8024_0900_4010;
+    (muxed % 511) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,6 +1195,46 @@ mod tests {
         for ((data, expected), adam7_info) in passes.iter().zip(adam7) {
             expand_pass_splat(&mut img, stride, data, &adam7_info, bits_pp);
             assert_eq!(img, *expected, "{img:x?} {expected:x?} {adam7_info:?}");
+        }
+    }
+
+    #[test]
+    fn test_sample_1bit() {
+        let data = [
+            [0xf0, 0xca],
+            [0x00, 0x02],
+            [0x33, 0x02],
+            [0x33, 0xf2],
+            [0x55, 0xf0],
+            [0x33, 0x2f],
+            [0x55, 0x0f],
+            [0xcc, 0xf2],
+        ];
+
+        let mut out = [0u8; 2];
+
+        let expected = [
+            [0b1100_0000, 0b0], // Pass 1, 0
+            [0b0100_0000, 0b0], // Pass 2, 0
+            [0b0010_0000, 0b0], // Pass 3, 4
+            [0b1001_0000, 0b0], // Pass 4, 0
+            [0b0010_0000, 0b0], // Pass 4, 4
+            [0b0101_0001, 0b0], // Pass 5, 2
+            [0b0000_0011, 0b0], // Pass 5, 6
+            [0b1100_1000, 0b0], // Pass 6, 0
+            [0b0101_0000, 0b0], // Pass 6, 2
+            [0b1111_1100, 0b0], // Pass 6, 4
+            [0b1111_0011, 0b0], // Pass 6, 6
+            [0x00, 0x02],       // Pass 7, 1
+            [0x33, 0xf2],       // Pass 7, 3
+            [0x33, 0x2f],       // Pass 7, 5
+            [0xcc, 0xf2],       // Pass 7, 7
+        ];
+
+        let mut iter = Adam7Iterator::new(15, 8).zip(expected.into_iter());
+        while let Some((pass, exp)) = iter.next() {
+            sample_pass_1bit(data.as_flattened(), 2, &mut out, &pass);
+            assert_eq!(out, exp, "{pass:?}");
         }
     }
 

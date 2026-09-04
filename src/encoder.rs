@@ -165,6 +165,7 @@ struct Options {
     sep_def_img: bool,
     validate_sequence: bool,
     compression: DeflateCompression,
+    interlace: bool,
 }
 
 impl<'a, W: Write> Encoder<'a, W> {
@@ -457,6 +458,11 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// (It's possible to circumvent these checks by writing raw chunks instead.)
     pub fn validate_sequence(&mut self, validate: bool) {
         self.options.validate_sequence = validate;
+    }
+
+    /// Set the use of Adam7 interlacing when encoding an image.
+    pub fn set_interlacing(&mut self, interlace: bool) {
+        self.options.interlace = interlace;
     }
 }
 

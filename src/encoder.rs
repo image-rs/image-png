@@ -854,7 +854,7 @@ impl<W: Write> Writer<W> {
                     prev = line;
                 }
 
-                let compressed = compressor.finish()?.into_inner();
+                let mut compressed = compressor.finish()?.into_inner();
                 if compressed.len()
                     > fdeflate::StoredOnlyCompressor::<()>::compressed_size((in_len + 1) * height)
                 {
@@ -862,8 +862,12 @@ impl<W: Write> Writer<W> {
                     // more space than that.
                     //
                     // This is essentially a fallback to NoCompression.
+                    // The compressed stream is larger than the stored stream, so its allocation
+                    // is guaranteed to have enough capacity for the fallback output. Reuse it to
+                    // avoid freeing and immediately reallocating an image-sized buffer.
+                    compressed.clear();
                     let mut compressor =
-                        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(compressed))?;
                     for line in data.chunks(in_len) {
                         compressor.write_data(&[0])?;
                         compressor.write_data(line)?;

@@ -191,8 +191,11 @@ impl<'a, W: Write> Encoder<'a, W> {
 
         Ok(Encoder {
             w,
+            options: Options {
+                interlace: info.interlaced,
+                ..Options::default()
+            },
             info,
-            options: Options::default(),
         })
     }
 
@@ -462,7 +465,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     }
 
     /// Set the use of Adam7 interlacing when encoding an image.
-    pub fn set_interlacing(&mut self, interlace: bool) {
+    pub fn set_interlaced(&mut self, interlace: bool) {
         self.options.interlace = interlace;
         self.info.interlaced = interlace;
     }
@@ -1546,6 +1549,16 @@ pub struct StreamWriter<'a, W: Write> {
 
 impl<'a, W: Write> StreamWriter<'a, W> {
     fn new(writer: ChunkOutput<'a, W>, buf_len: usize) -> Result<StreamWriter<'a, W>> {
+        // We can not stream-write interlaced data.. That is, you would need to supply data in Adam7
+        // interlaced order yourself instead of in their original line order. This is surprising
+        // enough to warrant another type, or at least function or an explicit opt-in, and also we
+        // do not implement it below.
+        if writer.options.interlace {
+            return Err(EncodingError::Format(
+                FormatErrorKind::InterlacedEncodingUnsupported.into(),
+            ));
+        }
+
         let PartialInfo {
             width,
             height,
@@ -2168,7 +2181,7 @@ mod tests {
                 encoder.set_palette(palette.as_ref());
 
                 // the main property of this test.
-                encoder.set_interlacing(true);
+                encoder.set_interlaced(true);
 
                 let mut writer = encoder.write_header()?;
                 writer.write_image_data(&decoded_pixels)?;
@@ -2289,12 +2302,8 @@ mod tests {
 
     #[test]
     fn expect_error_when_interlacing_is_requested() {
-        // `write_image_data` does not apply Adam7 passes to the caller's raw
-        // pixel buffer, so until interlaced encoding is implemented the
-        // encoder must reject `info.interlaced = true` rather than emit an
-        // IHDR that claims interlacing over non-interlaced IDAT bytes —
-        // which decoders reject with `UnknownFilterMethod` when a pixel
-        // byte aligns with a pass's filter-type byte position.
+        // We implement interlace on explicit request by the encoder. The info must agree with the
+        // explicit request.
         let mut info = Info::with_size(4, 4);
         info.color_type = ColorType::Rgb;
         info.bit_depth = BitDepth::Eight;
@@ -2302,7 +2311,8 @@ mod tests {
 
         let mut out = Vec::new();
         let encoder = Encoder::with_info(&mut out, info).expect("with_info accepts the Info");
-        let result = encoder.write_header();
+        let mut writer = encoder.write_header().unwrap();
+        let result = writer.stream_writer();
         assert!(
             matches!(result, Err(EncodingError::Format(_))),
             "expected Format error, got {:?}",

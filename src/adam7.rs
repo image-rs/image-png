@@ -954,29 +954,6 @@ fn sample_pass_4bit(
     }
 }
 
-/// Given consecutive values, select every second bit.
-const fn demux_1bit_step2(bits: u8) -> u8 {
-    const _ASSERT: () = {
-        let mut i = 0u8;
-        loop {
-            let upper = (i & 0x08) << 4 | (i & 0x04) << 3 | (i & 0x02) << 2 | (i & 0x01) << 1;
-            let demuxed = demux_1bit_step2(upper);
-
-            assert!(demuxed == i);
-
-            if i == 0xf {
-                break;
-            }
-
-            i += 1;
-        }
-    };
-
-    let muxed = 0x2_0100_0804u64 * (bits as u64);
-    let muxed = muxed & 0x10_0204_0080;
-    (muxed % 31) as u8
-}
-
 /// Extract every second bit from a series of two integers.
 ///
 /// Adapted from a technique in <https://graphics.stanford.edu/~seander/bithacks.html#ReverseByteWith64BitsDiv>

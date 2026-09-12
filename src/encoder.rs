@@ -6,6 +6,7 @@ use std::{borrow, error, fmt, io, mem, ops, result};
 use crc32fast::Hasher as Crc32;
 use flate2::write::ZlibEncoder;
 
+use crate::adam7::Adam7Iterator;
 use crate::chunk::{self, ChunkType};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
@@ -126,7 +127,7 @@ impl From<io::Error> for EncodingError {
 
 impl From<EncodingError> for io::Error {
     fn from(err: EncodingError) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, err.to_string())
+        io::Error::other(err.to_string())
     }
 }
 
@@ -165,6 +166,7 @@ struct Options {
     sep_def_img: bool,
     validate_sequence: bool,
     compression: DeflateCompression,
+    interlace: bool,
 }
 
 impl<'a, W: Write> Encoder<'a, W> {
@@ -189,8 +191,11 @@ impl<'a, W: Write> Encoder<'a, W> {
 
         Ok(Encoder {
             w,
+            options: Options {
+                interlace: info.interlaced,
+                ..Options::default()
+            },
             info,
-            options: Options::default(),
         })
     }
 
@@ -458,6 +463,12 @@ impl<'a, W: Write> Encoder<'a, W> {
     pub fn validate_sequence(&mut self, validate: bool) {
         self.options.validate_sequence = validate;
     }
+
+    /// Set the use of Adam7 interlacing when encoding an image.
+    pub fn set_interlaced(&mut self, interlace: bool) {
+        self.options.interlace = interlace;
+        self.info.interlaced = interlace;
+    }
 }
 
 /// PNG writer
@@ -604,7 +615,7 @@ impl<W: Write> Writer<W> {
         // decoders reject (as an `UnknownFilterMethod` when a pixel byte
         // lines up with a pass's filter-byte position). Reject the request
         // rather than emit bytes that no decoder can read back.
-        if info.interlaced {
+        if info.interlaced != self.options.interlace {
             return Err(EncodingError::Format(
                 FormatErrorKind::InterlacedEncodingUnsupported.into(),
             ));
@@ -804,18 +815,18 @@ impl<W: Write> Writer<W> {
 
         self.validate_new_image()?;
 
-        let width: usize;
-        let height: usize;
+        let width: u32;
+        let height: u32;
         if let Some(ref mut fctl) = self.info.frame_control {
-            width = fctl.width as usize;
-            height = fctl.height as usize;
+            width = fctl.width;
+            height = fctl.height;
         } else {
-            width = self.info.width as usize;
-            height = self.info.height as usize;
+            width = self.info.width;
+            height = self.info.height;
         }
 
-        let in_len = self.info.raw_row_length_from_width(width as u32) - 1;
-        let data_size = in_len * height;
+        let in_len = self.info.raw_row_length_from_width(width) - 1;
+        let data_size = in_len * height as usize;
         if data_size != data.len() {
             return Err(EncodingError::Parameter(
                 ParameterErrorKind::ImageBufferSize {
@@ -826,68 +837,7 @@ impl<W: Write> Writer<W> {
             ));
         }
 
-        let prev = vec![0; in_len];
-        let mut prev = prev.as_slice();
-
-        let bpp = self.info.bpp_in_prediction();
-        let filter_method = self.options.filter;
-
-        let zlib_encoded = match self.options.compression {
-            DeflateCompression::NoCompression => {
-                let mut compressor =
-                    fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
-                for line in data.chunks(in_len) {
-                    compressor.write_data(&[0])?;
-                    compressor.write_data(line)?;
-                }
-                compressor.finish()?.into_inner()
-            }
-            DeflateCompression::FdeflateUltraFast => {
-                let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
-
-                let mut current = vec![0; in_len + 1];
-                for line in data.chunks(in_len) {
-                    let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
-
-                    current[0] = filter_type as u8;
-                    compressor.write_data(&current)?;
-                    prev = line;
-                }
-
-                let compressed = compressor.finish()?.into_inner();
-                if compressed.len()
-                    > fdeflate::StoredOnlyCompressor::<()>::compressed_size((in_len + 1) * height)
-                {
-                    // Write uncompressed data since the result from fast compression would take
-                    // more space than that.
-                    //
-                    // This is essentially a fallback to NoCompression.
-                    let mut compressor =
-                        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
-                    for line in data.chunks(in_len) {
-                        compressor.write_data(&[0])?;
-                        compressor.write_data(line)?;
-                    }
-                    compressor.finish()?.into_inner()
-                } else {
-                    compressed
-                }
-            }
-            DeflateCompression::Level(level) => {
-                let mut current = vec![0; in_len];
-
-                let mut zlib =
-                    ZlibEncoder::new(Vec::new(), flate2::Compression::new(u32::from(level)));
-                for line in data.chunks(in_len) {
-                    let filter_type = filter(filter_method, bpp, prev, line, &mut current);
-
-                    zlib.write_all(&[filter_type as u8])?;
-                    zlib.write_all(&current)?;
-                    prev = line;
-                }
-                zlib.finish()?
-            }
-        };
+        let zlib_encoded = self.zlib_encode_image_data(data, (width, height))?;
 
         match self.info.frame_control {
             None => {
@@ -916,6 +866,167 @@ impl<W: Write> Writer<W> {
         self.increment_images_written();
 
         Ok(())
+    }
+
+    fn zlib_encode_image_data(&self, data: &[u8], (width, height): (u32, u32)) -> Result<Vec<u8>> {
+        #[derive(Clone)]
+        enum LineCursor<'lt> {
+            All {
+                lines: core::slice::ChunksExact<'lt, u8>,
+                prev: &'lt [u8],
+            },
+            Interlaced {
+                data: &'lt [u8],
+                data_pitch: usize,
+                adam7: Adam7Iterator,
+                buffer: Vec<u8>,
+                prev: Vec<u8>,
+                bpp: u8,
+            },
+        }
+
+        impl LineCursor<'_> {
+            fn next_pass_and_line(&mut self) -> Option<(u8, &'_ [u8], &'_ [u8])> {
+                match self {
+                    LineCursor::All { lines, prev } => {
+                        let line = lines.next()?;
+                        let prev = core::mem::replace(prev, line);
+                        Some((0, line, prev))
+                    }
+                    LineCursor::Interlaced {
+                        data,
+                        data_pitch,
+                        buffer,
+                        prev,
+                        adam7,
+                        bpp,
+                    } => {
+                        let info = adam7.next()?;
+                        let used =
+                            crate::adam7::sample_pass(data, *data_pitch, buffer, &info, *bpp);
+                        Some((info.pass, &buffer[..used], prev))
+                    }
+                }
+            }
+
+            fn remember_previous(&mut self) {
+                match self {
+                    LineCursor::All { .. } => { /* nothing todo */ }
+                    LineCursor::Interlaced { buffer, prev, .. } => {
+                        prev.clear();
+                        prev.extend_from_slice(buffer);
+                    }
+                }
+            }
+        }
+
+        let in_len = self.info.raw_row_length_from_width(width) - 1;
+        let zeroed_prev = vec![0; in_len];
+
+        let bpp = self.info.bpp_in_prediction();
+        let filter_method = self.options.filter;
+
+        // The filter loop below is used for interlaced and regular lines, as write of the lines and
+        // filtering depends on compression settings. The prediction needs to be reset between
+        // passes so this avoids type modelling.
+        //
+        // Denotes the pass associated with `prev`, requiring a reset when changed.
+        let mut filter_pass = 0;
+        // Iterator we use when not interlacing.
+        let mut interlaced_lines = if self.options.interlace {
+            LineCursor::Interlaced {
+                data,
+                data_pitch: in_len,
+                adam7: Adam7Iterator::new(width, height),
+                buffer: vec![],
+                prev: vec![],
+                bpp: self.info.color_type.bits_per_pixel(self.info.bit_depth) as u8,
+            }
+        } else {
+            let lines = data.chunks_exact(in_len);
+            LineCursor::All {
+                lines,
+                prev: zeroed_prev.as_slice(),
+            }
+        };
+
+        let residual = match self.options.compression {
+            DeflateCompression::NoCompression => {
+                let mut compressor =
+                    fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+
+                while let Some((_pass, line, _prev)) = interlaced_lines.next_pass_and_line() {
+                    compressor.write_data(&[0])?;
+                    compressor.write_data(line)?;
+                }
+
+                compressor.finish()?.into_inner()
+            }
+            DeflateCompression::FdeflateUltraFast => {
+                let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
+
+                let fallback_cursor = interlaced_lines.clone();
+                let mut current = vec![0; in_len + 1];
+                while let Some((pass, line, mut prev)) = interlaced_lines.next_pass_and_line() {
+                    if pass != filter_pass {
+                        current.resize(1 + line.len(), 0u8);
+                        prev = &zeroed_prev[..line.len()];
+                        filter_pass = pass;
+                    }
+
+                    let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
+                    current[0] = filter_type as u8;
+                    compressor.write_data(&current)?;
+
+                    interlaced_lines.remember_previous();
+                }
+
+                let compressed = compressor.finish()?.into_inner();
+                let lines = data.len().checked_div(in_len).unwrap_or(0);
+
+                if compressed.len()
+                    > fdeflate::StoredOnlyCompressor::<()>::compressed_size((in_len + 1) * lines)
+                {
+                    let mut fallback_cursor = fallback_cursor;
+                    // Write uncompressed data since the result from fast compression would take
+                    // more space than that.
+                    //
+                    // This is essentially a fallback to NoCompression.
+                    let mut compressor =
+                        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                    while let Some((_pass, line, _prev)) = fallback_cursor.next_pass_and_line() {
+                        compressor.write_data(&[0])?;
+                        compressor.write_data(line)?;
+                    }
+                    compressor.finish()?.into_inner()
+                } else {
+                    compressed
+                }
+            }
+            DeflateCompression::Level(level) => {
+                let mut current = vec![0; in_len];
+
+                let mut zlib =
+                    ZlibEncoder::new(Vec::new(), flate2::Compression::new(u32::from(level)));
+
+                while let Some((pass, line, mut prev)) = interlaced_lines.next_pass_and_line() {
+                    if pass != filter_pass {
+                        current.resize(line.len(), 0u8);
+                        prev = &zeroed_prev[..line.len()];
+                        filter_pass = pass;
+                    }
+
+                    let filter_type = filter(filter_method, bpp, prev, line, &mut current);
+                    zlib.write_all(&[filter_type as u8])?;
+                    zlib.write_all(&current)?;
+
+                    interlaced_lines.remember_previous();
+                }
+                zlib.finish()?
+            }
+        };
+
+        Ok(residual)
     }
 
     fn increment_images_written(&mut self) {
@@ -1438,6 +1549,16 @@ pub struct StreamWriter<'a, W: Write> {
 
 impl<'a, W: Write> StreamWriter<'a, W> {
     fn new(writer: ChunkOutput<'a, W>, buf_len: usize) -> Result<StreamWriter<'a, W>> {
+        // We can not stream-write interlaced data.. That is, you would need to supply data in Adam7
+        // interlaced order yourself instead of in their original line order. This is surprising
+        // enough to warrant another type, or at least function or an explicit opt-in, and also we
+        // do not implement it below.
+        if writer.options.interlace {
+            return Err(EncodingError::Format(
+                FormatErrorKind::InterlacedEncodingUnsupported.into(),
+            ));
+        }
+
         let PartialInfo {
             width,
             height,
@@ -2040,6 +2161,51 @@ mod tests {
     }
 
     #[test]
+    fn image_interlacing() -> Result<()> {
+        use DeflateCompression::*;
+        for &bit_depth in &[1u8, 2, 4, 8] {
+            for compress in &[NoCompression, FdeflateUltraFast, Level(4)] {
+                // Get ourselves some data for the depth.
+                let path = format!("tests/pngsuite/basn3p0{}.png", bit_depth);
+                let decoder = Decoder::new(BufReader::new(File::open(&path).unwrap()));
+                let mut reader = decoder.read_info().unwrap();
+                let mut decoded_pixels = vec![0; reader.output_buffer_size().unwrap()];
+                let info = reader.next_frame(&mut decoded_pixels).unwrap();
+                let palette = reader.info().palette.as_ref().unwrap();
+
+                let mut cursor = Cursor::new(vec![]);
+                let mut encoder = Encoder::new(&mut cursor, info.width, info.height);
+                encoder.set_deflate_compression(*compress);
+                encoder.set_depth(info.bit_depth);
+                encoder.set_color(ColorType::Indexed);
+                encoder.set_palette(palette.as_ref());
+
+                // the main property of this test.
+                encoder.set_interlaced(true);
+
+                let mut writer = encoder.write_header()?;
+                writer.write_image_data(&decoded_pixels)?;
+                writer.finish()?;
+
+                cursor.set_position(0);
+                let decoder = Decoder::new(&mut cursor);
+                let mut reader = decoder.read_info().unwrap();
+                let mut redecoded = vec![0; reader.output_buffer_size().unwrap()];
+                let reinfo = reader.next_frame(&mut redecoded);
+                assert_eq!(redecoded.len(), decoded_pixels.len());
+
+                assert!(
+                    reinfo.as_ref().is_ok_and(|i| *i == info),
+                    "{reinfo:?} != {info:?} for compression: {bit_depth}/{compress:?}"
+                );
+
+                assert_eq!(redecoded, decoded_pixels, "{bit_depth}/{compress:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn expect_error_on_wrong_image_len() -> Result<()> {
         let width = 10;
         let height = 10;
@@ -2136,12 +2302,8 @@ mod tests {
 
     #[test]
     fn expect_error_when_interlacing_is_requested() {
-        // `write_image_data` does not apply Adam7 passes to the caller's raw
-        // pixel buffer, so until interlaced encoding is implemented the
-        // encoder must reject `info.interlaced = true` rather than emit an
-        // IHDR that claims interlacing over non-interlaced IDAT bytes —
-        // which decoders reject with `UnknownFilterMethod` when a pixel
-        // byte aligns with a pass's filter-type byte position.
+        // We implement interlace on explicit request by the encoder. The info must agree with the
+        // explicit request.
         let mut info = Info::with_size(4, 4);
         info.color_type = ColorType::Rgb;
         info.bit_depth = BitDepth::Eight;
@@ -2149,7 +2311,8 @@ mod tests {
 
         let mut out = Vec::new();
         let encoder = Encoder::with_info(&mut out, info).expect("with_info accepts the Info");
-        let result = encoder.write_header();
+        let mut writer = encoder.write_header().unwrap();
+        let result = writer.stream_writer();
         assert!(
             matches!(result, Err(EncodingError::Format(_))),
             "expected Format error, got {:?}",

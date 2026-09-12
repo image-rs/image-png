@@ -450,7 +450,7 @@ impl From<DecodingError> for io::Error {
     fn from(err: DecodingError) -> io::Error {
         match err {
             DecodingError::IoError(err) => err,
-            err => io::Error::new(io::ErrorKind::Other, err.to_string()),
+            err => io::Error::other(err.to_string()),
         }
     }
 }

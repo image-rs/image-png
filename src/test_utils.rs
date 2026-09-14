@@ -58,18 +58,45 @@ pub fn write_chunk(w: &mut impl Write, chunk_type: &[u8], data: &[u8]) {
     w.write_u32::<byteorder::BigEndian>(crc).unwrap();
 }
 
+/// Writes an IHDR chunk with raw PNG field values (e.g. `color_type` of 0 means grayscale, 2
+/// means RGB, and 6 means RGBA; `interlace` of 0 means no interlacing).
+/// See http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html#C.IHDR
+pub fn write_ihdr(
+    w: &mut impl Write,
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    color_type: u8,
+    interlace: u8,
+) {
+    let mut data = Vec::new();
+    data.write_u32::<byteorder::BigEndian>(width).unwrap();
+    data.write_u32::<byteorder::BigEndian>(height).unwrap();
+    data.write_u8(bit_depth).unwrap();
+    data.write_u8(color_type).unwrap();
+    data.write_u8(0).unwrap(); // compression method (0 is the only allowed value)
+    data.write_u8(0).unwrap(); // filter method (0 is the only allowed value)
+    data.write_u8(interlace).unwrap();
+    write_chunk(w, b"IHDR", &data);
+}
+
 /// Writes an IHDR chunk that indicates a non-interlaced RGBA8 that uses the same height and
 /// `width`.  See http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html#C.IHDR
 pub fn write_rgba8_ihdr_with_width(w: &mut impl Write, width: u32) {
-    let mut data = Vec::new();
-    data.write_u32::<byteorder::BigEndian>(width).unwrap();
-    data.write_u32::<byteorder::BigEndian>(width).unwrap(); // height
-    data.write_u8(8).unwrap(); // bit depth = always 8-bits per channel
-    data.write_u8(6).unwrap(); // color type = color + alpha
-    data.write_u8(0).unwrap(); // compression method (0 is the only allowed value)
-    data.write_u8(0).unwrap(); // filter method (0 is the only allowed value)
-    data.write_u8(0).unwrap(); // interlace method = no interlacing
-    write_chunk(w, b"IHDR", &data);
+    const BIT_DEPTH: u8 = 8; // 8 bits per channel
+    const COLOR_TYPE: u8 = 6; // color + alpha
+    const INTERLACE: u8 = 0; // no interlacing
+    write_ihdr(w, width, width, BIT_DEPTH, COLOR_TYPE, INTERLACE);
+}
+
+/// Wraps already-filtered image rows in a store-only (i.e. non-compressed) zlib container.
+pub fn store_only_zlib(filtered_rows: &[u8]) -> Vec<u8> {
+    let mut zlib_data = Vec::new();
+    let mut store_only_compressor =
+        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(&mut zlib_data)).unwrap();
+    store_only_compressor.write_data(filtered_rows).unwrap();
+    store_only_compressor.finish().unwrap();
+    zlib_data
 }
 
 /// Generates RGBA8 `width` x `height` image and wraps it in a store-only zlib container.
@@ -92,13 +119,7 @@ pub fn generate_rgba8_with_width_and_height(width: u32, height: u32) -> Vec<u8> 
             .collect::<Vec<_>>()
     };
 
-    let mut zlib_data = Vec::new();
-    let mut store_only_compressor =
-        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(&mut zlib_data)).unwrap();
-    store_only_compressor.write_data(&image_pixels).unwrap();
-    store_only_compressor.finish().unwrap();
-
-    zlib_data
+    store_only_zlib(&image_pixels)
 }
 
 /// Writes an IDAT chunk.

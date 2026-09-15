@@ -1396,10 +1396,18 @@ impl StreamingDecoder {
         let info = self.info.as_mut().unwrap();
         if info.trns.is_some() {
             return Err(DecodingError::Format(
-                FormatErrorInner::DuplicateChunk { kind: chunk::PLTE }.into(),
+                FormatErrorInner::DuplicateChunk { kind: chunk::tRNS }.into(),
             ));
         }
         let (color_type, bit_depth) = { (info.color_type, info.bit_depth as u8) };
+        // The spec requires that a `tRNS` chunk precedes the first `IDAT` chunk.  (For
+        // `ColorType::Indexed` this is checked separately below, because a different error is
+        // reported when the `PLTE` chunk is missing.)
+        if self.have_idat && matches!(color_type, ColorType::Grayscale | ColorType::Rgb) {
+            return Err(DecodingError::Format(
+                FormatErrorInner::AfterIdat { kind: chunk::tRNS }.into(),
+            ));
+        }
         let mut vec = self.current_chunk.raw_bytes.clone();
         let len = vec.len();
         match color_type {
@@ -3112,12 +3120,7 @@ mod tests {
             }
         }
 
-        let mut zlib_data = Vec::new();
-        let mut compressor =
-            fdeflate::StoredOnlyCompressor::new(Cursor::new(&mut zlib_data)).unwrap();
-        compressor.write_data(&raw).unwrap();
-        compressor.finish().unwrap();
-        zlib_data
+        store_only_zlib(&raw)
     }
 
     /// Regression test for https://github.com/image-rs/image-png/issues/699: the interlaced
@@ -3153,19 +3156,14 @@ mod tests {
         // narrower-than-canvas, animation frame), fdAT, IEND.
         let mut png = Vec::new();
         write_png_sig(&mut png);
-        {
-            let mut data = Vec::new();
-            data.write_u32::<byteorder::BigEndian>(CANVAS_WIDTH)
-                .unwrap();
-            data.write_u32::<byteorder::BigEndian>(CANVAS_HEIGHT)
-                .unwrap();
-            data.write_u8(8).unwrap(); // bit depth
-            data.write_u8(0).unwrap(); // color type = grayscale
-            data.write_u8(0).unwrap(); // compression method
-            data.write_u8(0).unwrap(); // filter method
-            data.write_u8(1).unwrap(); // interlace method = Adam7
-            write_chunk(&mut png, b"IHDR", &data);
-        }
+        write_ihdr(
+            &mut png,
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT,
+            /* bit_depth = */ 8,
+            crate::ColorType::Grayscale as u8,
+            /* interlace = */ 1, // Adam7
+        );
         write_actl(
             &mut png,
             &crate::AnimationControl {
@@ -3744,5 +3742,72 @@ mod tests {
         decoder.set_limits(Limits { bytes: 10 });
         let result = decoder.read_info();
         assert!(matches!(result, Err(DecodingError::LimitsExceeded)));
+    }
+
+    /// Regression test for a `tRNS` chunk that appears after the `IDAT` chunk (which the PNG
+    /// spec disallows).  Before the fix, such a chunk was applied to grayscale and RGB images,
+    /// which changed the output color type in the middle of an animation and panicked in
+    /// `transform.rs` when `Transformations::EXPAND` was used.
+    #[test]
+    fn test_trns_after_idat() {
+        const WIDTH: u32 = 8;
+        for (color_type, trns_payload) in [
+            (crate::ColorType::Grayscale, &[0, 0][..]),
+            (crate::ColorType::Rgb, &[0, 0, 0, 0, 0, 0][..]),
+        ] {
+            // Each row = 1 filter byte (0 = no filter) + `WIDTH` pixels of arbitrary samples.
+            let frame_data = {
+                let mut row = vec![0; 1 + WIDTH as usize * color_type.samples()];
+                row[1..].fill(128);
+                store_only_zlib(&row.repeat(WIDTH as usize))
+            };
+
+            let mut png = Vec::new();
+            write_png_sig(&mut png);
+            write_ihdr(
+                &mut png,
+                WIDTH,
+                WIDTH,
+                /* bit_depth = */ 8,
+                color_type as u8,
+                /* interlace = */ 0,
+            );
+            write_actl(
+                &mut png,
+                &crate::AnimationControl {
+                    num_frames: 2,
+                    num_plays: 1,
+                },
+            );
+            let mut fctl = crate::FrameControl {
+                width: WIDTH,
+                height: WIDTH,
+                ..Default::default()
+            };
+            write_fctl(&mut png, &fctl);
+            write_chunk(&mut png, b"IDAT", &frame_data);
+            fctl.sequence_number = 1;
+            write_fctl(&mut png, &fctl);
+            write_chunk(&mut png, b"tRNS", trns_payload); // <= spec violation needed by this test
+            write_fdat(&mut png, 2, &frame_data);
+            write_iend(&mut png);
+
+            let mut decoder = Decoder::new(Cursor::new(png));
+            decoder.set_transformations(crate::Transformations::EXPAND);
+            let mut reader = decoder.read_info().unwrap();
+
+            // Decode the 1st frame (from the `IDAT` chunk).
+            let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+            reader.next_frame(&mut buf).unwrap();
+
+            // Decode the 2nd frame (from the `fdAT` chunk).  The `tRNS` chunk has to be ignored,
+            // so the output color type (and therefore also the output buffer size) has to stay
+            // the same.
+            reader.next_frame_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+            let output_info = reader.next_frame(&mut buf).unwrap();
+            assert_eq!(output_info.color_type, color_type);
+            assert!(reader.info().trns.is_none());
+        }
     }
 }

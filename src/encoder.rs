@@ -36,7 +36,7 @@ pub struct FormatError {
 }
 
 #[derive(Debug)]
-enum FormatErrorKind {
+pub(crate) enum FormatErrorKind {
     ZeroWidth,
     ZeroHeight,
     InvalidColorCombination(BitDepth, ColorType),
@@ -52,6 +52,8 @@ enum FormatErrorKind {
     Unrecoverable,
     BadTextEncoding(TextEncodingError),
     InterlacedEncodingUnsupported,
+    InvalidCicpMatrixCoefficients(u8),
+    MdcvChromaticityOutOfRange,
 }
 
 impl error::Error for EncodingError {
@@ -114,6 +116,13 @@ impl fmt::Display for FormatError {
             InterlacedEncodingUnsupported => write!(
                 fmt,
                 "Interlaced (Adam7) encoding is not yet supported; set `info.interlaced = false`"
+            ),
+            InvalidCicpMatrixCoefficients(mc) => {
+                write!(fmt, "cICP matrix coefficients must be 0 in PNG, got {}", mc)
+            }
+            MdcvChromaticityOutOfRange => write!(
+                fmt,
+                "mDCV chromaticity coordinate does not fit into 16 bits (must be at most 1.3107)"
             ),
         }
     }
@@ -285,6 +294,29 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// values specified in [11.3.2.5](https://www.w3.org/TR/png-3/#sRGB-gAMA-cHRM).
     pub fn set_source_srgb(&mut self, rendering_intent: super::SrgbRenderingIntent) {
         self.info.set_source_srgb(rendering_intent);
+    }
+
+    /// Set the coding-independent code points, written as the `cICP` chunk.
+    ///
+    /// The `matrix_coefficients` must be 0, otherwise writing the header fails.
+    pub fn set_coding_independent_code_points(
+        &mut self,
+        coding_independent_code_points: super::CodingIndependentCodePoints,
+    ) {
+        self.info.coding_independent_code_points = Some(coding_independent_code_points);
+    }
+
+    /// Set the mastering display color volume, written as the `mDCV` chunk.
+    pub fn set_mastering_display_color_volume(
+        &mut self,
+        mastering_display_color_volume: super::MasteringDisplayColorVolume,
+    ) {
+        self.info.mastering_display_color_volume = Some(mastering_display_color_volume);
+    }
+
+    /// Set the content light level information, written as the `cLLI` chunk.
+    pub fn set_content_light_level(&mut self, content_light_level: super::ContentLightLevelInfo) {
+        self.info.content_light_level = Some(content_light_level);
     }
 
     /// Start encoding by writing the header data.
@@ -686,6 +718,17 @@ impl<W: Write> Writer<W> {
             if let Some(iccp) = &info.icc_profile {
                 self.write_iccp_chunk("_", iccp)?
             }
+        }
+
+        // cICP, mDCV and cLLI must come before PLTE and IDAT.
+        if let Some(cicp) = info.coding_independent_code_points {
+            cicp.encode(&mut self.w)?;
+        }
+        if let Some(mdcv) = info.mastering_display_color_volume {
+            mdcv.encode(&mut self.w)?;
+        }
+        if let Some(clli) = info.content_light_level {
+            clli.encode(&mut self.w)?;
         }
 
         if let Some(exif) = &info.exif_metadata {
@@ -2030,6 +2073,195 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Returns the chunk types of a PNG stream, in order.
+    fn chunk_types(png: &[u8]) -> Vec<ChunkType> {
+        let mut rest = &png[8..];
+        let mut types = Vec::new();
+        while !rest.is_empty() {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            types.push(ChunkType(rest[4..8].try_into().unwrap()));
+            rest = &rest[12 + len..];
+        }
+        types
+    }
+
+    fn hdr_metadata() -> (
+        crate::CodingIndependentCodePoints,
+        crate::MasteringDisplayColorVolume,
+        crate::ContentLightLevelInfo,
+    ) {
+        let cicp = crate::CodingIndependentCodePoints {
+            color_primaries: 9,
+            transfer_function: 16,
+            matrix_coefficients: 0,
+            is_video_full_range_image: true,
+        };
+        // BT.2020 primaries and D65 white point; all values are multiples of
+        // 0.00002, so they survive the mDCV quantization exactly.
+        let mdcv = crate::MasteringDisplayColorVolume {
+            chromaticities: crate::SourceChromaticities::new(
+                (0.3127, 0.3290),
+                (0.708, 0.292),
+                (0.170, 0.797),
+                (0.131, 0.046),
+            ),
+            max_luminance: 10_000_000,
+            min_luminance: 50,
+        };
+        let clli = crate::ContentLightLevelInfo {
+            max_content_light_level: 4_000_000,
+            max_frame_average_light_level: 1_000_000,
+        };
+        (cicp, mdcv, clli)
+    }
+
+    fn encode_indexed_1x1(
+        configure: impl FnOnce(&mut Encoder<'_, &mut Vec<u8>>),
+    ) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut out, 1, 1);
+            encoder.set_color(ColorType::Indexed);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_palette(vec![0, 0, 0]);
+            configure(&mut encoder);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&[0])?;
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn cicp_mdcv_clli_chunks_roundtrip() {
+        let (cicp, mdcv, clli) = hdr_metadata();
+        let out = encode_indexed_1x1(|encoder| {
+            encoder.set_coding_independent_code_points(cicp);
+            encoder.set_mastering_display_color_volume(mdcv);
+            encoder.set_content_light_level(clli);
+        })
+        .unwrap();
+
+        // The decoder rejects these chunks after PLTE or IDAT.
+        let decoder = Decoder::new(Cursor::new(&*out));
+        let reader = decoder.read_info().unwrap();
+        let info = reader.info();
+        assert_eq!(info.coding_independent_code_points, Some(cicp));
+        assert_eq!(info.mastering_display_color_volume, Some(mdcv));
+        assert_eq!(info.content_light_level, Some(clli));
+
+        let types = chunk_types(&out);
+        let position = |kind| types.iter().position(|&t| t == kind).unwrap();
+        let plte = position(chunk::PLTE);
+        let idat = position(chunk::IDAT);
+        for kind in [chunk::cICP, chunk::mDCV, chunk::cLLI] {
+            assert_eq!(types.iter().filter(|&&t| t == kind).count(), 1);
+            assert!(position(kind) < plte);
+            assert!(position(kind) < idat);
+        }
+    }
+
+    #[test]
+    fn cicp_mdcv_clli_chunks_roundtrip_individually() {
+        let (cicp, mdcv, clli) = hdr_metadata();
+
+        let out = encode_indexed_1x1(|e| e.set_coding_independent_code_points(cicp)).unwrap();
+        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        assert_eq!(reader.info().coding_independent_code_points, Some(cicp));
+        assert_eq!(reader.info().mastering_display_color_volume, None);
+        assert_eq!(reader.info().content_light_level, None);
+
+        let out = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv)).unwrap();
+        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        assert_eq!(reader.info().coding_independent_code_points, None);
+        assert_eq!(reader.info().mastering_display_color_volume, Some(mdcv));
+        assert_eq!(reader.info().content_light_level, None);
+
+        let out = encode_indexed_1x1(|e| e.set_content_light_level(clli)).unwrap();
+        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        assert_eq!(reader.info().coding_independent_code_points, None);
+        assert_eq!(reader.info().mastering_display_color_volume, None);
+        assert_eq!(reader.info().content_light_level, Some(clli));
+    }
+
+    #[test]
+    fn cicp_mdcv_clli_chunks_raw_bytes() {
+        let (cicp, mdcv, clli) = hdr_metadata();
+
+        let mut out = Vec::new();
+        cicp.encode(&mut out).unwrap();
+        assert_eq!(&out[4..8], b"cICP");
+        assert_eq!(&out[8..12], &[9, 16, 0, 1]);
+
+        let mut out = Vec::new();
+        mdcv.encode(&mut out).unwrap();
+        assert_eq!(&out[4..8], b"mDCV");
+        #[rustfmt::skip]
+        let expected: [u16; 8] = [35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450];
+        let expected: Vec<u8> = expected
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .chain(10_000_000u32.to_be_bytes())
+            .chain(50u32.to_be_bytes())
+            .collect();
+        assert_eq!(&out[8..32], &*expected);
+
+        let mut out = Vec::new();
+        clli.encode(&mut out).unwrap();
+        assert_eq!(&out[4..8], b"cLLI");
+        assert_eq!(&out[8..12], &4_000_000u32.to_be_bytes());
+        assert_eq!(&out[12..16], &1_000_000u32.to_be_bytes());
+    }
+
+    #[test]
+    fn cicp_mdcv_clli_chunks_not_written_when_unset() {
+        let out = encode_indexed_1x1(|_| {}).unwrap();
+        let types = chunk_types(&out);
+        for kind in [chunk::cICP, chunk::mDCV, chunk::cLLI] {
+            assert!(!types.contains(&kind));
+        }
+
+        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        assert_eq!(reader.info().coding_independent_code_points, None);
+        assert_eq!(reader.info().mastering_display_color_volume, None);
+        assert_eq!(reader.info().content_light_level, None);
+    }
+
+    #[test]
+    fn cicp_nonzero_matrix_coefficients_rejected() {
+        let (mut cicp, _, _) = hdr_metadata();
+        cicp.matrix_coefficients = 1;
+        let result = encode_indexed_1x1(|e| e.set_coding_independent_code_points(cicp));
+        assert!(matches!(
+            result,
+            Err(EncodingError::Format(FormatError {
+                inner: FormatErrorKind::InvalidCicpMatrixCoefficients(1)
+            }))
+        ));
+    }
+
+    #[test]
+    fn mdcv_out_of_range_chromaticity_rejected() {
+        let (_, mut mdcv, _) = hdr_metadata();
+        mdcv.chromaticities.white.0 = ScaledFloat::from_scaled(u16::MAX as u32 * 2 + 2);
+        let result = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv));
+        assert!(matches!(
+            result,
+            Err(EncodingError::Format(FormatError {
+                inner: FormatErrorKind::MdcvChromaticityOutOfRange
+            }))
+        ));
+
+        // The largest representable value is still accepted.
+        mdcv.chromaticities.white.0 = ScaledFloat::from_scaled(u16::MAX as u32 * 2 + 1);
+        let out = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv)).unwrap();
+        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        let decoded = reader.info().mastering_display_color_volume.unwrap();
+        assert_eq!(
+            decoded.chromaticities.white.0,
+            ScaledFloat::from_scaled(u16::MAX as u32 * 2)
+        );
     }
 
     #[test]

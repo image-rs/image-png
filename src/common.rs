@@ -625,6 +625,28 @@ pub struct CodingIndependentCodePoints {
     pub is_video_full_range_image: bool,
 }
 
+impl CodingIndependentCodePoints {
+    /// Writes the `cICP` chunk.
+    ///
+    /// Returns an error if `matrix_coefficients` is not 0, the only value
+    /// allowed in PNG (which only supports RGB).
+    pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
+        if self.matrix_coefficients != 0 {
+            return Err(encoder::EncodingError::Format(
+                encoder::FormatErrorKind::InvalidCicpMatrixCoefficients(self.matrix_coefficients)
+                    .into(),
+            ));
+        }
+        let data = [
+            self.color_primaries,
+            self.transfer_function,
+            self.matrix_coefficients,
+            self.is_video_full_range_image as u8,
+        ];
+        encoder::write_chunk(w, chunk::cICP, &data)
+    }
+}
+
 /// Mastering Display Color Volume (mDCV) used at the point of content creation,
 /// as specified in [SMPTE-ST-2086](https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=8353899).
 ///
@@ -645,6 +667,37 @@ pub struct MasteringDisplayColorVolume {
     /// The value is expressed in units of 0.0001 cd/m^2 - for example if this field
     /// is set to `10000000` then it indicates 1000 cd/m^2.
     pub min_luminance: u32,
+}
+
+impl MasteringDisplayColorVolume {
+    /// Writes the `mDCV` chunk.
+    ///
+    /// The chunk stores chromaticities as 16-bit integers in units of 0.00002,
+    /// so each [`ScaledFloat`] is halved (rounding down) and must not exceed
+    /// `u16::MAX` after that, i.e. every coordinate must be at most 1.3107.
+    /// Otherwise an error is returned.
+    pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
+        let c = self.chromaticities;
+        // Order mandated by the spec: red, green, blue, white point.
+        let coordinates = [
+            c.red.0, c.red.1, c.green.0, c.green.1, c.blue.0, c.blue.1, c.white.0, c.white.1,
+        ];
+
+        let mut data = [0u8; 24];
+        for (bytes, value) in data[..16].chunks_exact_mut(2).zip(coordinates) {
+            // `ScaledFloat` uses a scale of 100_000, mDCV one of 50_000.
+            let scaled = u16::try_from(value.into_scaled() / 2).map_err(|_| {
+                encoder::EncodingError::Format(
+                    encoder::FormatErrorKind::MdcvChromaticityOutOfRange.into(),
+                )
+            })?;
+            bytes.copy_from_slice(&scaled.to_be_bytes());
+        }
+        data[16..20].copy_from_slice(&self.max_luminance.to_be_bytes());
+        data[20..24].copy_from_slice(&self.min_luminance.to_be_bytes());
+
+        encoder::write_chunk(w, chunk::mDCV, &data)
+    }
 }
 
 /// Content light level information of HDR content.
@@ -673,6 +726,16 @@ pub struct ContentLightLevelInfo {
     ///
     /// A value of zero means that the value is unknown or not currently calculable.
     pub max_frame_average_light_level: u32,
+}
+
+impl ContentLightLevelInfo {
+    /// Writes the `cLLI` chunk.
+    pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
+        let mut data = [0u8; 8];
+        data[..4].copy_from_slice(&self.max_content_light_level.to_be_bytes());
+        data[4..].copy_from_slice(&self.max_frame_average_light_level.to_be_bytes());
+        encoder::write_chunk(w, chunk::cLLI, &data)
+    }
 }
 
 /// A chunk that was captured by the decoder.

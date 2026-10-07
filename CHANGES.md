@@ -6,6 +6,12 @@
   image's offset relative to a larger page or screen. The parsed value is
   exposed as `Info::image_offset` and can be set on the encoder via
   `Encoder::set_image_offset`. ([#645])
+* Added support for writing the `cICP`, `mDCV` and `cLLI` chunks from
+  `Info::coding_independent_code_points`, `Info::mastering_display_color_volume`
+  and `Info::content_light_level`. They can be set on the encoder via
+  `Encoder::set_coding_independent_code_points`,
+  `Encoder::set_mastering_display_color_volume` and
+  `Encoder::set_content_light_level`. ([#626])
 
 ### Fixes
 
@@ -46,6 +52,7 @@
 * Fixed and improved intra-doc links in documentation comments. ([#665])
 * Fixed nightly `portable_simd` build. ([#675])
 
+[#626]: https://github.com/image-rs/image-png/issues/626
 [#630]: https://github.com/image-rs/image-png/pull/630
 [#632]: https://github.com/image-rs/image-png/pull/632
 [#633]: https://github.com/image-rs/image-png/pull/633

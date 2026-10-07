@@ -9,9 +9,10 @@ use flate2::write::ZlibEncoder;
 use crate::adam7::Adam7Iterator;
 use crate::chunk::{self, ChunkType};
 use crate::common::{
-    AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
-    FrameControl, ImageOffset, Info, OffsetUnit, ParameterError, ParameterErrorKind,
-    PixelDimensions, ScaledFloat, Unit,
+    AnimationControl, BitDepth, BlendOp, BytesPerPixel, CodingIndependentCodePoints, ColorType,
+    Compression, ContentLightLevelInfo, DisposeOp, FrameControl, ImageOffset, Info,
+    MasteringDisplayColorVolume, OffsetUnit, ParameterError, ParameterErrorKind, PixelDimensions,
+    ScaledFloat, Unit,
 };
 use crate::filter::{filter, Filter};
 use crate::text_metadata::{
@@ -301,7 +302,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// The `matrix_coefficients` must be 0, otherwise writing the header fails.
     pub fn set_coding_independent_code_points(
         &mut self,
-        coding_independent_code_points: super::CodingIndependentCodePoints,
+        coding_independent_code_points: CodingIndependentCodePoints,
     ) {
         self.info.coding_independent_code_points = Some(coding_independent_code_points);
     }
@@ -309,13 +310,13 @@ impl<'a, W: Write> Encoder<'a, W> {
     /// Set the mastering display color volume, written as the `mDCV` chunk.
     pub fn set_mastering_display_color_volume(
         &mut self,
-        mastering_display_color_volume: super::MasteringDisplayColorVolume,
+        mastering_display_color_volume: MasteringDisplayColorVolume,
     ) {
         self.info.mastering_display_color_volume = Some(mastering_display_color_volume);
     }
 
     /// Set the content light level information, written as the `cLLI` chunk.
-    pub fn set_content_light_level(&mut self, content_light_level: super::ContentLightLevelInfo) {
+    pub fn set_content_light_level(&mut self, content_light_level: ContentLightLevelInfo) {
         self.info.content_light_level = Some(content_light_level);
     }
 
@@ -1987,7 +1988,7 @@ impl<W: Write> Drop for StreamWriter<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Decoder;
+    use crate::{Decoder, SourceChromaticities};
 
     use io::BufReader;
     use rand::{rng, Rng, RngExt};
@@ -2088,11 +2089,11 @@ mod tests {
     }
 
     fn hdr_metadata() -> (
-        crate::CodingIndependentCodePoints,
-        crate::MasteringDisplayColorVolume,
-        crate::ContentLightLevelInfo,
+        CodingIndependentCodePoints,
+        MasteringDisplayColorVolume,
+        ContentLightLevelInfo,
     ) {
-        let cicp = crate::CodingIndependentCodePoints {
+        let cicp = CodingIndependentCodePoints {
             color_primaries: 9,
             transfer_function: 16,
             matrix_coefficients: 0,
@@ -2100,8 +2101,8 @@ mod tests {
         };
         // BT.2020 primaries and D65 white point; all values are multiples of
         // 0.00002, so they survive the mDCV quantization exactly.
-        let mdcv = crate::MasteringDisplayColorVolume {
-            chromaticities: crate::SourceChromaticities::new(
+        let mdcv = MasteringDisplayColorVolume {
+            chromaticities: SourceChromaticities::new(
                 (0.3127, 0.3290),
                 (0.708, 0.292),
                 (0.170, 0.797),
@@ -2110,7 +2111,7 @@ mod tests {
             max_luminance: 10_000_000,
             min_luminance: 50,
         };
-        let clli = crate::ContentLightLevelInfo {
+        let clli = ContentLightLevelInfo {
             max_content_light_level: 4_000_000,
             max_frame_average_light_level: 1_000_000,
         };

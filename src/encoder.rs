@@ -2076,16 +2076,35 @@ mod tests {
         }
     }
 
+    /// Splits a sequence of PNG chunks into their types and data.
+    ///
+    /// Returns `None` if a chunk is truncated or fails its CRC check, so that
+    /// malformed output fails the test instead of being misread.
+    fn split_chunks(mut rest: &[u8]) -> Option<Vec<(ChunkType, &[u8])>> {
+        std::iter::from_fn(|| {
+            (!rest.is_empty()).then(|| {
+                let (length, tail) = rest.split_first_chunk::<4>()?;
+                let length = usize::try_from(u32::from_be_bytes(*length)).ok()?;
+                // The CRC covers the chunk type and the data.
+                let (checked, tail) = tail.split_at_checked(length.checked_add(4)?)?;
+                let (crc, tail) = tail.split_first_chunk::<4>()?;
+                if crc32fast::hash(checked) != u32::from_be_bytes(*crc) {
+                    return None;
+                }
+                let (kind, data) = checked.split_first_chunk::<4>()?;
+                rest = tail;
+                Some((ChunkType(*kind), data))
+            })
+        })
+        .collect()
+    }
+
     /// Returns the chunk types of a PNG stream, in order.
-    fn chunk_types(png: &[u8]) -> Vec<ChunkType> {
-        let mut rest = &png[8..];
-        let mut types = Vec::new();
-        while !rest.is_empty() {
-            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
-            types.push(ChunkType(rest[4..8].try_into().unwrap()));
-            rest = &rest[12 + len..];
-        }
-        types
+    ///
+    /// Returns `None` if the PNG signature is missing or a chunk is malformed.
+    fn chunk_types(png: &[u8]) -> Option<Vec<ChunkType>> {
+        let chunks = split_chunks(png.strip_prefix(&[137, 80, 78, 71, 13, 10, 26, 10])?)?;
+        Some(chunks.into_iter().map(|(kind, _)| kind).collect())
     }
 
     fn hdr_metadata() -> (
@@ -2135,25 +2154,29 @@ mod tests {
     }
 
     #[test]
-    fn cicp_mdcv_clli_chunks_roundtrip() {
+    fn cicp_mdcv_clli_chunks_roundtrip() -> Result<()> {
         let (cicp, mdcv, clli) = hdr_metadata();
         let out = encode_indexed_1x1(|encoder| {
             encoder.set_coding_independent_code_points(cicp);
             encoder.set_mastering_display_color_volume(mdcv);
             encoder.set_content_light_level(clli);
-        })
-        .unwrap();
+        })?;
 
         // The decoder rejects these chunks after PLTE or IDAT.
         let decoder = Decoder::new(Cursor::new(&*out));
-        let reader = decoder.read_info().unwrap();
+        let reader = decoder.read_info().expect("A valid image");
         let info = reader.info();
         assert_eq!(info.coding_independent_code_points, Some(cicp));
         assert_eq!(info.mastering_display_color_volume, Some(mdcv));
         assert_eq!(info.content_light_level, Some(clli));
 
-        let types = chunk_types(&out);
-        let position = |kind| types.iter().position(|&t| t == kind).unwrap();
+        let types = chunk_types(&out).expect("Valid chunks");
+        let position = |kind| {
+            types
+                .iter()
+                .position(|&t| t == kind)
+                .expect("The chunk is present")
+        };
         let plte = position(chunk::PLTE);
         let idat = position(chunk::IDAT);
         for kind in [chunk::cICP, chunk::mDCV, chunk::cLLI] {
@@ -2161,72 +2184,85 @@ mod tests {
             assert!(position(kind) < plte);
             assert!(position(kind) < idat);
         }
+        Ok(())
     }
 
     #[test]
-    fn cicp_mdcv_clli_chunks_roundtrip_individually() {
+    fn cicp_mdcv_clli_chunks_roundtrip_individually() -> Result<()> {
         let (cicp, mdcv, clli) = hdr_metadata();
 
-        let out = encode_indexed_1x1(|e| e.set_coding_independent_code_points(cicp)).unwrap();
-        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        let out = encode_indexed_1x1(|e| e.set_coding_independent_code_points(cicp))?;
+        let reader = Decoder::new(Cursor::new(&*out))
+            .read_info()
+            .expect("A valid image");
         assert_eq!(reader.info().coding_independent_code_points, Some(cicp));
         assert_eq!(reader.info().mastering_display_color_volume, None);
         assert_eq!(reader.info().content_light_level, None);
 
-        let out = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv)).unwrap();
-        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        let out = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv))?;
+        let reader = Decoder::new(Cursor::new(&*out))
+            .read_info()
+            .expect("A valid image");
         assert_eq!(reader.info().coding_independent_code_points, None);
         assert_eq!(reader.info().mastering_display_color_volume, Some(mdcv));
         assert_eq!(reader.info().content_light_level, None);
 
-        let out = encode_indexed_1x1(|e| e.set_content_light_level(clli)).unwrap();
-        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        let out = encode_indexed_1x1(|e| e.set_content_light_level(clli))?;
+        let reader = Decoder::new(Cursor::new(&*out))
+            .read_info()
+            .expect("A valid image");
         assert_eq!(reader.info().coding_independent_code_points, None);
         assert_eq!(reader.info().mastering_display_color_volume, None);
         assert_eq!(reader.info().content_light_level, Some(clli));
+        Ok(())
     }
 
     #[test]
-    fn cicp_mdcv_clli_chunks_raw_bytes() {
+    fn cicp_mdcv_clli_chunks_raw_bytes() -> Result<()> {
         let (cicp, mdcv, clli) = hdr_metadata();
 
         let mut out = Vec::new();
-        cicp.encode(&mut out).unwrap();
-        assert_eq!(&out[4..8], b"cICP");
-        assert_eq!(&out[8..12], &[9, 16, 0, 1]);
+        cicp.encode(&mut out)?;
+        let expected = [9, 16, 0, 1];
+        assert_eq!(split_chunks(&out), Some(vec![(chunk::cICP, &expected[..])]));
 
         let mut out = Vec::new();
-        mdcv.encode(&mut out).unwrap();
-        assert_eq!(&out[4..8], b"mDCV");
-        #[rustfmt::skip]
-        let expected: [u16; 8] = [35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450];
-        let expected: Vec<u8> = expected
+        mdcv.encode(&mut out)?;
+        let chromaticities: [u16; 8] = [35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450];
+        let expected: Vec<u8> = chromaticities
             .iter()
             .flat_map(|v| v.to_be_bytes())
             .chain(10_000_000u32.to_be_bytes())
             .chain(50u32.to_be_bytes())
             .collect();
-        assert_eq!(&out[8..32], &*expected);
+        assert_eq!(split_chunks(&out), Some(vec![(chunk::mDCV, &*expected)]));
 
         let mut out = Vec::new();
-        clli.encode(&mut out).unwrap();
-        assert_eq!(&out[4..8], b"cLLI");
-        assert_eq!(&out[8..12], &4_000_000u32.to_be_bytes());
-        assert_eq!(&out[12..16], &1_000_000u32.to_be_bytes());
+        clli.encode(&mut out)?;
+        let expected: Vec<u8> = 4_000_000u32
+            .to_be_bytes()
+            .into_iter()
+            .chain(1_000_000u32.to_be_bytes())
+            .collect();
+        assert_eq!(split_chunks(&out), Some(vec![(chunk::cLLI, &*expected)]));
+        Ok(())
     }
 
     #[test]
-    fn cicp_mdcv_clli_chunks_not_written_when_unset() {
-        let out = encode_indexed_1x1(|_| {}).unwrap();
-        let types = chunk_types(&out);
+    fn cicp_mdcv_clli_chunks_not_written_when_unset() -> Result<()> {
+        let out = encode_indexed_1x1(|_| {})?;
+        let types = chunk_types(&out).expect("Valid chunks");
         for kind in [chunk::cICP, chunk::mDCV, chunk::cLLI] {
             assert!(!types.contains(&kind));
         }
 
-        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
+        let reader = Decoder::new(Cursor::new(&*out))
+            .read_info()
+            .expect("A valid image");
         assert_eq!(reader.info().coding_independent_code_points, None);
         assert_eq!(reader.info().mastering_display_color_volume, None);
         assert_eq!(reader.info().content_light_level, None);
+        Ok(())
     }
 
     #[test]
@@ -2243,9 +2279,12 @@ mod tests {
     }
 
     #[test]
-    fn mdcv_out_of_range_chromaticity_rejected() {
+    fn mdcv_out_of_range_chromaticity_rejected() -> Result<()> {
+        // The largest value that still fits into 16 bits after halving.
+        let max_scaled = u32::from(u16::MAX) * 2 + 1;
+
         let (_, mut mdcv, _) = hdr_metadata();
-        mdcv.chromaticities.white.0 = ScaledFloat::from_scaled(u16::MAX as u32 * 2 + 2);
+        mdcv.chromaticities.white.0 = ScaledFloat::from_scaled(max_scaled + 1);
         let result = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv));
         assert!(matches!(
             result,
@@ -2255,14 +2294,20 @@ mod tests {
         ));
 
         // The largest representable value is still accepted.
-        mdcv.chromaticities.white.0 = ScaledFloat::from_scaled(u16::MAX as u32 * 2 + 1);
-        let out = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv)).unwrap();
-        let reader = Decoder::new(Cursor::new(&*out)).read_info().unwrap();
-        let decoded = reader.info().mastering_display_color_volume.unwrap();
+        mdcv.chromaticities.white.0 = ScaledFloat::from_scaled(max_scaled);
+        let out = encode_indexed_1x1(|e| e.set_mastering_display_color_volume(mdcv))?;
+        let reader = Decoder::new(Cursor::new(&*out))
+            .read_info()
+            .expect("A valid image");
+        let decoded = reader
+            .info()
+            .mastering_display_color_volume
+            .expect("The mDCV chunk is decoded");
         assert_eq!(
             decoded.chromaticities.white.0,
-            ScaledFloat::from_scaled(u16::MAX as u32 * 2)
+            ScaledFloat::from_scaled(max_scaled - 1)
         );
+        Ok(())
     }
 
     #[test]

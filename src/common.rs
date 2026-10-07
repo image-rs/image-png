@@ -677,25 +677,38 @@ impl MasteringDisplayColorVolume {
     /// `u16::MAX` after that, i.e. every coordinate must be at most 1.3107.
     /// Otherwise an error is returned.
     pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
+        // `ScaledFloat` uses a scale of 100_000, mDCV one of 50_000.
+        let encode = |value: ScaledFloat| {
+            u16::try_from(value.into_scaled() / 2)
+                .map(u16::to_be_bytes)
+                .map_err(|_| {
+                    encoder::EncodingError::Format(
+                        encoder::FormatErrorKind::MdcvChromaticityOutOfRange.into(),
+                    )
+                })
+        };
         let c = self.chromaticities;
         // Order mandated by the spec: red, green, blue, white point.
-        let coordinates = [
-            c.red.0, c.red.1, c.green.0, c.green.1, c.blue.0, c.blue.1, c.white.0, c.white.1,
+        let [rx0, rx1] = encode(c.red.0)?;
+        let [ry0, ry1] = encode(c.red.1)?;
+        let [gx0, gx1] = encode(c.green.0)?;
+        let [gy0, gy1] = encode(c.green.1)?;
+        let [bx0, bx1] = encode(c.blue.0)?;
+        let [by0, by1] = encode(c.blue.1)?;
+        let [wx0, wx1] = encode(c.white.0)?;
+        let [wy0, wy1] = encode(c.white.1)?;
+        let [max0, max1, max2, max3] = self.max_luminance.to_be_bytes();
+        let [min0, min1, min2, min3] = self.min_luminance.to_be_bytes();
+
+        #[rustfmt::skip]
+        let data = [
+            rx0, rx1, ry0, ry1,
+            gx0, gx1, gy0, gy1,
+            bx0, bx1, by0, by1,
+            wx0, wx1, wy0, wy1,
+            max0, max1, max2, max3,
+            min0, min1, min2, min3,
         ];
-
-        let mut data = [0u8; 24];
-        for (bytes, value) in data[..16].chunks_exact_mut(2).zip(coordinates) {
-            // `ScaledFloat` uses a scale of 100_000, mDCV one of 50_000.
-            let scaled = u16::try_from(value.into_scaled() / 2).map_err(|_| {
-                encoder::EncodingError::Format(
-                    encoder::FormatErrorKind::MdcvChromaticityOutOfRange.into(),
-                )
-            })?;
-            bytes.copy_from_slice(&scaled.to_be_bytes());
-        }
-        data[16..20].copy_from_slice(&self.max_luminance.to_be_bytes());
-        data[20..24].copy_from_slice(&self.min_luminance.to_be_bytes());
-
         encoder::write_chunk(w, chunk::mDCV, &data)
     }
 }
@@ -731,10 +744,9 @@ pub struct ContentLightLevelInfo {
 impl ContentLightLevelInfo {
     /// Writes the `cLLI` chunk.
     pub fn encode<W: Write>(self, w: &mut W) -> encoder::Result<()> {
-        let mut data = [0u8; 8];
-        data[..4].copy_from_slice(&self.max_content_light_level.to_be_bytes());
-        data[4..].copy_from_slice(&self.max_frame_average_light_level.to_be_bytes());
-        encoder::write_chunk(w, chunk::cLLI, &data)
+        let [a0, a1, a2, a3] = self.max_content_light_level.to_be_bytes();
+        let [b0, b1, b2, b3] = self.max_frame_average_light_level.to_be_bytes();
+        encoder::write_chunk(w, chunk::cLLI, &[a0, a1, a2, a3, b0, b1, b2, b3])
     }
 }
 

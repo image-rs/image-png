@@ -243,6 +243,11 @@ pub(crate) enum FormatErrorInner {
     InvalidOffsetUnit(u8),
     /// The rendering intent of the sRGB chunk is invalid.
     InvalidSrgbRenderingIntent(u8),
+    /// The video full-range flag of the cICP chunk is neither 0 nor 1.
+    InvalidCicpFullRangeFlag(u8),
+    /// The matrix coefficients of the cICP chunk are not 0 (RGB), which is the only value
+    /// allowed in PNG.
+    InvalidCicpMatrixCoefficients(u8),
     UnknownCompressionMethod(u8),
     UnknownFilterMethod(u8),
     UnknownInterlaceMethod(u8),
@@ -371,6 +376,10 @@ impl fmt::Display for FormatError {
             InvalidUnit(nr) => write!(fmt, "Invalid physical pixel size unit {}.", nr),
             InvalidOffsetUnit(nr) => write!(fmt, "Invalid image offset unit {}.", nr),
             InvalidSrgbRenderingIntent(nr) => write!(fmt, "Invalid sRGB rendering intent {}.", nr),
+            InvalidCicpFullRangeFlag(nr) => write!(fmt, "Invalid cICP video full-range flag {}.", nr),
+            InvalidCicpMatrixCoefficients(nr) => {
+                write!(fmt, "Invalid cICP matrix coefficients {}.", nr)
+            }
             UnknownCompressionMethod(nr) => write!(fmt, "Unknown compression method {}.", nr),
             UnknownFilterMethod(nr) => write!(fmt, "Unknown filter method {}.", nr),
             UnknownInterlaceMethod(nr) => write!(fmt, "Unknown interlace method {}.", nr),
@@ -1639,8 +1648,8 @@ impl StreamingDecoder {
                 0 => false,
                 1 => true,
                 _ => {
-                    return Err(DecodingError::IoError(
-                        std::io::ErrorKind::InvalidData.into(),
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::InvalidCicpFullRangeFlag(flag).into(),
                     ));
                 }
             }
@@ -1649,14 +1658,14 @@ impl StreamingDecoder {
         // RGB is currently the only supported color model in PNG, and as
         // such Matrix Coefficients shall be set to 0.
         if matrix_coefficients != 0 {
-            return Err(DecodingError::IoError(
-                std::io::ErrorKind::InvalidData.into(),
+            return Err(DecodingError::Format(
+                FormatErrorInner::InvalidCicpMatrixCoefficients(matrix_coefficients).into(),
             ));
         }
 
         if !buf.is_empty() {
-            return Err(DecodingError::IoError(
-                std::io::ErrorKind::InvalidData.into(),
+            return Err(DecodingError::Format(
+                FormatErrorInner::ChunkLengthWrong { kind: chunk::cICP }.into(),
             ));
         }
 
@@ -2491,6 +2500,37 @@ mod tests {
         let clli = info.content_light_level.unwrap();
         assert_relative_eq!(clli.max_content_light_level as f32 / 10_000.0, 4000.0);
         assert_relative_eq!(clli.max_frame_average_light_level as f32 / 10_000.0, 2627.0);
+    }
+
+    /// Invalid values inside an otherwise well-formed `cICP` chunk should not make decoding
+    /// fail. The ancillary chunk should be ignored instead (see
+    /// https://github.com/image-rs/image-png/issues/720 and
+    /// https://github.com/image-rs/image-png/issues/525).
+    #[test]
+    fn test_cicp_with_invalid_values_is_ignored() {
+        for cicp in [
+            // Non-zero matrix coefficients (the PNG spec requires 0).
+            &[9, 16, 1, 1][..],
+            // Video full-range flag other than 0 or 1.
+            &[9, 16, 0, 2][..],
+            // Trailing bytes after the 4-byte payload.
+            &[9, 16, 0, 1, 0][..],
+        ] {
+            let mut png = Vec::new();
+            write_png_sig(&mut png);
+            write_rgba8_ihdr_with_width(&mut png, 8);
+            write_chunk(&mut png, b"cICP", cicp);
+            write_rgba8_idats(&mut png, 8, 0x10000);
+            write_iend(&mut png);
+
+            let decoder = Decoder::new(Cursor::new(&png));
+            let mut reader = decoder.read_info().unwrap_or_else(|e| {
+                panic!("read_info failed for cICP payload {cicp:?}: {e}");
+            });
+            assert!(reader.info().coding_independent_code_points.is_none());
+            let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+            reader.next_frame(&mut buf).unwrap();
+        }
     }
 
     /// Test handling of `eXIf` chunk.

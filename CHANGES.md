@@ -9,6 +9,11 @@
 
 ### Fixes
 
+* Invalid values inside a `cICP` chunk (non-zero matrix coefficients, a
+  video full-range flag other than 0/1, or trailing bytes) no longer make
+  `read_info` fail. The ancillary chunk is now ignored like other malformed
+  ancillary chunks. ([#720])
+
 * Reject `Encoder::with_info` calls whose `info.interlaced` is `true` with
   a clear `InterlacedEncodingUnsupported` format error. Previously the IHDR
   was written with `interlace_method = 1` but `write_image_data` wrote
@@ -60,6 +65,7 @@
 [#665]: https://github.com/image-rs/image-png/pull/665
 [#673]: https://github.com/image-rs/image-png/pull/673
 [#675]: https://github.com/image-rs/image-png/pull/675
+[#720]: https://github.com/image-rs/image-png/issues/720
 
 ## 0.18.0
 

@@ -9,6 +9,10 @@
 
 ### Fixes
 
+* Reject palettes that are empty, longer than 256 entries, or whose length is
+  not a multiple of 3 with an `InvalidPaletteLength` format error from
+  `Encoder::write_header`. Previously the encoder wrote such a palette as-is,
+  producing an invalid `PLTE` chunk. ([#584])
 * Reject `Encoder::with_info` calls whose `info.interlaced` is `true` with
   a clear `InterlacedEncodingUnsupported` format error. Previously the IHDR
   was written with `interlace_method = 1` but `write_image_data` wrote
@@ -46,6 +50,7 @@
 * Fixed and improved intra-doc links in documentation comments. ([#665])
 * Fixed nightly `portable_simd` build. ([#675])
 
+[#584]: https://github.com/image-rs/image-png/issues/584
 [#630]: https://github.com/image-rs/image-png/pull/630
 [#632]: https://github.com/image-rs/image-png/pull/632
 [#633]: https://github.com/image-rs/image-png/pull/633

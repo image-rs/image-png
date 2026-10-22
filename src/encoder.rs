@@ -41,6 +41,7 @@ enum FormatErrorKind {
     ZeroHeight,
     InvalidColorCombination(BitDepth, ColorType),
     NoPalette,
+    InvalidPaletteLength(usize),
     // TODO: wait, what?
     WrittenTooMuch(usize),
     NotAnimated,
@@ -88,6 +89,11 @@ impl fmt::Display for FormatError {
                 depth, color
             ),
             NoPalette => write!(fmt, "can't write indexed image without palette"),
+            InvalidPaletteLength(len) => write!(
+                fmt,
+                "invalid palette length of {} bytes, must be a multiple of 3 between 3 and 768",
+                len
+            ),
             WrittenTooMuch(index) => write!(fmt, "wrong data size, got {} bytes too many", index),
             NotAnimated => write!(fmt, "not an animation"),
             OutOfBounds => write!(
@@ -253,6 +259,10 @@ impl<'a, W: Write> Encoder<'a, W> {
 
     /// Sets the raw byte contents of the PLTE chunk. This method accepts
     /// both borrowed and owned byte data.
+    ///
+    /// The palette must contain between 1 and 256 RGB entries, i.e. its length
+    /// must be a multiple of 3 between 3 and 768 bytes. Otherwise
+    /// [`write_header`](Self::write_header) returns an error.
     pub fn set_palette<T: Into<Cow<'a, [u8]>>>(&mut self, palette: T) {
         self.info.palette = Some(palette.into());
     }
@@ -607,6 +617,16 @@ impl<W: Write> Writer<W> {
                 FormatErrorKind::InvalidColorCombination(self.info.bit_depth, self.info.color_type)
                     .into(),
             ));
+        }
+
+        // The PLTE chunk holds 1 to 256 RGB entries of 3 bytes each.
+        if let Some(palette) = &info.palette {
+            let len = palette.len();
+            if len == 0 || len % 3 != 0 || len > 256 * 3 {
+                return Err(EncodingError::Format(
+                    FormatErrorKind::InvalidPaletteLength(len).into(),
+                ));
+            }
         }
 
         // `write_image_data` does not apply Adam7 passes to the supplied raw
@@ -2323,6 +2343,39 @@ mod tests {
             msg.to_ascii_lowercase().contains("interlac"),
             "error message should mention interlacing, got: {msg}",
         );
+    }
+
+    #[test]
+    fn expect_error_on_invalid_palette_length() {
+        // The PLTE chunk must hold 1 to 256 entries of 3 bytes each.
+        for len in [0, 1024, 257 * 3, 4] {
+            let mut out = Vec::new();
+            let mut encoder = Encoder::new(&mut out, 1, 1);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_color(ColorType::Indexed);
+            encoder.set_palette(vec![0u8; len]);
+            let result = encoder.write_header();
+            assert!(
+                matches!(result, Err(EncodingError::Format(_))),
+                "expected Format error for a palette of {len} bytes, got {:?}",
+                result.as_ref().err(),
+            );
+            drop(result);
+            assert!(
+                !out.windows(4).any(|w| w == b"PLTE"),
+                "no PLTE chunk should be written",
+            );
+        }
+
+        for len in [3, 256 * 3] {
+            let mut out = Vec::new();
+            let mut encoder = Encoder::new(&mut out, 1, 1);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_color(ColorType::Indexed);
+            encoder.set_palette(vec![0u8; len]);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0]).unwrap();
+        }
     }
 
     #[test]

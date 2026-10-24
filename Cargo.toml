@@ -72,3 +72,9 @@ path = "benches/expand_paletted.rs"
 name = "expand_paletted"
 harness = false
 required-features = ["benchmarks"]
+
+[[bench]]
+path = "benches/expand_alpha.rs"
+name = "expand_alpha"
+harness = false
+required-features = ["benchmarks"]

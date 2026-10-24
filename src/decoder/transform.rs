@@ -59,7 +59,11 @@ pub fn create_transform_fn(
         }
         ColorType::Grayscale | ColorType::Rgb if expand && trns => {
             Ok(Box::new(if bit_depth == 8 {
-                expand_trns_line
+                if color_type == ColorType::Rgb {
+                    expand_trns_line::<3>
+                } else {
+                    expand_trns_line::<1>
+                }
             } else if strip16 {
                 expand_trns_and_strip_line16
             } else {
@@ -134,15 +138,15 @@ where
     }
 }
 
-fn expand_trns_line(input: &[u8], output: &mut [u8], info: &Info) {
-    let channels = info.color_type.samples();
-    let trns = info.trns.as_deref();
-    for (input, output) in input
-        .chunks_exact(channels)
-        .zip(output.chunks_exact_mut(channels + 1))
-    {
-        output[..channels].copy_from_slice(input);
-        output[channels] = if Some(input) == trns { 0 } else { 0xFF };
+/// `N` is the number of 8-bit samples per pixel (1 for gray, 3 for RGB). With fixed-size
+/// pixels, the per-pixel copy and key comparison compile to inline moves and compares
+/// instead of `memcpy` and `memcmp` calls; for `N = 1` the loop also vectorizes.
+fn expand_trns_line<const N: usize>(input: &[u8], output: &mut [u8], info: &Info) {
+    let trns: Option<[u8; N]> = info.trns.as_deref().and_then(|t| t.try_into().ok());
+    for (input, output) in input.chunks_exact(N).zip(output.chunks_exact_mut(N + 1)) {
+        let pixel: [u8; N] = input.try_into().unwrap();
+        output[..N].copy_from_slice(&pixel);
+        output[N] = if Some(pixel) == trns { 0 } else { 0xFF };
     }
 }
 
@@ -200,4 +204,55 @@ fn expand_gray_u8_with_trns(row: &[u8], buffer: &mut [u8], info: &Info) {
         };
         chunk[0] = pixel * scaling_factor
     });
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{BitDepth, ColorType, Info, Transformations};
+
+    /// The previous, channel-generic version is used as a test oracle.
+    fn oracle_expand_trns_line(input: &[u8], output: &mut [u8], info: &Info) {
+        let channels = info.color_type.samples();
+        let trns = info.trns.as_deref();
+        for (input, output) in input
+            .chunks_exact(channels)
+            .zip(output.chunks_exact_mut(channels + 1))
+        {
+            output[..channels].copy_from_slice(input);
+            output[channels] = if Some(input) == trns { 0 } else { 0xFF };
+        }
+    }
+
+    #[test]
+    fn expand_trns_line_matches_oracle() {
+        for color_type in [ColorType::Grayscale, ColorType::Rgb] {
+            let samples = color_type.samples();
+            let key = vec![0x42; samples];
+            for trns in [None, Some(&key[..])] {
+                let info = Info {
+                    color_type,
+                    bit_depth: BitDepth::Eight,
+                    trns: trns.map(Into::into),
+                    ..Info::default()
+                };
+                let transform_fn =
+                    super::create_transform_fn(&info, Transformations::ALPHA).unwrap();
+                for width in [0usize, 1, 2, 3, 7, 16, 17, 64, 257] {
+                    let mut row: Vec<u8> = (0..width * samples).map(|i| (i * 37) as u8).collect();
+                    // Every third pixel is the tRNS key, so both alpha values are written.
+                    for pixel in row.chunks_exact_mut(samples).step_by(3) {
+                        pixel.copy_from_slice(&key);
+                    }
+                    let mut expected = vec![0u8; width * (samples + 1)];
+                    oracle_expand_trns_line(&row, &mut expected, &info);
+                    let mut actual = vec![0u8; width * (samples + 1)];
+                    transform_fn(&row, &mut actual, &info);
+                    assert_eq!(
+                        actual, expected,
+                        "{color_type:?} trns={trns:?} width={width}"
+                    );
+                }
+            }
+        }
+    }
 }

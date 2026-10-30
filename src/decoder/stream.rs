@@ -210,11 +210,6 @@ pub(crate) enum FormatErrorInner {
         expected: u32,
     },
     // Errors specific to particular chunk data to be validated.
-    /// The palette did not even contain a single pixel data.
-    ShortPalette {
-        expected: usize,
-        len: usize,
-    },
     /// sBIT chunk size based on color type.
     InvalidSbitChunkSize {
         color_type: ColorType,
@@ -333,11 +328,6 @@ impl fmt::Display for FormatError {
                 fmt,
                 "Sequence is not in order, expected #{} got #{}.",
                 expected, present,
-            ),
-            ShortPalette { expected, len } => write!(
-                fmt,
-                "Not enough palette entries, expect {} got {}.",
-                expected, len
             ),
             InvalidSbitChunkSize {color_type, expected, len} => write!(
                 fmt,
@@ -1412,9 +1402,9 @@ impl StreamingDecoder {
         let len = vec.len();
         match color_type {
             ColorType::Grayscale => {
-                if len < 2 {
+                if len != 2 {
                     return Err(DecodingError::Format(
-                        FormatErrorInner::ShortPalette { expected: 2, len }.into(),
+                        FormatErrorInner::ChunkLengthWrong { kind: chunk::tRNS }.into(),
                     ));
                 }
                 if bit_depth < 16 {
@@ -1425,9 +1415,9 @@ impl StreamingDecoder {
                 Ok(())
             }
             ColorType::Rgb => {
-                if len < 6 {
+                if len != 6 {
                     return Err(DecodingError::Format(
-                        FormatErrorInner::ShortPalette { expected: 6, len }.into(),
+                        FormatErrorInner::ChunkLengthWrong { kind: chunk::tRNS }.into(),
                     ));
                 }
                 if bit_depth < 16 {
@@ -3465,6 +3455,26 @@ mod tests {
         reader.next_frame(&mut buf).unwrap();
         assert_eq!(3093270825, crc32fast::hash(&buf));
         assert!(reader.info().trns.is_none());
+    }
+
+    #[test]
+    fn test_incorrect_trns_chunk_length_is_ignored() {
+        for (color_type, len) in [
+            (crate::ColorType::Grayscale, 1),
+            (crate::ColorType::Grayscale, 3),
+            (crate::ColorType::Rgb, 5),
+            (crate::ColorType::Rgb, 7),
+        ] {
+            let mut png = Vec::new();
+            write_png_sig(&mut png);
+            write_ihdr(&mut png, 1, 1, 8, color_type as u8, 0);
+            write_chunk(&mut png, b"tRNS", &vec![0; len]);
+            write_chunk(&mut png, b"IDAT", &[]);
+            write_iend(&mut png);
+
+            let reader = Decoder::new(Cursor::new(&png)).read_info().unwrap();
+            assert!(reader.info().trns.is_none());
+        }
     }
 
     /// This is a regression test for https://crbug.com/422421347

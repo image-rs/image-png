@@ -1,12 +1,12 @@
 use crate::BytesPerPixel;
 
-// This code path is used on non-x86_64 architectures but we allow dead code
-// for the test module to be able to access it.
+// This code path is used on architectures other than x86_64 and wasm32 but we
+// allow dead code for the test module to be able to access it.
 #[allow(dead_code)]
 pub(super) fn filter_paeth(a: u8, b: u8, c: u8) -> u8 {
     // On ARM this algorithm performs much better than the one above adapted from stb,
     // and this is the better-studied algorithm we've always used here,
-    // so we default to it on all non-x86 platforms.
+    // so we default to it on all platforms but x86 and wasm.
     let pa = (i16::from(b) - i16::from(c)).abs();
     let pb = (i16::from(a) - i16::from(c)).abs();
     let pc = ((i16::from(a) - i16::from(c)) + (i16::from(b) - i16::from(c))).abs();
@@ -84,7 +84,7 @@ pub(super) fn filter_paeth_fpnge(a: u8, b: u8, c: u8) -> u8 {
 }
 
 #[allow(unreachable_code)]
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
 pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8]) {
     // Paeth filter pixels:
     // C B D
@@ -210,7 +210,7 @@ pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8])
 /// representations when possible by maintaining [i16; BPP] arrays
 /// between iterations instead of [u8; BPP].
 #[allow(unreachable_code)]
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "wasm32"))]
 pub(super) fn unfilter(tbpp: BytesPerPixel, previous: &[u8], current: &mut [u8]) {
     // Paeth filter pixels:
     // C B D

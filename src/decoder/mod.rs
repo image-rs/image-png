@@ -203,6 +203,7 @@ impl<R: BufRead> Decoder<R> {
             transform_fn: None,
             scratch_buffer: Vec::new(),
             finished: false,
+            deferred_error: None,
         };
 
         // Check if the decoding buffer of a single raw line has a valid size.
@@ -310,6 +311,9 @@ pub struct Reader<R: BufRead> {
     scratch_buffer: Vec<u8>,
     /// Whether `ImageEnd` was already reached by `fn finish`.
     finished: bool,
+    /// A decompression error held back until rows that were already
+    /// decompressed ahead of it have been handed out.
+    deferred_error: Option<DecodingError>,
 }
 
 /// The subframe specific information.
@@ -700,6 +704,18 @@ impl<R: BufRead> Reader<R> {
     fn next_raw_interlaced_row(&mut self, rowlen: usize) -> Result<(), DecodingError> {
         // Read image data until we have at least one full row (but possibly more than one).
         while self.unfiltering_buffer.mutable_len_of_curr_row() < rowlen {
+            // A previous call already failed. Keep handing out rows that were
+            // decompressed before that failure, then surface the error. Do not
+            // ask the inflater to continue; its state is no longer usable.
+            // `UnexpectedEof` is not deferred: a short read can still grow.
+            if self.deferred_error.is_some() {
+                if self.unfiltering_buffer.readable_len_of_curr_row() >= rowlen {
+                    return self
+                        .unfiltering_buffer
+                        .unfilter_curr_row_using_scratch_buffer(rowlen, self.bpp);
+                }
+                return Err(self.deferred_error.take().unwrap());
+            }
             if self.subframe.consumed_and_flushed {
                 return Err(DecodingError::Format(
                     FormatErrorInner::NoMoreImageData.into(),
@@ -721,7 +737,21 @@ impl<R: BufRead> Reader<R> {
                         .unfiltering_buffer
                         .unfilter_curr_row_using_scratch_buffer(rowlen, self.bpp);
                 }
-                Err(other_error) => return Err(other_error),
+                Err(error) => {
+                    // The inflater may have written complete rows and then failed
+                    // in the same call. Yield those rows before the error.
+                    if self.unfiltering_buffer.mutable_len_of_curr_row() >= rowlen {
+                        self.deferred_error = Some(error);
+                        break;
+                    }
+                    if self.unfiltering_buffer.readable_len_of_curr_row() >= rowlen {
+                        self.deferred_error = Some(error);
+                        return self
+                            .unfiltering_buffer
+                            .unfilter_curr_row_using_scratch_buffer(rowlen, self.bpp);
+                    }
+                    return Err(error);
+                }
             }
         }
 

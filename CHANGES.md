@@ -9,6 +9,9 @@
 
 ### Fixes
 
+* `Reader::next_row` again returns rows that were already decompressed when a
+  later `IDAT` byte is corrupt. Since 0.18 the inflater error was returned on
+  the first call, so a truncated image yielded nothing. ([#728])
 * Reject `Encoder::with_info` calls whose `info.interlaced` is `true` with
   a clear `InterlacedEncodingUnsupported` format error. Previously the IHDR
   was written with `interlace_method = 1` but `write_image_data` wrote
@@ -51,6 +54,7 @@
 [#633]: https://github.com/image-rs/image-png/pull/633
 [#635]: https://github.com/image-rs/image-png/pull/635
 [#645]: https://github.com/image-rs/image-png/issues/645
+[#728]: https://github.com/image-rs/image-png/issues/728
 [#646]: https://github.com/image-rs/image-png/pull/646
 [#647]: https://github.com/image-rs/image-png/pull/647
 [#650]: https://github.com/image-rs/image-png/pull/650

@@ -399,6 +399,10 @@ pub fn expand_pass(
                 img[bytepos..][..2].copy_from_slice(px);
             }
         }
+        24 => expand_pass_bytes::<3>(img, img_row_stride, interlaced_row, interlace_info),
+        32 => expand_pass_bytes::<4>(img, img_row_stride, interlaced_row, interlace_info),
+        48 => expand_pass_bytes::<6>(img, img_row_stride, interlaced_row, interlace_info),
+        64 => expand_pass_bytes::<8>(img, img_row_stride, interlaced_row, interlace_info),
         _ => {
             debug_assert!(bits_per_pixel % 8 == 0);
             let bytes_pp = bits_per_pixel / 8;
@@ -407,6 +411,23 @@ pub fn expand_pass(
             for (bytepos, px) in byte_indices.zip(interlaced_row.chunks(bytes_pp.into())) {
                 img[bytepos..][..px.len()].copy_from_slice(px);
             }
+        }
+    }
+}
+
+/// `expand_pass` for whole-byte pixels of a size known at compile time.
+fn expand_pass_bytes<const N: usize>(
+    img: &mut [u8],
+    img_row_stride: usize,
+    interlaced_row: &[u8],
+    interlace_info: &Adam7Info,
+) {
+    let byte_indices = expand_adam7_bytes(img_row_stride, interlace_info, N as u8);
+
+    for (bytepos, px) in byte_indices.zip(interlaced_row.chunks(N)) {
+        match <&[u8; N]>::try_from(px) {
+            Ok(px) => img[bytepos..][..N].copy_from_slice(px),
+            Err(_) => img[bytepos..][..px.len()].copy_from_slice(px),
         }
     }
 }

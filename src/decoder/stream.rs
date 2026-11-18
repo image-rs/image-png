@@ -2029,8 +2029,8 @@ impl StreamingDecoder {
         let expected = match info.color_type {
             ColorType::Indexed => {
                 if info.palette.is_none() {
-                    return Err(DecodingError::IoError(
-                        std::io::ErrorKind::InvalidData.into(),
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::BeforePlte { kind: chunk::bKGD }.into(),
                     ));
                 };
                 1
@@ -3809,5 +3809,19 @@ mod tests {
             assert_eq!(output_info.color_type, color_type);
             assert!(reader.info().trns.is_none());
         }
+    }
+
+    #[test]
+    fn test_bkgd_before_plte_is_ignored() {
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_ihdr(&mut png, 1, 1, 8, crate::ColorType::Indexed as u8, 0);
+        write_chunk(&mut png, b"bKGD", &[0]);
+        write_chunk(&mut png, b"PLTE", &[0, 0, 0]);
+        write_chunk(&mut png, b"IDAT", &[]);
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(&png)).read_info().unwrap();
+        assert!(reader.info().bkgd.is_none());
     }
 }

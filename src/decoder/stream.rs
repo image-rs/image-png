@@ -1442,13 +1442,21 @@ impl StreamingDecoder {
             ColorType::Indexed => {
                 // The transparency chunk must be after the palette chunk and
                 // before the data chunk.
-                if info.palette.is_none() {
+                let Some(palette) = info.palette.as_deref() else {
                     return Err(DecodingError::Format(
                         FormatErrorInner::BeforePlte { kind: chunk::tRNS }.into(),
                     ));
-                } else if self.have_idat {
+                };
+                if self.have_idat {
                     return Err(DecodingError::Format(
                         FormatErrorInner::OutsidePlteIdat { kind: chunk::tRNS }.into(),
+                    ));
+                }
+
+                let max_entries = (palette.len() / 3).min(1usize << bit_depth);
+                if len > max_entries {
+                    return Err(DecodingError::Format(
+                        FormatErrorInner::ChunkLengthWrong { kind: chunk::tRNS }.into(),
                     ));
                 }
 
@@ -3809,5 +3817,47 @@ mod tests {
             assert_eq!(output_info.color_type, color_type);
             assert!(reader.info().trns.is_none());
         }
+    }
+
+    #[test]
+    fn test_trns_contain_more_alpha_values_than_palette_entries_is_skipped() {
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_ihdr(&mut png, 1, 1, 8, crate::ColorType::Indexed as u8, 0);
+        write_chunk(&mut png, b"PLTE", &[0; 6]);
+        write_chunk(&mut png, b"tRNS", &[0; 3]);
+        write_chunk(&mut png, b"IDAT", &[]);
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(&png)).read_info().unwrap();
+        assert!(reader.info().trns.is_none());
+    }
+
+    #[test]
+    fn test_trns_contain_more_alpha_values_than_indexable_entries_is_skipped() {
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_ihdr(&mut png, 1, 1, 1, crate::ColorType::Indexed as u8, 0);
+        write_chunk(&mut png, b"PLTE", &[0; 12]);
+        write_chunk(&mut png, b"tRNS", &[0; 3]);
+        write_chunk(&mut png, b"IDAT", &[]);
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(&png)).read_info().unwrap();
+        assert!(reader.info().trns.is_none());
+    }
+
+    #[test]
+    fn test_trns_at_indexable_limit_is_used() {
+        let mut png = Vec::new();
+        write_png_sig(&mut png);
+        write_ihdr(&mut png, 1, 1, 1, crate::ColorType::Indexed as u8, 0);
+        write_chunk(&mut png, b"PLTE", &[0; 12]);
+        write_chunk(&mut png, b"tRNS", &[10, 20]);
+        write_chunk(&mut png, b"IDAT", &[]);
+        write_iend(&mut png);
+
+        let reader = Decoder::new(Cursor::new(&png)).read_info().unwrap();
+        assert_eq!(reader.info().trns.as_deref(), Some(&[10, 20][..]));
     }
 }

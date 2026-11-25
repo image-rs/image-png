@@ -374,10 +374,12 @@ impl<R: BufRead> Reader<R> {
         let frame_bytes = if self.info().interlaced {
             let mut bytes = 0u64;
             for pass in crate::adam7::PassConstants::PASSES {
-                bytes += self
-                    .info()
-                    .raw_row_length_from_width(pass.count_samples(self.subframe.width))
-                    as u64
+                // A pass without any samples has no rows at all (not even filter bytes).
+                let samples = pass.count_samples(self.subframe.width);
+                if samples == 0 {
+                    continue;
+                }
+                bytes += self.info().raw_row_length_from_width(samples) as u64
                     * pass.count_lines(self.subframe.height) as u64;
             }
             bytes

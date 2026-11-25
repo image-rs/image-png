@@ -3810,4 +3810,28 @@ mod tests {
             assert!(reader.info().trns.is_none());
         }
     }
+
+    /// Adam7 passes without samples (passes 2, 4 and 6 of a 1-pixel-wide image) have no rows,
+    /// not even filter bytes. Counting one filter byte per line of such a pass made the decoder
+    /// expect more image data than the frame has, so a zlib stream that ends right after the
+    /// pixel data (no final block) was rejected for an interlaced image but not for the
+    /// non-interlaced one, and the outcome of decoding a stream with trailing garbage depended on
+    /// how the input was split into reads (found by the `buf_independent` fuzzer).
+    #[test]
+    fn test_interlaced_frame_size_skips_empty_passes() {
+        for interlace in [0, 1] {
+            // 1x1 8-bit grayscale: filter type 0, pixel 0x80 in a non-final stored block.
+            let idat = [0x78, 0x01, 0x00, 0x02, 0x00, 0xfd, 0xff, 0x00, 0x80];
+            let mut png = Vec::new();
+            write_png_sig(&mut png);
+            write_ihdr(&mut png, 1, 1, 8, 0, interlace);
+            write_chunk(&mut png, b"IDAT", &idat);
+            write_iend(&mut png);
+
+            let mut reader = Decoder::new(Cursor::new(png)).read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+            reader.next_frame(&mut buf).unwrap();
+            assert_eq!(buf, [0x80], "interlace = {interlace}");
+        }
+    }
 }

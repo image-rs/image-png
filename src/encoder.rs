@@ -107,6 +107,14 @@ impl fmt::Display for FormatError {
                     "The text metadata cannot be encoded into valid ISO 8859-1"
                 ),
                 TextEncodingError::InvalidKeywordSize => write!(fmt, "Invalid keyword size"),
+                TextEncodingError::InvalidKeyword => write!(
+                    fmt,
+                    "A keyword must consist of printable Latin-1 characters, without leading, trailing or consecutive spaces"
+                ),
+                TextEncodingError::EmbeddedNullByte => write!(
+                    fmt,
+                    "A null-terminated text metadata field cannot contain a null byte"
+                ),
                 TextEncodingError::CompressionError => {
                     write!(fmt, "Unable to compress text metadata")
                 }

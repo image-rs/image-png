@@ -112,6 +112,12 @@ pub(crate) enum TextEncodingError {
     Unrepresentable,
     /// Keyword longer than 79 bytes or empty
     InvalidKeywordSize,
+    /// Keyword contains a byte outside of printable Latin-1, a leading or
+    /// trailing space, or two consecutive spaces
+    InvalidKeyword,
+    /// A field that the chunk layout terminates with a null byte contains a
+    /// null byte of its own
+    EmbeddedNullByte,
     /// Error encountered while compressing text
     CompressionError,
 }
@@ -172,6 +178,37 @@ fn encode_iso_8859_1_iter(text: &str) -> impl Iterator<Item = Result<u8, TextEnc
         .map(|c| u8::try_from(c as u32).map_err(|_| TextEncodingError::Unrepresentable))
 }
 
+/// Checks an already Latin-1 encoded keyword against the restrictions in
+/// [the PNG specification](https://www.w3.org/TR/png-3/#11keywords): 1 to 79
+/// printable Latin-1 bytes, with no leading or trailing space and no two
+/// consecutive spaces.
+fn validate_keyword(keyword: &[u8]) -> Result<(), TextEncodingError> {
+    if keyword.is_empty() || keyword.len() > 79 {
+        return Err(TextEncodingError::InvalidKeywordSize);
+    }
+
+    if !keyword.iter().all(|&b| matches!(b, 32..=126 | 161..=255))
+        || keyword.first() == Some(&b' ')
+        || keyword.last() == Some(&b' ')
+        || keyword.windows(2).any(|pair| pair == b"  ")
+    {
+        return Err(TextEncodingError::InvalidKeyword);
+    }
+
+    Ok(())
+}
+
+/// Rejects a null byte in a field that the chunk layout terminates with a null
+/// byte. Such a byte ends the field early and shifts every field after it, so
+/// the chunk would decode into different metadata than was asked for.
+fn validate_null_terminated(field: &[u8]) -> Result<(), TextEncodingError> {
+    if field.contains(&0) {
+        Err(TextEncodingError::EmbeddedNullByte)
+    } else {
+        Ok(())
+    }
+}
+
 fn decode_ascii(text: &[u8]) -> Result<&str, TextDecodingError> {
     if text.is_ascii() {
         // `from_utf8` cannot panic because we're already checked that `text` is ASCII-7.
@@ -214,9 +251,7 @@ impl EncodableTextChunk for TEXtChunk {
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
         let mut data = encode_iso_8859_1(&self.keyword)?;
 
-        if data.is_empty() || data.len() > 79 {
-            return Err(TextEncodingError::InvalidKeywordSize.into());
-        }
+        validate_keyword(&data)?;
 
         data.push(0);
 
@@ -338,9 +373,7 @@ impl EncodableTextChunk for ZTXtChunk {
     fn encode<W: Write>(&self, w: &mut W) -> Result<(), EncodingError> {
         let mut data = encode_iso_8859_1(&self.keyword)?;
 
-        if data.is_empty() || data.len() > 79 {
-            return Err(TextEncodingError::InvalidKeywordSize.into());
-        }
+        validate_keyword(&data)?;
 
         // Null separator
         data.push(0);
@@ -513,9 +546,7 @@ impl EncodableTextChunk for ITXtChunk {
         // Keyword
         let mut data = encode_iso_8859_1(&self.keyword)?;
 
-        if data.is_empty() || data.len() > 79 {
-            return Err(TextEncodingError::InvalidKeywordSize.into());
-        }
+        validate_keyword(&data)?;
 
         // Null separator
         data.push(0);
@@ -534,12 +565,14 @@ impl EncodableTextChunk for ITXtChunk {
         if !self.language_tag.is_ascii() {
             return Err(EncodingError::from(TextEncodingError::Unrepresentable));
         }
+        validate_null_terminated(self.language_tag.as_bytes())?;
         data.extend(self.language_tag.as_bytes());
 
         // Null separator
         data.push(0);
 
         // Translated keyword
+        validate_null_terminated(self.translated_keyword.as_bytes())?;
         data.extend_from_slice(self.translated_keyword.as_bytes());
 
         // Null separator
@@ -576,5 +609,72 @@ impl EncodableTextChunk for ITXtChunk {
         }
 
         encoder::write_chunk(w, chunk::iTXt, &data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_chunk<T: EncodableTextChunk>(chunk: &T) -> Result<Vec<u8>, EncodingError> {
+        let mut out = Vec::new();
+        chunk.encode(&mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn keyword_with_null_byte_is_rejected() {
+        // Without validation the bytes after the null byte are decoded as the
+        // fields that follow the keyword, so the chunk round-trips as different
+        // metadata than was asked for.
+        assert!(encode_chunk(&TEXtChunk::new("Author\u{0}forged", "real")).is_err());
+        assert!(encode_chunk(&ZTXtChunk::new("Author\u{0}\u{0}", "real")).is_err());
+        assert!(encode_chunk(&ITXtChunk::new(
+            "Comment\u{0}\u{0}\u{0}en\u{0}Author\u{0}forged",
+            "real"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn itxt_language_tag_with_null_byte_is_rejected() {
+        let mut chunk = ITXtChunk::new("Comment", "real");
+        chunk.language_tag = "en\u{0}forged translated keyword".to_string();
+        assert!(encode_chunk(&chunk).is_err());
+    }
+
+    #[test]
+    fn itxt_translated_keyword_with_null_byte_is_rejected() {
+        let mut chunk = ITXtChunk::new("Comment", "real");
+        chunk.translated_keyword = "Kommentar\u{0}forged text".to_string();
+        assert!(encode_chunk(&chunk).is_err());
+    }
+
+    #[test]
+    fn keyword_character_restrictions() {
+        for keyword in ["Author", "Author Name", "Auteur\u{e9}", "\u{a1}"] {
+            assert!(
+                encode_chunk(&TEXtChunk::new(keyword, "real")).is_ok(),
+                "{keyword:?} should encode"
+            );
+        }
+
+        for keyword in [
+            "",
+            "Author\nComment",
+            "Author\tComment",
+            "Author\u{7f}",
+            "Author\u{80}",
+            "Author\u{a0}",
+            " Author",
+            "Author ",
+            "Author  Name",
+            &"A".repeat(80),
+        ] {
+            assert!(
+                encode_chunk(&TEXtChunk::new(keyword, "real")).is_err(),
+                "{keyword:?} should be rejected"
+            );
+        }
     }
 }

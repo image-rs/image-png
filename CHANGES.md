@@ -9,6 +9,13 @@
 
 ### Fixes
 
+* Validate the keyword of `tEXt`, `zTXt` and `iTXt` chunks, and the language
+  tag and translated keyword of `iTXt` chunks, before they are written. These
+  fields are terminated by a null byte in the encoded chunk, so a null byte in
+  the value shifted every field after it and the chunk decoded as different
+  metadata than the caller asked for. Keywords are now also checked against
+  the printable Latin-1 and spacing rules of the specification.
+
 * Reject `Encoder::with_info` calls whose `info.interlaced` is `true` with
   a clear `InterlacedEncodingUnsupported` format error. Previously the IHDR
   was written with `interlace_method = 1` but `write_image_data` wrote

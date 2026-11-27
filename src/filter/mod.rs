@@ -525,6 +525,285 @@ fn adaptive_filter(
     filter_choice
 }
 
+// Fused adaptive filter selection for `Filter::Adaptive`.
+//
+// Avoids writing all 4 candidate filters into `output` and re-reading `output`
+// in `sum_buffer`, and avoids recomputing the winning filter a 5th time when
+// `Paeth` does not win. Produces byte-for-byte identical filter choices and
+// output to `adaptive_filter(sum_buffer, ...)`.
+//
+// On `aarch64` (32 NEON vector registers + native 1-cycle `ABS` and `UADDLV`),
+// scoring all 4 filters in a single read-only 32-byte pass gives the best
+// throughput. On `x86_64` baseline SSE2 (16 XMM registers, no `PABSB` until
+// SSSE3) and other architectures, a 2-stage stack-chunk pass avoids vector
+// register spills and aborts Paeth early once its cost exceeds the best of
+// `{Up, Sub, Avg}`.
+#[cfg(target_arch = "aarch64")]
+fn adaptive_filter_sum(
+    bpp: usize,
+    len: usize,
+    previous: &[u8],
+    current: &[u8],
+    output: &mut [u8],
+) -> RowFilter {
+    use RowFilter::*;
+    const CHUNK_SIZE: usize = 32;
+
+    assert_eq!(previous.len(), len);
+    assert_eq!(output.len(), len);
+
+    let head = bpp.min(len);
+    let mut sum_up: u64 = 0;
+    let mut sum_sub: u64 = 0;
+    let mut sum_avg: u64 = 0;
+    let mut sum_paeth: u64 = 0;
+
+    for i in 0..head {
+        let cur = current[i];
+        let b = previous[i];
+        sum_up += u64::from((cur.wrapping_sub(b) as i8).unsigned_abs());
+        sum_sub += u64::from((cur as i8).unsigned_abs());
+        sum_avg += u64::from((cur.wrapping_sub(b / 2) as i8).unsigned_abs());
+        sum_paeth +=
+            u64::from((cur.wrapping_sub(paeth::filter_paeth_fpnge(0, b, 0)) as i8).unsigned_abs());
+    }
+
+    if len > bpp {
+        let mut cur_chunks = current[bpp..].chunks_exact(CHUNK_SIZE);
+        let mut a_chunks = current[..len - bpp].chunks_exact(CHUNK_SIZE);
+        let mut b_chunks = previous[bpp..].chunks_exact(CHUNK_SIZE);
+        let mut c_chunks = previous[..len - bpp].chunks_exact(CHUNK_SIZE);
+
+        for (((cur, a), b), c) in (&mut cur_chunks)
+            .zip(&mut a_chunks)
+            .zip(&mut b_chunks)
+            .zip(&mut c_chunks)
+        {
+            // Max per chunk is 32 * 128 = 4096, which fits in u16 without overflow.
+            let mut acc_up: u16 = 0;
+            let mut acc_sub: u16 = 0;
+            let mut acc_avg: u16 = 0;
+            let mut acc_paeth: u16 = 0;
+            for i in 0..CHUNK_SIZE {
+                let x = cur[i];
+                let av = a[i];
+                let bv = b[i];
+                let cv = c[i];
+
+                let up = x.wrapping_sub(bv);
+                let sub = x.wrapping_sub(av);
+                let avg = x.wrapping_sub((av & bv) + ((av ^ bv) >> 1));
+                let paeth = x.wrapping_sub(paeth::filter_paeth_fpnge(av, bv, cv));
+
+                acc_up += u16::from((up as i8).unsigned_abs());
+                acc_sub += u16::from((sub as i8).unsigned_abs());
+                acc_avg += u16::from((avg as i8).unsigned_abs());
+                acc_paeth += u16::from((paeth as i8).unsigned_abs());
+            }
+            sum_up += u64::from(acc_up);
+            sum_sub += u64::from(acc_sub);
+            sum_avg += u64::from(acc_avg);
+            sum_paeth += u64::from(acc_paeth);
+        }
+
+        for (((&x, &av), &bv), &cv) in cur_chunks
+            .remainder()
+            .iter()
+            .zip(a_chunks.remainder())
+            .zip(b_chunks.remainder())
+            .zip(c_chunks.remainder())
+        {
+            let up = x.wrapping_sub(bv);
+            let sub = x.wrapping_sub(av);
+            let avg = x.wrapping_sub((av & bv) + ((av ^ bv) >> 1));
+            let paeth = x.wrapping_sub(paeth::filter_paeth_fpnge(av, bv, cv));
+
+            sum_up += u64::from((up as i8).unsigned_abs());
+            sum_sub += u64::from((sub as i8).unsigned_abs());
+            sum_avg += u64::from((avg as i8).unsigned_abs());
+            sum_paeth += u64::from((paeth as i8).unsigned_abs());
+        }
+    }
+
+    // Preserve exact zero-cost short-circuit and `<=` tie-breaking order of
+    // `[Up, Sub, Avg, Paeth]`.
+    let filter_choice = if sum_up == 0 {
+        Up
+    } else if sum_sub == 0 {
+        Sub
+    } else if sum_avg == 0 {
+        Avg
+    } else if sum_paeth == 0 {
+        Paeth
+    } else {
+        let mut min_cost = sum_up;
+        let mut choice = Up;
+        if sum_sub <= min_cost {
+            min_cost = sum_sub;
+            choice = Sub;
+        }
+        if sum_avg <= min_cost {
+            min_cost = sum_avg;
+            choice = Avg;
+        }
+        if sum_paeth <= min_cost {
+            choice = Paeth;
+        }
+        choice
+    };
+
+    filter_internal(filter_choice, bpp, len, previous, current, output)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+fn sum_chunk32(chunk: &[u8; 32]) -> u64 {
+    let mut acc: u16 = 0;
+    for &b in chunk {
+        acc += u16::from((b as i8).unsigned_abs());
+    }
+    u64::from(acc)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn adaptive_filter_sum(
+    bpp: usize,
+    len: usize,
+    previous: &[u8],
+    current: &[u8],
+    output: &mut [u8],
+) -> RowFilter {
+    use RowFilter::*;
+    const CHUNK_SIZE: usize = 32;
+
+    assert_eq!(previous.len(), len);
+    assert_eq!(output.len(), len);
+
+    let head = bpp.min(len);
+    let mut sum_up: u64 = 0;
+    let mut sum_sub: u64 = 0;
+    let mut sum_avg: u64 = 0;
+
+    for i in 0..head {
+        let cur = current[i];
+        let b = previous[i];
+        sum_up += u64::from((cur.wrapping_sub(b) as i8).unsigned_abs());
+        sum_sub += u64::from((cur as i8).unsigned_abs());
+        sum_avg += u64::from((cur.wrapping_sub(b / 2) as i8).unsigned_abs());
+    }
+
+    if len > bpp {
+        let mut cur_chunks = current[bpp..].chunks_exact(CHUNK_SIZE);
+        let mut a_chunks = current[..len - bpp].chunks_exact(CHUNK_SIZE);
+        let mut b_chunks = previous[bpp..].chunks_exact(CHUNK_SIZE);
+
+        for ((cur, a), b) in (&mut cur_chunks).zip(&mut a_chunks).zip(&mut b_chunks) {
+            let mut up = [0u8; CHUNK_SIZE];
+            let mut sub = [0u8; CHUNK_SIZE];
+            let mut avg = [0u8; CHUNK_SIZE];
+            for i in 0..CHUNK_SIZE {
+                up[i] = cur[i].wrapping_sub(b[i]);
+            }
+            for i in 0..CHUNK_SIZE {
+                sub[i] = cur[i].wrapping_sub(a[i]);
+            }
+            for i in 0..CHUNK_SIZE {
+                avg[i] = cur[i].wrapping_sub((a[i] & b[i]) + ((a[i] ^ b[i]) >> 1));
+            }
+            sum_up += sum_chunk32(&up);
+            sum_sub += sum_chunk32(&sub);
+            sum_avg += sum_chunk32(&avg);
+        }
+
+        for ((&x, &av), &bv) in cur_chunks
+            .remainder()
+            .iter()
+            .zip(a_chunks.remainder())
+            .zip(b_chunks.remainder())
+        {
+            sum_up += u64::from((x.wrapping_sub(bv) as i8).unsigned_abs());
+            sum_sub += u64::from((x.wrapping_sub(av) as i8).unsigned_abs());
+            sum_avg +=
+                u64::from((x.wrapping_sub((av & bv) + ((av ^ bv) >> 1)) as i8).unsigned_abs());
+        }
+    }
+
+    if sum_up == 0 {
+        return filter_internal(Up, bpp, len, previous, current, output);
+    }
+    if sum_sub == 0 {
+        return filter_internal(Sub, bpp, len, previous, current, output);
+    }
+    if sum_avg == 0 {
+        return filter_internal(Avg, bpp, len, previous, current, output);
+    }
+
+    let mut min_cost = sum_up;
+    let mut filter_choice = Up;
+    if sum_sub <= min_cost {
+        min_cost = sum_sub;
+        filter_choice = Sub;
+    }
+    if sum_avg <= min_cost {
+        min_cost = sum_avg;
+        filter_choice = Avg;
+    }
+
+    let mut sum_paeth: u64 = 0;
+    for i in 0..head {
+        let v = current[i].wrapping_sub(paeth::filter_paeth_fpnge(0, previous[i], 0));
+        output[i] = v;
+        sum_paeth += u64::from((v as i8).unsigned_abs());
+    }
+    if sum_paeth > min_cost {
+        return filter_internal(filter_choice, bpp, len, previous, current, output);
+    }
+
+    if len > bpp {
+        let mut out_chunks = output[bpp..].chunks_exact_mut(CHUNK_SIZE);
+        let mut cur_chunks = current[bpp..].chunks_exact(CHUNK_SIZE);
+        let mut a_chunks = current[..len - bpp].chunks_exact(CHUNK_SIZE);
+        let mut b_chunks = previous[bpp..].chunks_exact(CHUNK_SIZE);
+        let mut c_chunks = previous[..len - bpp].chunks_exact(CHUNK_SIZE);
+
+        for ((((out, cur), a), b), c) in (&mut out_chunks)
+            .zip(&mut cur_chunks)
+            .zip(&mut a_chunks)
+            .zip(&mut b_chunks)
+            .zip(&mut c_chunks)
+        {
+            let mut paeth_buf = [0u8; CHUNK_SIZE];
+            for i in 0..CHUNK_SIZE {
+                paeth_buf[i] = cur[i].wrapping_sub(paeth::filter_paeth_fpnge(a[i], b[i], c[i]));
+            }
+            out.copy_from_slice(&paeth_buf);
+            sum_paeth += sum_chunk32(&paeth_buf);
+            if sum_paeth > min_cost {
+                return filter_internal(filter_choice, bpp, len, previous, current, output);
+            }
+        }
+
+        for ((((out, &x), &av), &bv), &cv) in out_chunks
+            .into_remainder()
+            .iter_mut()
+            .zip(cur_chunks.remainder())
+            .zip(a_chunks.remainder())
+            .zip(b_chunks.remainder())
+            .zip(c_chunks.remainder())
+        {
+            let v = x.wrapping_sub(paeth::filter_paeth_fpnge(av, bv, cv));
+            *out = v;
+            sum_paeth += u64::from((v as i8).unsigned_abs());
+        }
+    }
+
+    if sum_paeth <= min_cost {
+        Paeth
+    } else {
+        filter_internal(filter_choice, bpp, len, previous, current, output)
+    }
+}
+
 pub(crate) fn filter(
     method: Filter,
     bpp: BytesPerPixel,
@@ -536,7 +815,7 @@ pub(crate) fn filter(
     let len = current.len();
 
     match method {
-        Filter::Adaptive => adaptive_filter(sum_buffer, bpp, len, previous, current, output),
+        Filter::Adaptive => adaptive_filter_sum(bpp, len, previous, current, output),
         Filter::MinEntropy => adaptive_filter(entropy, bpp, len, previous, current, output),
         _ => {
             let filter = RowFilter::from_method(method).unwrap();
@@ -603,6 +882,7 @@ fn entropy(buf: &[u8]) -> u64 {
 }
 
 // Helper function for Adaptive filter buffer summation
+#[cfg(test)]
 fn sum_buffer(buf: &[u8]) -> u64 {
     const CHUNK_SIZE: usize = 32;
 
@@ -611,19 +891,19 @@ fn sum_buffer(buf: &[u8]) -> u64 {
 
     for chunk in &mut buf_chunks {
         // At most, `acc` can be `32 * (i8::MIN as u8) = 32 * 128 = 4096`.
-        let mut acc = 0;
+        let mut acc: u16 = 0;
         for &b in chunk {
-            acc += u64::from((b as i8).unsigned_abs());
+            acc += u16::from((b as i8).unsigned_abs());
         }
-        sum = sum.saturating_add(acc);
+        sum = sum.saturating_add(u64::from(acc));
     }
 
-    let mut acc = 0;
+    let mut acc: u16 = 0;
     for &b in buf_chunks.remainder() {
-        acc += u64::from((b as i8).unsigned_abs());
+        acc += u16::from((b as i8).unsigned_abs());
     }
 
-    sum.saturating_add(acc)
+    sum.saturating_add(u64::from(acc))
 }
 
 #[cfg(test)]
@@ -727,5 +1007,70 @@ mod test {
         let buf: Vec<u8> = (0_u8..=255).collect();
 
         assert_eq!(sum, crate::filter::sum_buffer(&buf));
+    }
+
+    #[test]
+    fn adaptive_filter_sum_matches_reference() {
+        let bpps = [
+            BytesPerPixel::One,
+            BytesPerPixel::Two,
+            BytesPerPixel::Three,
+            BytesPerPixel::Four,
+            BytesPerPixel::Six,
+            BytesPerPixel::Eight,
+        ];
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next_byte = || -> u8 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 24) as u8
+        };
+
+        for &tbpp in &bpps {
+            let bpp = tbpp.into_usize();
+            for &len in &[bpp, bpp + 1, 31, 32, 33, 63, 64, 65, 240, 513] {
+                if len < bpp {
+                    continue;
+                }
+                let patterns: Vec<(Vec<u8>, Vec<u8>)> = vec![
+                    // All zeros (Up == 0 short-circuit)
+                    (vec![0; len], vec![0; len]),
+                    // Identical non-zero rows (Up == 0)
+                    (vec![42; len], vec![42; len]),
+                    // Horizontal constant, previous zero (Sub wins / low cost)
+                    (vec![0; len], vec![123; len]),
+                    // Ascending ramp
+                    (
+                        (0..len).map(|i| (i & 0xff) as u8).collect(),
+                        (0..len).map(|i| ((i + 3) & 0xff) as u8).collect(),
+                    ),
+                    // High-contrast alternating 0x00 / 0x80 (-128 boundary)
+                    (
+                        (0..len)
+                            .map(|i| if i % 2 == 0 { 0x80 } else { 0x00 })
+                            .collect(),
+                        (0..len)
+                            .map(|i| if i % 2 == 0 { 0x00 } else { 0x80 })
+                            .collect(),
+                    ),
+                    // Pseudo-random
+                    (
+                        (0..len).map(|_| next_byte()).collect(),
+                        (0..len).map(|_| next_byte()).collect(),
+                    ),
+                ];
+
+                for (previous, current) in &patterns {
+                    let mut ref_out = vec![0u8; len];
+                    let mut got_out = vec![0u8; len];
+                    let want =
+                        adaptive_filter(sum_buffer, bpp, len, previous, current, &mut ref_out);
+                    let got = adaptive_filter_sum(bpp, len, previous, current, &mut got_out);
+                    assert_eq!(got, want, "filter mismatch for bpp={bpp} len={len}");
+                    assert_eq!(got_out, ref_out, "output mismatch for bpp={bpp} len={len}");
+                }
+            }
+        }
     }
 }

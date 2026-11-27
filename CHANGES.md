@@ -6,6 +6,8 @@
   image's offset relative to a larger page or screen. The parsed value is
   exposed as `Info::image_offset` and can be set on the encoder via
   `Encoder::set_image_offset`. ([#645])
+* Added `Info::checked_raw_bytes`, which returns `None` instead of overflowing
+  when the image size does not fit in a `usize`.
 
 ### Fixes
 

@@ -833,8 +833,18 @@ impl Info<'_> {
     }
 
     /// Returns the number of bytes needed for one deinterlaced image.
+    ///
+    /// This can overflow for very large dimensions. Use [`Info::checked_raw_bytes`] when the
+    /// dimensions come from untrusted input.
     pub fn raw_bytes(&self) -> usize {
         self.height as usize * self.raw_row_length()
+    }
+
+    /// Returns the number of bytes needed for one deinterlaced image, or `None` if that number
+    /// does not fit in a `usize`.
+    pub fn checked_raw_bytes(&self) -> Option<usize> {
+        self.checked_raw_row_length()?
+            .checked_mul(usize::try_from(self.height).ok()?)
     }
 
     /// Returns the number of bytes needed for one deinterlaced row.
@@ -1018,5 +1028,24 @@ impl fmt::Display for ParameterError {
                 write!(fmt, "Critical chunks cannot be captured")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_raw_bytes() {
+        let mut info = Info::with_size(3, 2);
+        info.color_type = ColorType::Rgb;
+        info.bit_depth = BitDepth::Eight;
+        assert_eq!(info.checked_raw_bytes(), Some(info.raw_bytes()));
+        assert_eq!(info.checked_raw_bytes(), Some(2 * (1 + 3 * 3)));
+
+        let mut info = Info::with_size(u32::MAX, u32::MAX);
+        info.color_type = ColorType::Rgba;
+        info.bit_depth = BitDepth::Sixteen;
+        assert_eq!(info.checked_raw_bytes(), None);
     }
 }

@@ -11,7 +11,7 @@ use crate::chunk::{self, ChunkType};
 use crate::common::{
     AnimationControl, BitDepth, BlendOp, BytesPerPixel, ColorType, Compression, DisposeOp,
     FrameControl, ImageOffset, Info, OffsetUnit, ParameterError, ParameterErrorKind,
-    PixelDimensions, ScaledFloat, Unit,
+    PixelDimensions, ScaledFloat, Unit, MAX_IMAGE_DIMENSION,
 };
 use crate::filter::{filter, Filter};
 use crate::text_metadata::{
@@ -39,6 +39,7 @@ pub struct FormatError {
 enum FormatErrorKind {
     ZeroWidth,
     ZeroHeight,
+    ImageDimensionsTooLarge,
     InvalidColorCombination(BitDepth, ColorType),
     NoPalette,
     // TODO: wait, what?
@@ -81,6 +82,12 @@ impl fmt::Display for FormatError {
         match self.inner {
             ZeroWidth => write!(fmt, "Zero width not allowed"),
             ZeroHeight => write!(fmt, "Zero height not allowed"),
+            ImageDimensionsTooLarge => {
+                write!(
+                    fmt,
+                    "Image dimensions must not exceed {MAX_IMAGE_DIMENSION}"
+                )
+            }
             ZeroFrames => write!(fmt, "Zero frames not allowed"),
             InvalidColorCombination(depth, color) => write!(
                 fmt,
@@ -291,6 +298,11 @@ impl<'a, W: Write> Encoder<'a, W> {
     ///
     /// The remaining data can be supplied by methods on the returned [`Writer`].
     pub fn write_header(self) -> Result<Writer<W>> {
+        if self.info.width > MAX_IMAGE_DIMENSION || self.info.height > MAX_IMAGE_DIMENSION {
+            return Err(EncodingError::Format(
+                FormatErrorKind::ImageDimensionsTooLarge.into(),
+            ));
+        }
         Writer::new(self.w, PartialInfo::new(&self.info), self.options).init(&self.info)
     }
 
@@ -1951,6 +1963,37 @@ mod tests {
     use std::cmp;
     use std::fs::File;
     use std::io::Cursor;
+
+    #[test]
+    fn accepts_maximum_png_dimensions_in_header() -> Result<()> {
+        for (width, height) in [(MAX_IMAGE_DIMENSION, 1), (1, MAX_IMAGE_DIMENSION)] {
+            let mut bytes = Vec::new();
+            Encoder::new(&mut bytes, width, height)
+                .write_header()?
+                .finish()?;
+            let mut decoder = Decoder::new(Cursor::new(bytes));
+            let info = decoder.read_header_info().unwrap();
+            assert_eq!((info.width, info.height), (width, height));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_oversized_canvas_before_writing_header() {
+        let oversized = MAX_IMAGE_DIMENSION + 1;
+        for (width, height) in [(oversized, 1), (1, oversized)] {
+            let mut bytes = Vec::new();
+            let result = Encoder::new(&mut bytes, width, height).write_header();
+            assert!(matches!(
+                result,
+                Err(EncodingError::Format(FormatError {
+                    inner: FormatErrorKind::ImageDimensionsTooLarge
+                }))
+            ));
+            drop(result);
+            assert!(bytes.is_empty());
+        }
+    }
 
     #[test]
     fn fdat_chunk_matches_contiguous_chunk() {

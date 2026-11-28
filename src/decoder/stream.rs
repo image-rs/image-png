@@ -14,6 +14,7 @@ use crate::common::{
     AnimationControl, BitDepth, BlendOp, CapturedChunk, ColorType, ContentLightLevelInfo,
     DisposeOp, FrameControl, ImageOffset, Info, MasteringDisplayColorVolume, OffsetUnit,
     ParameterError, ParameterErrorKind, PixelDimensions, ScaledFloat, SourceChromaticities, Unit,
+    MAX_IMAGE_DIMENSION,
 };
 use crate::text_metadata::{decode_iso_8859_1, ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
 use crate::traits::ReadBytesExt;
@@ -1842,11 +1843,7 @@ impl StreamingDecoder {
         let mut buf = &self.current_chunk.raw_bytes[..];
         let width = buf.read_be()?;
         let height = buf.read_be()?;
-        if width == 0 || height == 0 {
-            return Err(DecodingError::Format(
-                FormatErrorInner::InvalidDimensions.into(),
-            ));
-        }
+        validate_ihdr_dimensions(width, height)?;
         let bit_depth = buf.read_be()?;
         let bit_depth = match BitDepth::from_u8(bit_depth) {
             Some(bits) => bits,
@@ -2095,6 +2092,16 @@ impl Info<'_> {
     }
 }
 
+fn validate_ihdr_dimensions(width: u32, height: u32) -> Result<(), DecodingError> {
+    let valid_dimensions = 1..=MAX_IMAGE_DIMENSION;
+    if !valid_dimensions.contains(&width) || !valid_dimensions.contains(&height) {
+        return Err(DecodingError::Format(
+            FormatErrorInner::InvalidDimensions.into(),
+        ));
+    }
+    Ok(())
+}
+
 impl Default for StreamingDecoder {
     fn default() -> Self {
         Self::new()
@@ -2105,6 +2112,7 @@ impl Default for StreamingDecoder {
 mod tests {
     use super::ScaledFloat;
     use super::SourceChromaticities;
+    use super::{validate_ihdr_dimensions, FormatError, FormatErrorInner, MAX_IMAGE_DIMENSION};
     use crate::chunk::ChunkType;
     use crate::test_utils::*;
     use crate::{
@@ -2121,6 +2129,19 @@ mod tests {
     use std::io::Cursor;
     use std::io::{BufReader, ErrorKind, Read, Write};
     use std::rc::Rc;
+
+    #[test]
+    fn rejects_out_of_range_ihdr_dimensions() {
+        let oversized = MAX_IMAGE_DIMENSION + 1;
+        for (width, height) in [(0, 1), (1, 0), (oversized, 1), (1, oversized)] {
+            assert!(matches!(
+                validate_ihdr_dimensions(width, height),
+                Err(DecodingError::Format(FormatError {
+                    inner: FormatErrorInner::InvalidDimensions
+                }))
+            ));
+        }
+    }
 
     #[test]
     fn image_gamma() -> Result<(), ()> {

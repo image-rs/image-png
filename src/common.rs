@@ -6,6 +6,9 @@ use crate::{chunk, chunk::ChunkType, encoder};
 use io::Write;
 use std::{borrow::Cow, fmt, io};
 
+// PNG limits four-byte unsigned integers to 31 bits.
+pub(crate) const MAX_IMAGE_DIMENSION: u32 = i32::MAX as u32;
+
 /// Describes how a pixel is encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
